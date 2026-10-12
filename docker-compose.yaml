@@ -1,0 +1,76 @@
+services:
+  firewall:
+    build: ./containers/firewall-router
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 16    # only 'sleep' runs
+    mem_limit: 32m
+    networks:
+      isolated:
+        aliases: [gateway]
+      uplink: {}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nft list table inet egress >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
+
+  gateway:
+    # The local developer places their allowed-domains.txt file in this directory.
+    build: ./containers/network-gateway
+    network_mode: "service:firewall"
+    depends_on:
+      firewall:
+        condition: service_healthy
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m     # squid with caching off
+    logging:
+      options:
+        max-size: 10m   # the access log goes to stdout
+    restart: unless-stopped
+    volumes:
+      - ${WORKSPACE}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
+
+  dev:
+    # The local developer places their Dockerfile in this directory.
+    # It should have the `containers/dev-env/Dockerfile` built image
+    # as its parent.
+    build: .
+    # Set by run-container.sh: the name you connect to with `ssh`, and that the
+    # host connects to with `docker exec`.
+    container_name: ${CONTAINER_NAME}
+    networks: [isolated]
+    environment:
+      HTTP_PROXY: http://gateway:3128
+      HTTPS_PROXY: http://gateway:3128
+      http_proxy: http://gateway:3128
+      https_proxy: http://gateway:3128
+      NO_PROXY: ""
+      no_proxy: ""
+    depends_on:
+      - gateway
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 4096    # stops fork bombs
+    mem_limit: 8g       # mem + cpu limit: set to taste.
+    cpus: 4             
+    memswap_limit: 8g   # same as mem_limit, so no extra swap on top of it.
+    logging:
+      options:
+        max-size: 10m   # container logs otherwise grow without bound.
+    volumes:
+      - ${WORKSPACE}:/workspace
+    # Should also put some file size limits on things like tmpfs.
+networks:
+  isolated:
+    # The subnet is assigned per environment; the firewall finds it at startup.
+    internal: true
+  uplink:
+    driver: bridge

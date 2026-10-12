@@ -1,0 +1,16 @@
+[package]
+name = "surf-scoter-env-launcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2"
+
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+[[bin]]
+name = "broker"
+path = "src/broker.rs"

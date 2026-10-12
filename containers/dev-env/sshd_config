@@ -1,0 +1,35 @@
+Port 22022
+ListenAddress 127.0.0.1
+
+HostKey /home/ubuntu/.config/sshd/ssh_host_ed25519_key
+PidFile none
+
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+
+AuthorizedKeysFile /home/ubuntu/.ssh/authorized_keys
+
+UsePAM no
+PermitRootLogin no
+AllowUsers ubuntu
+
+# SSH sessions start with a fresh environment rather than the container's, so
+# the proxy settings from docker-compose.yaml have to be set here too.
+SetEnv HTTP_PROXY=http://gateway:3128 HTTPS_PROXY=http://gateway:3128 http_proxy=http://gateway:3128 https_proxy=http://gateway:3128
+
+Subsystem sftp internal-sftp
+
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+AllowStreamLocalForwarding no
+PermitListen none
+
+# JetBrains Gateway may require TCP forwarding.
+AllowTcpForwarding yes
+GatewayPorts no
+# VS Code will need 'remote.autoForwardPorts: false'
+
+LogLevel VERBOSE

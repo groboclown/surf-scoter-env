@@ -1,0 +1,53 @@
+# IPv4: special-purpose and non-public destinations
+#   0.0.0.0/8       Current-network / special-use addresses.  Not normal public destinations.
+#   10.0.0.0/8      Prevent access to internal networks
+#   172.16.0.0/12   Prevent access to internal networks (RFC 1918)
+#   192.168.0.0/16  Prevent access to internal networks (home, office, and Docker-adjacent)
+#   100.64.0.0/10   Prevent access to carrier-grade NAT and overlay networks (RFC 6598)
+#   127.0.0.0/8     Prevent access to services running locally in the proxy's network namespace (loopback)
+#   169.254.0.0/16  Protect against access to link-local services, including cloud metadata endpoints.
+#   198.18.0.0/15   Prevent connections to special-purpose testing networks (RFC 2544)
+#   224.0.0.0/4     Not appropriate as destinations for ordinary HTTP CONNECT (IPv4 multicast)
+#   240.0.0.0/4     Prevent connections to nonstandard destination addresses (reserved for future use)
+#   192.0.0.0/24    IETF protocol assignments
+#   192.0.2.0/24    TEST-NET-1 documentation
+#   192.88.99.0/24  Former 6to4 relay anycast range
+#   198.51.100.0/24 TEST-NET-2 documentation
+#   203.0.113.0/24  TEST-NET-3 documentation
+#   192.0.0.0/29    Subset of the IETF protocol assignment range, already covered by /24
+#
+# On top of that, it blocks local IPv6 addresses.  While the firewall container blocks IPv6, if that becomes
+# unblocked, then that rule will help enforce additional protections.
+#   ::1/128         Prevent access to services in the proxy's own network namespace (IPv6 loopback)
+#   fc00::/7        IPv6 equivalent in purpose to private addressing (RFC 4193)
+#   fe80::/10       Prevent access to local-link services and infrastructure
+#   ::/128          Unspecified address (used for server listening, equivalent to 0.0.0.0)
+#   ff00::/8        IPv6 multicast
+#   2001:db8::/32   Documentation addresses
+#   2001::/32       Teredo-related special-purpose addressing
+#   64:ff9b:1::/48  Local-use IPv4/IPv6 translation prefix
+
+
+0.0.0.0/8
+10.0.0.0/8
+100.64.0.0/10
+127.0.0.0/8
+169.254.0.0/16
+172.16.0.0/12
+192.0.0.0/24
+192.0.2.0/24
+192.88.99.0/24
+192.168.0.0/16
+198.18.0.0/15
+198.51.100.0/24
+203.0.113.0/24
+224.0.0.0/4
+240.0.0.0/4
+
+# IPv6
+::/128
+::1/128
+fc00::/7
+fe80::/10
+ff00::/8
+2001:db8::/32
