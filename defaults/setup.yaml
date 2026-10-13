@@ -17,6 +17,7 @@ docker:
         exec: docker
     runs:
         # How scoter-host starts the broker inside the dev container.
+        # Note: adding a `-t` (terminal) will corrupt the binary wire protocol.
         broker: ${exec} exec -i {x:container} {x:broker}
 
 # The configuration loader will alter the "scoter" section to match the
@@ -35,7 +36,7 @@ scoter:
     #    user-dir: set to the user's scoter configuration directory.
     #    cwd: set to the directory the tool ran in.
     path-lists:
-        # Project
+        # Where to find the project file.
         project-file-search:
             - ${scoter:cwd}/.surf-scoter.yaml
             - ${scoter:cwd}/.surf-scoter.yml
@@ -45,6 +46,7 @@ scoter:
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         dev-containers-search:
             - ${scoter:project-dir}
+            - ${scoter:project-dir}/containers
             - ${scoter:project-dir}/.surf-scoter
             - ${scoter:project-dir}/.surf-scoter/containers
             - ${scoter:distribution-dir}/containers

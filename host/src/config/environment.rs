@@ -31,9 +31,13 @@
 //!
 //! `set` and `default` values can refer to the system configuration as
 //! `${section:key}`: its `paths`, `programs` (the program found) and
-//! `values`.  `$${` stands for `${`.
+//! `values`.  `$${` stands for `${`.  These are expanded when the
+//! configuration is loaded (`EnvPlan::resolve`), so the universal
+//! configuration file has them expanded.
 //!
-//! `@NAME@` is the host's `NAME` environment variable (on Windows, matched
+//! `@NAME@` is left until the program running the commands expands it with
+//! its own environment (`EnvPlan::expand_host`): it's that program's `NAME`
+//! environment variable (on Windows, matched
 //! without regard to case, as Windows does).  When the host doesn't have it,
 //! it's the system configuration's `host` section `NAME` key (matched
 //! exactly), if there is one, and otherwise empty.  `NAME` is letters, digits,
@@ -42,7 +46,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::pattern::glob_matches;
 use super::system::SystemConfig;
@@ -118,7 +122,7 @@ fn check_name(name: &str) -> Result<(), String> {
 
 /// `env` blocks worked out: values expanded, and a command's block added to
 /// the project's.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct EnvPlan {
     pub allow: Vec<String>,
     pub drop: Vec<String>,
@@ -128,30 +132,19 @@ pub struct EnvPlan {
 }
 
 impl EnvPlan {
-    /// `rules` with their values expanded against `system`.  Problems are
-    /// (key, message), with keys under `key`.
+    /// `rules` with their `${section:key}` references expanded against
+    /// `system`.  `@NAME@` is left for `expand_host`, by the program that
+    /// runs the commands.  Problems are (key, message), with keys under
+    /// `key`.
     pub fn resolve(
         rules: &EnvRules,
         system: &SystemConfig,
         key: &str,
     ) -> Result<Self, Vec<(String, String)>> {
         let mut problems = Vec::new();
-        let mut expand_all = |group: &str, values: &BTreeMap<String, String>| {
-            let mut expanded = BTreeMap::new();
-            for (name, value) in values {
-                match expand(value, system) {
-                    Ok(value) => {
-                        expanded.insert(name.clone(), value);
-                    }
-                    Err(message) => {
-                        problems.push((child_key(key, &child_key(group, name)), message))
-                    }
-                }
-            }
-            expanded
-        };
-        let set = expand_all("set", &rules.set);
-        let default = expand_all("default", &rules.default);
+        let expand = |text: &str| expand_references(text, system);
+        let set = expand_each(&rules.set, key, "set", &mut problems, expand);
+        let default = expand_each(&rules.default, key, "default", &mut problems, expand);
         if !problems.is_empty() {
             return Err(problems);
         }
@@ -161,6 +154,41 @@ impl EnvPlan {
             error: rules.error.clone(),
             set,
             default,
+        })
+    }
+
+    /// The plan `rules` already are, as `host-brokered` writes them: patterns
+    /// and values used as they are, with `@NAME@` still to be expanded.
+    pub fn as_written(rules: &EnvRules) -> Self {
+        EnvPlan {
+            allow: rules.allow.clone(),
+            drop: rules.drop.clone(),
+            error: rules.error.clone(),
+            set: rules.set.clone(),
+            default: rules.default.clone(),
+        }
+    }
+
+    /// This plan with its `@NAME@` references replaced, using the
+    /// environment of the program running the commands (see `SystemConfig`'s
+    /// `Env`), and `@@` made `@`.  Problems are (key, message), with keys
+    /// under `key`.
+    pub fn expand_host(
+        &self,
+        system: &SystemConfig,
+        key: &str,
+    ) -> Result<Self, Vec<(String, String)>> {
+        let mut problems = Vec::new();
+        let expand = |text: &str| expand_host(text, system);
+        let set = expand_each(&self.set, key, "set", &mut problems, expand);
+        let default = expand_each(&self.default, key, "default", &mut problems, expand);
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        Ok(EnvPlan {
+            set,
+            default,
+            ..self.clone()
         })
     }
 
@@ -201,28 +229,37 @@ impl EnvPlan {
     }
 }
 
-/// `text` with its `${section:key}` and `@NAME@` references replaced.
-fn expand(text: &str, system: &SystemConfig) -> Result<String, String> {
+/// `values` with `expand` applied to each; problems are added with keys
+/// under `key`'s `group`.
+fn expand_each(
+    values: &BTreeMap<String, String>,
+    key: &str,
+    group: &str,
+    problems: &mut Vec<(String, String)>,
+    expand: impl Fn(&str) -> Result<String, String>,
+) -> BTreeMap<String, String> {
+    let mut expanded = BTreeMap::new();
+    for (name, value) in values {
+        match expand(value) {
+            Ok(value) => {
+                expanded.insert(name.clone(), value);
+            }
+            Err(message) => problems.push((child_key(key, &child_key(group, name)), message)),
+        }
+    }
+    expanded
+}
+
+/// `text` with its `${section:key}` references replaced.  `@NAME@` and
+/// `@@` are kept for `expand_host`, and an `@` in a replaced value is
+/// written as `@@`, so it stays as it is.
+fn expand_references(text: &str, system: &SystemConfig) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = text;
-    while let Some(at) = rest.find(['$', '@']) {
+    while let Some(at) = rest.find('$') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        if let Some(after) = rest.strip_prefix("@@") {
-            out.push('@');
-            rest = after;
-        } else if let Some(after) = rest.strip_prefix('@') {
-            let name_len = after
-                .find(|c: char| !is_host_name_char(c))
-                .unwrap_or(after.len());
-            if name_len > 0 && after[name_len..].starts_with('@') {
-                out.push_str(&host_value(&after[..name_len], system)?);
-                rest = &after[name_len + 1..];
-            } else {
-                out.push('@');
-                rest = after;
-            }
-        } else if let Some(after) = rest.strip_prefix("$${") {
+        if let Some(after) = rest.strip_prefix("$${") {
             out.push_str("${");
             rest = after;
         } else if let Some(after) = rest.strip_prefix("${") {
@@ -237,10 +274,37 @@ fn expand(text: &str, system: &SystemConfig) -> Result<String, String> {
                 .ok_or_else(|| {
                     format!("`${{{reference}}}` needs a section, as `${{section:key}}`")
                 })?;
-            out.push_str(&system.scalar_text(section, key)?);
+            out.push_str(&system.scalar_text(section, key)?.replace('@', "@@"));
         } else {
             out.push('$');
             rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// `text` with its `@NAME@` references replaced, and `@@` made `@`.
+fn expand_host(text: &str, system: &SystemConfig) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(after) = after.strip_prefix('@') {
+            out.push('@');
+            rest = after;
+            continue;
+        }
+        let name_len = after
+            .find(|c: char| !is_host_name_char(c))
+            .unwrap_or(after.len());
+        if name_len > 0 && after[name_len..].starts_with('@') {
+            out.push_str(&host_value(&after[..name_len], system)?);
+            rest = &after[name_len + 1..];
+        } else {
+            out.push('@');
+            rest = after;
         }
     }
     out.push_str(rest);
@@ -386,7 +450,7 @@ mod tests {
     fn values_are_expanded() {
         let system = system_with(
             concat!(
-                "a:\n  paths:\n    dir: /opt/a\n  values:\n    n: 3\n    s: text\n",
+                "a:\n  paths:\n    dir: /opt/a\n  values:\n    n: 3\n    s: text\n    at: me@B@x\n",
                 "host:\n  values:\n    FALLBACK: from-setup\n    HOME: from-setup\n",
             ),
             &[("HOME", "/home/me"), ("EMPTY", "")],
@@ -406,13 +470,23 @@ mod tests {
                 "  ESC: $${a:dir} costs $5\n",
                 "  AT: '@@HOME@ and me@example.com, @ @ @'\n",
                 "  BOTH: '@HOME@@EMPTY@/x'\n",
+                "  REF_AT: ${a:at}\n",
             )),
             &system,
             "env",
         )
         .unwrap();
+        // References are expanded; `@NAME@` is left for the program running
+        // the commands, and a reference's `@` is kept from looking like one.
+        assert_eq!(plan.set["HOME"], "@HOME@");
+        assert_eq!(plan.set["AT"], "@@HOME@ and me@example.com, @ @ @");
+        assert_eq!(plan.set["P"], "/opt/a/bin");
+        assert_eq!(plan.set["REF_AT"], "me@@B@@x");
+
+        let plan = plan.expand_host(&system, "env").unwrap();
         let get = |name: &str| plan.set[name].as_str();
         assert_eq!(get("P"), "/opt/a/bin");
+        assert_eq!(get("REF_AT"), "me@B@x");
         assert_eq!(get("N"), "n=3");
         assert_eq!(get("S"), "text");
         // The host's own variable wins over the `host` section.

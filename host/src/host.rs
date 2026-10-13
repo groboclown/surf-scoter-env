@@ -21,8 +21,9 @@ use std::thread::{self, JoinHandle};
 use surf_scoter_env_launcher::comm::broker_host::{self, ProcessId};
 use surf_scoter_env_launcher::comm::client_host::Invocation;
 
+use scoter_host::config;
 use scoter_host::config::project::Commands;
-use scoter_host::config::{self, LoadOptions};
+use scoter_host::config::system::{DEV_CONTAINER_WORKSPACE_DIR, SCOTER_SECTION};
 
 use analyze::Decision;
 use exec::FrameSink;
@@ -32,8 +33,7 @@ const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: scoter-host --config PROJECT.yaml [--user-setup SETUP.yaml] [--distribution-dir DIR] \
-                     --workspace HOST_DIR:CONTAINER_PATH CONTAINER_NAME";
+const USAGE: &str = "Usage: scoter-host --universal UNIVERSAL.json CONTAINER_NAME";
 
 /// Run the host with the command line arguments (without the program name).
 /// Returns the process exit code.
@@ -43,12 +43,8 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         Ok(None) => {
             println!("{USAGE}");
             println!("Runs the broker in the container, and the commands its clients request.");
-            println!("--config gives the project configuration file.");
             println!(
-                "--user-setup gives a system setup file to read first; --distribution-dir, where Surf Scoter is installed."
-            );
-            println!(
-                "--workspace gives the workspace directory on the host and where it's mounted in the container."
+                "--universal gives the universal configuration file from gen-scoter-uc, with the project file and the dev container's workspace directory."
             );
             return EXIT_OK;
         }
@@ -58,20 +54,9 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let workspace = match Workspace::parse(&cli.workspace) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("scoter-host: --workspace: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    let options = LoadOptions {
-        project: Some(cli.config.clone()),
-        user_setup: cli.user_setup.clone(),
-        distribution_dir: cli.distribution_dir.clone(),
-        ..LoadOptions::default()
-    };
-    let config = match config::load_all(&options) {
+    // Only the universal file is read, so this runs with the configuration
+    // its maker saw, even if the files it came from change.
+    let config = match config::load_universal(&cli.universal) {
         Ok(c) => c,
         Err(errors) => {
             for e in &errors.0 {
@@ -80,13 +65,36 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_FAILURE;
         }
     };
-    // Both are there when a project file is given.
-    let (Some(project), Some(dev_container)) = (config.project, config.dev_container) else {
+    let universal = cli.universal.display();
+    // Both are there when there's a project file.
+    let (Some(mut project), Some(dev_container)) = (config.project, config.dev_container) else {
         eprintln!(
-            "scoter-host: {}: the project configuration is incomplete",
-            cli.config.display()
+            "scoter-host: {universal}: has no project configuration file; make it with `gen-scoter-uc --config`"
         );
         return EXIT_FAILURE;
+    };
+    // `@NAME@` values come from this program's environment.
+    if let Err(errors) = config::expand_host_environments(&mut project, &config.system) {
+        for e in &errors.0 {
+            eprintln!("scoter-host: {e}");
+        }
+        return EXIT_FAILURE;
+    }
+    let Some(workspace_dir) = config
+        .system
+        .get_path(SCOTER_SECTION, DEV_CONTAINER_WORKSPACE_DIR)
+    else {
+        eprintln!(
+            "scoter-host: {universal}: has no {DEV_CONTAINER_WORKSPACE_DIR}; make it with `gen-scoter-uc --{DEV_CONTAINER_WORKSPACE_DIR}`"
+        );
+        return EXIT_FAILURE;
+    };
+    let workspace = match Workspace::new(&workspace_dir, &dev_container.env.mounts.workspace) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("scoter-host: {universal}: the workspace: {e}");
+            return EXIT_FAILURE;
+        }
     };
     let broker = container::broker_argv(
         &config.system,
@@ -142,21 +150,15 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Cli {
-    config: PathBuf,
-    user_setup: Option<PathBuf>,
-    distribution_dir: Option<PathBuf>,
-    /// `HOST_DIR:CONTAINER_PATH`; checked by `Workspace::parse`.
-    workspace: String,
+    /// The universal configuration file.
+    universal: PathBuf,
     container: String,
 }
 
 /// Parse the arguments.  `Ok(None)` means help was requested.
 /// Options take a value as `--name VALUE` or `--name=VALUE`.
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
-    let mut config: Option<OsString> = None;
-    let mut user_setup: Option<OsString> = None;
-    let mut distribution_dir: Option<OsString> = None;
-    let mut workspace: Option<OsString> = None;
+    let mut universal: Option<OsString> = None;
     let mut container: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -168,10 +170,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
                     None => (s, None),
                 };
                 let slot = match name {
-                    "--config" => &mut config,
-                    "--user-setup" => &mut user_setup,
-                    "--distribution-dir" => &mut distribution_dir,
-                    "--workspace" => &mut workspace,
+                    "--universal" => &mut universal,
                     _ => return Err(format!("unknown option '{s}'")),
                 };
                 let value = match inline {
@@ -197,16 +196,8 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             }
         }
     }
-    let workspace = workspace
-        .ok_or("--workspace is required")?
-        // Container paths and mapped arguments are strings.
-        .into_string()
-        .map_err(|w| format!("--workspace '{}' must be valid UTF-8", w.to_string_lossy()))?;
     Ok(Some(Cli {
-        config: PathBuf::from(config.ok_or("--config is required")?),
-        user_setup: user_setup.map(PathBuf::from),
-        distribution_dir: distribution_dir.map(PathBuf::from),
-        workspace,
+        universal: PathBuf::from(universal.ok_or("--universal is required")?),
         container: container.ok_or("a container name is required")?,
     }))
 }
@@ -415,19 +406,18 @@ impl Read for ChannelReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scoter_host::config::LoadOptions;
     use std::io::Cursor;
+    use std::path::Path;
     use surf_scoter_env_launcher::comm::client_host::{self, Command};
 
     fn os_args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
 
-    fn cli(config: &str, workspace: &str, container: &str) -> Option<Cli> {
+    fn cli(universal: &str, container: &str) -> Option<Cli> {
         Some(Cli {
-            config: PathBuf::from(config),
-            user_setup: None,
-            distribution_dir: None,
-            workspace: workspace.to_string(),
+            universal: PathBuf::from(universal),
             container: container.to_string(),
         })
     }
@@ -436,116 +426,58 @@ mod tests {
 
     #[test]
     fn args_valid() {
-        let expected = cli("h.yaml", "/ws:/workspace", "dev");
         assert_eq!(
-            parse_args(os_args(&[
-                "--config",
-                "h.yaml",
-                "--workspace",
-                "/ws:/workspace",
-                "dev"
-            ])),
-            Ok(expected)
+            parse_args(os_args(&["--universal", "u.json", "dev"])),
+            Ok(cli("u.json", "dev"))
         );
         assert_eq!(
-            parse_args(os_args(&[
-                "dev",
-                "--workspace=/ws:/workspace",
-                "--config",
-                "h.yaml"
-            ])),
-            Ok(cli("h.yaml", "/ws:/workspace", "dev")),
-        );
-        assert_eq!(
-            parse_args(os_args(&[
-                "--config=/etc/h.yaml",
-                "--workspace",
-                "C:\\ws:/w",
-                "dev"
-            ])),
-            Ok(cli("/etc/h.yaml", "C:\\ws:/w", "dev")),
+            parse_args(os_args(&["dev", "--universal=/tmp/u.json"])),
+            Ok(cli("/tmp/u.json", "dev")),
         );
         // Only the first '=' separates the value.
         assert_eq!(
-            parse_args(os_args(&[
-                "--config=a=b.yaml",
-                "--workspace=/x=y:/w",
-                "dev"
-            ])),
-            Ok(cli("a=b.yaml", "/x=y:/w", "dev")),
-        );
-    }
-
-    #[test]
-    fn args_setup_locations() {
-        let parsed = parse_args(os_args(&[
-            "--user-setup",
-            "/s.yaml",
-            "--config=h.yaml",
-            "--distribution-dir=/opt/scoter",
-            "--workspace",
-            "/ws:/workspace",
-            "dev",
-        ]));
-        assert_eq!(
-            parsed,
-            Ok(Some(Cli {
-                user_setup: Some(PathBuf::from("/s.yaml")),
-                distribution_dir: Some(PathBuf::from("/opt/scoter")),
-                ..cli("h.yaml", "/ws:/workspace", "dev").unwrap()
-            })),
-        );
-        let err = |args: &[&str]| parse_args(os_args(args)).unwrap_err();
-        assert_eq!(err(&["dev", "--user-setup"]), "--user-setup needs a value");
-        assert_eq!(
-            err(&["--distribution-dir=", "dev"]),
-            "--distribution-dir needs a value"
-        );
-        assert_eq!(
-            err(&["--user-setup", "a", "--user-setup", "b", "dev"]),
-            "--user-setup given more than once"
+            parse_args(os_args(&["--universal=a=b.json", "dev"])),
+            Ok(cli("a=b.json", "dev")),
         );
     }
 
     #[test]
     fn args_help() {
         assert_eq!(parse_args(os_args(&["-h"])), Ok(None));
-        assert_eq!(parse_args(os_args(&["--config", "x", "--help"])), Ok(None));
+        assert_eq!(
+            parse_args(os_args(&["--universal", "x", "--help"])),
+            Ok(None)
+        );
     }
 
     #[test]
     fn args_errors() {
         let err = |args: &[&str]| parse_args(os_args(args)).unwrap_err();
-        assert_eq!(err(&[]), "--workspace is required");
+        assert_eq!(err(&[]), "--universal is required");
+        assert_eq!(err(&["dev"]), "--universal is required");
         assert_eq!(
-            err(&["--workspace", "/w:/w", "dev"]),
-            "--config is required"
-        );
-        assert_eq!(
-            err(&["--config", "h.yaml", "dev"]),
-            "--workspace is required"
-        );
-        assert_eq!(
-            err(&["--config", "h.yaml", "--workspace", "/w:/w"]),
+            err(&["--universal", "u.json"]),
             "a container name is required"
         );
-        assert_eq!(err(&["dev", "--config"]), "--config needs a value");
-        assert_eq!(err(&["dev", "--workspace"]), "--workspace needs a value");
-        assert_eq!(err(&["--config=", "dev"]), "--config needs a value");
-        assert_eq!(err(&["--workspace=", "dev"]), "--workspace needs a value");
+        assert_eq!(err(&["dev", "--universal"]), "--universal needs a value");
+        assert_eq!(err(&["--universal=", "dev"]), "--universal needs a value");
         assert_eq!(
-            err(&["--config", "a", "--config", "b", "dev"]),
-            "--config given more than once"
+            err(&["--universal", "a", "--universal", "b", "dev"]),
+            "--universal given more than once"
         );
         assert_eq!(
-            err(&["--workspace", "/a:/a", "--workspace=/b:/b", "dev"]),
-            "--workspace given more than once"
-        );
-        assert_eq!(
-            err(&["--config", "h.yaml", "--workspace", "/w:/w", "dev", "other"]),
+            err(&["--universal", "u.json", "dev", "other"]),
             "unexpected argument 'other'"
         );
-        assert_eq!(err(&["--verbose", "dev"]), "unknown option '--verbose'");
+        // The configuration only comes through the universal file now.
+        for old in [
+            "--config",
+            "--user-setup",
+            "--distribution-dir",
+            "--workspace",
+        ] {
+            assert_eq!(err(&[old, "x", "dev"]), format!("unknown option '{old}'"));
+        }
         assert_eq!(err(&["--verbose=1", "dev"]), "unknown option '--verbose=1'");
     }
 
@@ -554,120 +486,120 @@ mod tests {
     fn args_non_utf8() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'd', 0xff]);
-        let with = |extra: Vec<OsString>| {
-            let mut args = os_args(&["--config", "h.yaml"]);
-            args.extend(extra);
-            parse_args(args)
-        };
-        let err = with(vec!["--workspace".into(), "/w:/w".into(), bad.clone()]).unwrap_err();
+        let err = parse_args(vec!["--universal".into(), "u.json".into(), bad.clone()]).unwrap_err();
         assert!(err.starts_with("invalid container name"), "{err}");
-        let err = with(vec!["--workspace".into(), bad.clone(), "dev".into()]).unwrap_err();
-        assert!(err.starts_with("--workspace 'd"), "{err}");
-        assert!(err.ends_with("must be valid UTF-8"), "{err}");
-        // The configuration path doesn't need to be UTF-8.
-        let args = vec![
-            "--config".into(),
-            bad.clone(),
-            "--workspace".into(),
-            "/w:/w".into(),
-            "dev".into(),
-        ];
+        // The universal file's path doesn't need to be UTF-8.
+        let args = vec!["--universal".into(), bad.clone(), "dev".into()];
         assert_eq!(
-            parse_args(args).unwrap().unwrap().config,
+            parse_args(args).unwrap().unwrap().universal,
             PathBuf::from(bad)
         );
     }
 
-    /// A `--workspace` value whose host side exists.
-    fn workspace_arg() -> String {
-        format!("{}:/workspace", std::env::temp_dir().display())
+    // ---- run ----
+
+    /// A project with a dev container, and a system setup using `/bin/sh`
+    /// as the container tool, in `dir`.
+    struct TestProject {
+        project: PathBuf,
+        setup: PathBuf,
+    }
+
+    impl TestProject {
+        fn new(dir: &Path) -> Self {
+            let write = |name: &str, text: &str| {
+                let path = dir.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, text).unwrap();
+                path
+            };
+            write("env/Dockerfile", "FROM scratch\n");
+            write(
+                "env/dev-env.yaml",
+                "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+            );
+            TestProject {
+                project: write("scoter.yaml", "container:\n  dev-container-path: env\n"),
+                setup: write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n"),
+            }
+        }
+
+        /// The universal configuration file, as `gen-scoter-uc` would write it.
+        fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
+            let options = LoadOptions {
+                project: with_project.then(|| self.project.clone()),
+                user_setup: Some(self.setup.clone()),
+                dev_container_workspace_dir: workspace.map(Path::to_path_buf),
+                no_setup_search: true,
+                ..LoadOptions::default()
+            };
+            let config = config::load_all(&options).unwrap();
+            let json =
+                scoter_host::universal::to_json(&scoter_host::universal::build(&config).unwrap());
+            let path = self.project.with_file_name(format!(
+                "universal-{with_project}-{}.json",
+                workspace.is_some()
+            ));
+            std::fs::write(&path, json).unwrap();
+            path
+        }
+    }
+
+    fn universal_args(universal: &Path, container: &str) -> Vec<OsString> {
+        vec!["--universal".into(), universal.into(), container.into()]
     }
 
     #[test]
-    fn run_usage_and_config_errors() {
-        let ws = workspace_arg();
+    fn run_usage_and_missing_file() {
         assert_eq!(run(os_args(&["--help"])), EXIT_OK);
         assert_eq!(run(os_args(&["dev"])), EXIT_USAGE);
         assert_eq!(
-            run(os_args(&[
-                "--config",
-                "/nonexistent/host.yaml",
-                "--workspace",
-                &ws,
-                "dev"
-            ])),
+            run(os_args(&["--universal", "/nonexistent/u.json", "dev"])),
             EXIT_FAILURE
         );
     }
 
     #[test]
-    fn run_rejects_bad_workspace() {
-        let args = |ws: &str| {
-            os_args(&[
-                "--config",
-                "/nonexistent/host.yaml",
-                "--workspace",
-                ws,
-                "dev",
-            ])
-        };
-        // Checked before the configuration is read.
-        assert_eq!(run(args("/nonexistent/scoter-ws:/workspace")), EXIT_USAGE);
+    fn run_needs_the_project_and_workspace() {
+        let dir = exec::TempDir::new().unwrap();
+        let test = TestProject::new(dir.path());
+        let ws = std::env::temp_dir();
         assert_eq!(
-            run(args(&format!(
-                "{}:relative",
-                std::env::temp_dir().display()
-            ))),
-            EXIT_USAGE
+            run(universal_args(&test.universal(false, Some(&ws)), "dev")),
+            EXIT_FAILURE
         );
-        assert_eq!(run(args("no-colon")), EXIT_USAGE);
+        assert_eq!(
+            run(universal_args(&test.universal(true, None), "dev")),
+            EXIT_FAILURE
+        );
+        // The workspace directory must exist.
+        assert_eq!(
+            run(universal_args(
+                &test.universal(true, Some(&dir.path().join("missing"))),
+                "dev"
+            )),
+            EXIT_FAILURE
+        );
     }
 
     #[test]
     fn run_rejects_bad_container_name() {
         let dir = exec::TempDir::new().unwrap();
-        let write = |name: &str, text: &str| {
-            let path = dir.path().join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, text).unwrap();
-            path
-        };
-        write("env/Dockerfile", "FROM scratch\n");
-        write(
-            "env/dev-env.yaml",
-            "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+        let test = TestProject::new(dir.path());
+        let universal = test.universal(true, Some(&std::env::temp_dir()));
+        assert_eq!(
+            run(universal_args(&universal, "--privileged=x")),
+            EXIT_USAGE
         );
-        let project = write("scoter.yaml", "container:\n  dev-container-path: env\n");
-        let setup = write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n");
-        let ws = workspace_arg();
-        let args = |name: &str| {
-            let mut args: Vec<OsString> = vec![
-                "--config".into(),
-                project.clone().into(),
-                "--user-setup".into(),
-                setup.clone().into(),
-            ];
-            args.extend(["--workspace".into(), ws.clone().into(), name.into()]);
-            args
-        };
-        assert_eq!(run(args("--privileged=x")), EXIT_USAGE);
-        assert_eq!(run(args("bad name")), EXIT_FAILURE);
+        assert_eq!(run(universal_args(&universal, "bad name")), EXIT_FAILURE);
     }
 
     #[test]
-    fn run_reports_configuration_errors() {
+    fn run_reports_a_bad_universal_file() {
         let dir = exec::TempDir::new().unwrap();
-        let project = dir.path().join("scoter.yaml");
-        std::fs::write(&project, "container:\n  command: [docker]\n").unwrap();
-        let ws = workspace_arg();
-        let args = vec![
-            OsString::from("--config"),
-            project.into(),
-            "--workspace".into(),
-            ws.into(),
-            "dev".into(),
-        ];
-        assert_eq!(run(args), EXIT_FAILURE);
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{\"resolved\": {}}").unwrap();
+        assert_eq!(run(universal_args(&bad, "dev")), EXIT_FAILURE);
     }
 
     // ---- ChannelReader ----

@@ -3,6 +3,7 @@
 //! `docs/contributors/universal-configuration-file.md`.
 //!
 //! Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR]
+//!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--user-setup SETUP.yaml] [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
 //!                      [--output FILE]
@@ -24,14 +25,15 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use scoter_host::config::{self, LoadOptions};
+use scoter_host::config::{self, LoadOptions, read};
 use scoter_host::universal;
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] [--user-setup SETUP.yaml] \
+const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] \
+                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
                      [--output FILE]";
 
@@ -50,6 +52,9 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             println!("--config gives the project configuration file, if any.");
             println!(
                 "--project-dir gives the project directory, in place of the project file's directory."
+            );
+            println!(
+                "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
             );
             println!(
                 "--user-setup gives a system setup file to read first; --distribution-dir, where Surf Scoter is installed."
@@ -80,6 +85,14 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         }
     };
     let json = universal::to_json(&universal);
+    // A file the tools would refuse to read is no use.
+    if json.len() as u64 > read::MAX_UNIVERSAL_FILE_SIZE {
+        eprintln!(
+            "gen-scoter-uc: cannot write the configuration: {}",
+            read::size_error(read::MAX_UNIVERSAL_FILE_SIZE)
+        );
+        return EXIT_FAILURE;
+    }
     let written = match &cli.output {
         Some(path) => fs::write(path, &json).map_err(|e| format!("{}: {e}", path.display())),
         None => {
@@ -110,6 +123,8 @@ struct Cli {
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
     let mut config: Option<OsString> = None;
     let mut project_dir: Option<OsString> = None;
+    let mut dev_container_workspace_dir: Option<OsString> = None;
+    let mut dev_container_settings_dir: Option<OsString> = None;
     let mut user_setup: Option<OsString> = None;
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
@@ -137,6 +152,8 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
         let slot = match name {
             "--config" => &mut config,
             "--project-dir" => &mut project_dir,
+            "--dev-container-workspace-dir" => &mut dev_container_workspace_dir,
+            "--dev-container-settings-dir" => &mut dev_container_settings_dir,
             "--user-setup" => &mut user_setup,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
@@ -159,6 +176,8 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
         options: LoadOptions {
             project: config.map(PathBuf::from),
             project_dir: project_dir.map(PathBuf::from),
+            dev_container_workspace_dir: dev_container_workspace_dir.map(PathBuf::from),
+            dev_container_settings_dir: dev_container_settings_dir.map(PathBuf::from),
             user_setup: user_setup.map(PathBuf::from),
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
@@ -199,6 +218,9 @@ mod tests {
             "--config",
             "p.yaml",
             "--project-dir=proj",
+            "--dev-container-workspace-dir",
+            "/ws",
+            "--dev-container-settings-dir=settings",
             "--user-setup=s.yaml",
             "--distribution-dir",
             "/opt/scoter",
@@ -212,6 +234,8 @@ mod tests {
                 options: LoadOptions {
                     project: Some(PathBuf::from("p.yaml")),
                     project_dir: Some(PathBuf::from("proj")),
+                    dev_container_workspace_dir: Some(PathBuf::from("/ws")),
+                    dev_container_settings_dir: Some(PathBuf::from("settings")),
                     user_setup: Some(PathBuf::from("s.yaml")),
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),

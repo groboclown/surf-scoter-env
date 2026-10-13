@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
-use crate::config::system::{self, ScalarValue, SectionDefaults, SetupRecord};
+use crate::config::system::{self, LoadedFrom, ScalarValue, SectionDefaults, SetupRecord};
 use crate::config::{ConfigError, ConfigErrors, FullConfig, child_key, index_key};
 
 /// The universal configuration file's contents.
@@ -35,13 +35,20 @@ pub struct Universal {
     pub active_config_locations: ActiveConfigLocations,
     /// Every section, expanded.
     pub resolved: BTreeMap<String, UniversalSection>,
+    /// The project configuration file, as written.
+    pub project: Option<Json>,
     /// The project's `commands`, with `program` set to the executable found
-    /// on the host, or `null`.
+    /// on the host, or `null`, and `env` set to the command's whole
+    /// environment plan: the project's `env` with the command's added, its
+    /// `${section:key}` references expanded.  `@NAME@` is left as written,
+    /// as it's the environment of the program running the commands.
     pub host_brokered: Vec<Json>,
     /// The dev container's `dev-env.yaml`.
     pub dev_container: Option<Json>,
     /// The system setup as read.
     pub setup: SetupRecord,
+    /// A history of the runs' inputs.
+    pub loaded_from: LoadedFrom,
 }
 
 /// Where the configuration in effect came from: the `scoter` section's
@@ -58,6 +65,12 @@ pub struct ActiveConfigLocations {
     /// The project's dev container directory.
     #[serde(default)]
     pub dev_container_path: Option<String>,
+    /// The dev container's mounts: the project workspace, and the settings
+    /// directory.
+    #[serde(default)]
+    pub dev_container_workspace_dir: Option<String>,
+    #[serde(default)]
+    pub dev_container_settings_dir: Option<String>,
     /// The user's setup file found, and the user directory it's in.
     #[serde(default)]
     pub user_setup_file: Option<String>,
@@ -151,10 +164,16 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                 .find_program(program)
                 .map(|p| Json::String(path_text(&p)));
             entry.insert("program".to_string(), found.unwrap_or(Json::Null));
+            let env = serde_json::to_value(&rule.env_plan).expect("only text is stored");
+            entry.insert("env".to_string(), env);
             host_brokered.push(Json::Object(entry));
         }
     }
 
+    let project = config
+        .project
+        .as_ref()
+        .map(|p| yaml_to_json(&p.raw, &p.path, "", &mut errors));
     let dev_container = config
         .dev_container
         .as_ref()
@@ -169,22 +188,27 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             project_config: location(system::PROJECT_CONFIG),
             project_dir: location(system::PROJECT_DIR),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
+            dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
+            dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
             user_setup_file: location(system::USER_SETUP_FILE),
             user_dir: location(system::USER_DIR),
             distribution_dir: location(system::DISTRIBUTION_DIR),
             cwd: location(system::CWD),
         },
         resolved,
+        project,
         host_brokered,
         dev_container,
         setup: system.setup_record().clone(),
+        loaded_from: system.loaded_from().clone(),
     })
 }
 
-/// The universal configuration as pretty-printed JSON, ending with a newline.
+/// The universal configuration as compact JSON, ending with a newline.
+/// (Compact, to stay well within `MAX_UNIVERSAL_FILE_SIZE`; a tool such as
+/// `jq` lays it out for reading.)
 pub fn to_json(universal: &Universal) -> String {
-    let mut text =
-        serde_json::to_string_pretty(universal).expect("only JSON-ready values are stored");
+    let mut text = serde_json::to_string(universal).expect("only JSON-ready values are stored");
     text.push('\n');
     text
 }
@@ -307,8 +331,11 @@ mod tests {
             &dir,
             Some(concat!(
                 "container:\n  dev-container-path: ./env\n",
+                "env:\n  allow: [LANG]\n  error: ['SECRET_*']\n  set: {CONF: '${ssh:config-file}', HOME: '@HOME@'}\n",
                 "commands:\n",
                 "  - command: aws\n    args: [s3, ls, {any: {prefix: 's3://b/'}}]\n",
+                "    env:\n      allow: ['AWS_*']\n      drop: [AWS_SESSION_TOKEN]\n",
+                "      default: {AWS_REGION: us-east-1}\n",
                 "  - {command: deploy, program: /nonexistent/deploy, args: []}\n",
             )),
             concat!(
@@ -434,7 +461,7 @@ mod tests {
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
         // The locations are also the `scoter` section's paths.
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 7);
+        assert_eq!(active.len(), 9);
         for (key, value) in active {
             let path = &json["resolved"]["scoter"]["paths"][key];
             if value.is_null() {
@@ -464,6 +491,23 @@ mod tests {
             json["resolved"]["scoter"]["path-lists"]["compose"][1],
             "/etc/compose"
         );
+        // The history of the inputs is its own block.
+        assert_eq!(
+            json["loaded-from"]["project-config"],
+            serde_json::json!([p(&dir.path().join("proj/scoter.yaml"))])
+        );
+        assert_eq!(
+            json["setup"].as_object().unwrap().len(),
+            1,
+            "{}",
+            json["setup"]
+        );
+        // The project file, as written.
+        assert_eq!(json["project"]["container"]["dev-container-path"], "./env");
+        assert_eq!(
+            json["project"]["commands"][1]["program"],
+            "/nonexistent/deploy"
+        );
         assert_eq!(json["host-brokered"][0]["command"], "aws");
         assert_eq!(json["host-brokered"][0]["program"], p(&aws));
         assert_eq!(
@@ -471,6 +515,31 @@ mod tests {
             "s3://b/"
         );
         assert_eq!(json["host-brokered"][1]["program"], Json::Null);
+        // Each command's whole environment, expanded: the project's `env`
+        // with the command's added.
+        assert_eq!(
+            json["host-brokered"][0]["env"],
+            serde_json::json!({
+                "allow": ["LANG", "AWS_*"],
+                "drop": ["AWS_SESSION_TOKEN"],
+                "error": ["SECRET_*"],
+                // `@NAME@` is for the program running the commands.
+                "set": {"CONF": ssh_config, "HOME": "@HOME@"},
+                "default": {"AWS_REGION": "us-east-1"},
+            })
+        );
+        assert_eq!(
+            json["host-brokered"][1]["env"],
+            serde_json::json!({
+                "allow": ["LANG"],
+                "drop": [],
+                "error": ["SECRET_*"],
+                "set": {"CONF": ssh_config, "HOME": "@HOME@"},
+                "default": {},
+            })
+        );
+        // The project file keeps them as written.
+        assert_eq!(json["project"]["env"]["set"]["CONF"], "${ssh:config-file}");
         assert_eq!(
             json["dev-container"]["broker-bin"],
             "/usr/local/bin/scoter-container"

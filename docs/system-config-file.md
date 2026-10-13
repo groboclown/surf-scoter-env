@@ -82,6 +82,8 @@ The `scoter` section is special, in that the tool fills in the `paths` that say 
 * `project-config` - the project configuration file.  Not set without one.
 * `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)).  This is the directory with the project configuration file in it, unless `gen-scoter-uc --project-dir` gives another.  Not set without either.
 * `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers` (see below), so that list can't refer to it.
+* `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
+* `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
 * `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  This is the file the tool found by looking, not the `--user-setup` file.  If the tool didn't find a user setup file, this isn't set.
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
 * `distribution-dir` - the Surf Scoter distribution directory, as described [above](#where-to-find-the-system-configuration-files): `--distribution-dir`, or else the highest priority setup file's `distribution-dir`.  Not set without either.
@@ -93,7 +95,7 @@ All of them are absolute paths.
 
 Like any other key, referring to one of these when it isn't set (say, `${scoter:user-dir}` when your setup file is `~/.config/surf-scoter.setup.yaml`) is an error.
 
-When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), `user-setup-file` and `user-dir` aren't set, unless they come from an earlier run's universal configuration file (`--universal`).  A `--universal` file also brings along its `project-config`, `project-dir` and `distribution-dir`, unless this run gives others.
+When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), `user-setup-file` and `user-dir` aren't set, unless they come from an earlier run's universal configuration file (`--universal`).  A `--universal` file also brings along its `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir` and `distribution-dir`, unless this run gives others.
 
 The rest of the `scoter` section is yours to set.  The tools read its `path-lists: dev-containers` (see [Defining Executables](#defining-executables)).
 

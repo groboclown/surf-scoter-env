@@ -1,10 +1,11 @@
-//! The `--workspace` directory: where it is on the host and in the container.
+//! The workspace directory: where it is on the host and in the container.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The workspace directory, shared between the host and the container.
-/// Given on the command line, not in the configuration file.
+/// The workspace directory, shared between the host and the container: the
+/// universal configuration's `dev-container-workspace-dir`, mounted at the
+/// dev container's `mounts: workspace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workspace {
     /// Canonical path of the directory on the host.
@@ -14,20 +15,15 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    /// Parse `HOST_DIR:CONTAINER_PATH`, split at the last ':' (so a Windows
-    /// drive letter stays with the host directory).  The host directory must exist.
-    pub(crate) fn parse(spec: &str) -> Result<Self, String> {
-        let Some((host, container)) = spec.rsplit_once(':') else {
-            return Err(format!("'{spec}' must be HOST_DIR:CONTAINER_PATH"));
-        };
-        if host.is_empty() {
-            return Err(format!("'{spec}' is missing the host directory"));
-        }
+    /// The workspace at `host`, mounted at `container`.  The host directory
+    /// must exist.
+    pub(crate) fn new(host: &Path, container: &str) -> Result<Self, String> {
         let container = normalize_container_path(container)?;
+        let shown = host.display();
         let host_dir =
-            fs::canonicalize(host).map_err(|e| format!("host directory '{host}': {e}"))?;
+            fs::canonicalize(host).map_err(|e| format!("host directory '{shown}': {e}"))?;
         if !host_dir.is_dir() {
-            return Err(format!("host directory '{host}' is not a directory"));
+            return Err(format!("host directory '{shown}' is not a directory"));
         }
         Ok(Workspace {
             host: host_dir,
@@ -63,16 +59,15 @@ mod tests {
         std::env::temp_dir().canonicalize().unwrap()
     }
 
-    fn workspace_error(spec: &str) -> String {
-        Workspace::parse(spec).unwrap_err()
+    fn workspace_error(host: &Path, container: &str) -> String {
+        Workspace::new(host, container).unwrap_err()
     }
 
     #[test]
-    fn workspace_parse() {
+    fn workspace_new() {
         let host = host_dir();
-        let spec = format!("{}:/workspace", host.display());
         assert_eq!(
-            Workspace::parse(&spec),
+            Workspace::new(&host, "/workspace"),
             Ok(Workspace {
                 host: host.clone(),
                 container: "/workspace".to_string()
@@ -83,8 +78,10 @@ mod tests {
     #[test]
     fn workspace_host_is_canonical() {
         let host = host_dir();
-        let spec = format!("{}/./:/workspace", host.display());
-        assert_eq!(Workspace::parse(&spec).unwrap().host, host);
+        assert_eq!(
+            Workspace::new(&host.join("."), "/workspace").unwrap().host,
+            host
+        );
     }
 
     #[test]
@@ -95,9 +92,8 @@ mod tests {
             ("//a/./b//", "/a/b"),
             ("/a", "/a"),
         ] {
-            let spec = format!("{}:{given}", host.display());
             assert_eq!(
-                Workspace::parse(&spec).unwrap().container,
+                Workspace::new(&host, given).unwrap().container,
                 expected,
                 "{given}"
             );
@@ -105,54 +101,28 @@ mod tests {
     }
 
     #[test]
-    fn workspace_splits_at_last_colon() {
-        // A Windows-style host path keeps its drive letter.
-        let err = workspace_error("C:\\ws:/workspace");
-        assert!(err.starts_with("host directory 'C:\\ws'"), "{err}");
-    }
-
-    #[test]
-    fn workspace_syntax_errors() {
-        let host = host_dir().display().to_string();
-        assert_eq!(
-            workspace_error("/workspace"),
-            "'/workspace' must be HOST_DIR:CONTAINER_PATH"
-        );
-        assert_eq!(
-            workspace_error(":/workspace"),
-            "':/workspace' is missing the host directory"
-        );
-        assert_eq!(
-            workspace_error(&format!("{host}:")),
-            "container path '' must be absolute"
-        );
-        assert_eq!(
-            workspace_error(&format!("{host}:workspace")),
-            "container path 'workspace' must be absolute"
-        );
-        assert_eq!(
-            workspace_error(&format!("{host}:/a/../b")),
-            "container path '/a/../b' must not contain '..'"
-        );
-        assert_eq!(
-            workspace_error(&format!("{host}:/")),
-            "the container path can't be '/'"
-        );
-        assert_eq!(
-            workspace_error(&format!("{host}:/./")),
-            "the container path can't be '/'"
-        );
+    fn workspace_container_path_errors() {
+        let host = host_dir();
+        for (given, expected) in [
+            ("", "container path '' must be absolute"),
+            ("workspace", "container path 'workspace' must be absolute"),
+            ("/a/../b", "container path '/a/../b' must not contain '..'"),
+            ("/", "the container path can't be '/'"),
+            ("/./", "the container path can't be '/'"),
+        ] {
+            assert_eq!(workspace_error(&host, given), expected, "{given}");
+        }
     }
 
     #[test]
     fn workspace_host_must_be_existing_directory() {
         assert!(
-            workspace_error("/nonexistent/scoter-ws:/workspace")
+            workspace_error(Path::new("/nonexistent/scoter-ws"), "/workspace")
                 .starts_with("host directory '/nonexistent/scoter-ws': ")
         );
         let file = std::env::temp_dir().join(format!("scoter-host-ws-file-{}", std::process::id()));
         fs::write(&file, b"").unwrap();
-        let err = workspace_error(&format!("{}:/workspace", file.display()));
+        let err = workspace_error(&file, "/workspace");
         fs::remove_file(&file).unwrap();
         assert!(err.ends_with("is not a directory"), "{err}");
     }

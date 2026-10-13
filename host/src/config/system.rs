@@ -58,8 +58,8 @@
 //!
 //! The tool sets the `scoter` section's `paths` that say where the
 //! configuration came from: `project-config`, `project-dir`,
-//! `dev-container-path`, `user-setup-file`, `user-dir`, `distribution-dir`
-//! and `cwd`.  Setup files can set `distribution-dir` (the tool's value, when
+//! `dev-container-path`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`,
+//! `user-dir`, `distribution-dir` and `cwd`.  Setup files can set `distribution-dir` (the tool's value, when
 //! it has one, wins), but none of the others.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -78,16 +78,22 @@ pub const SCOTER_SECTION: &str = "scoter";
 pub const PROJECT_CONFIG: &str = "project-config";
 pub const PROJECT_DIR: &str = "project-dir";
 pub const DEV_CONTAINER_PATH: &str = "dev-container-path";
+/// The project workspace, mounted in the dev container.
+pub const DEV_CONTAINER_WORKSPACE_DIR: &str = "dev-container-workspace-dir";
+/// The settings directory, mounted read-only in the dev container.
+pub const DEV_CONTAINER_SETTINGS_DIR: &str = "dev-container-settings-dir";
 pub const USER_SETUP_FILE: &str = "user-setup-file";
 pub const USER_DIR: &str = "user-dir";
 /// The one a setup file can also set.
 pub const DISTRIBUTION_DIR: &str = "distribution-dir";
 pub const CWD: &str = "cwd";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 6] = [
+const TOOL_ONLY_KEYS: [&str; 8] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
     DEV_CONTAINER_PATH,
+    DEV_CONTAINER_WORKSPACE_DIR,
+    DEV_CONTAINER_SETTINGS_DIR,
     USER_SETUP_FILE,
     USER_DIR,
     CWD,
@@ -248,9 +254,14 @@ pub enum Source {
 pub struct SetupRecord {
     /// Highest priority first.
     pub files: Vec<SetupFileRecord>,
-    // A history of the runs' inputs, most recent first: they're only a record,
-    // and aren't used to work out the configuration.  Duplicates are allowed,
-    // but removed when written.
+}
+
+/// A history of the runs' inputs, most recent first.  They're only a record,
+/// and aren't used to work out the configuration.  Duplicates are allowed,
+/// but removed when written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LoadedFrom {
     /// The user setup files found.
     #[serde(default)]
     pub user_setup_file: Vec<String>,
@@ -265,7 +276,7 @@ pub struct SetupRecord {
     pub project_config: Vec<String>,
 }
 
-impl SetupRecord {
+impl LoadedFrom {
     /// Without duplicates, keeping each value's most recent place.
     fn without_duplicates(mut self) -> Self {
         for list in [
@@ -297,11 +308,12 @@ pub struct SetupInputs {
     pub distribution_dir: Option<String>,
 }
 
-/// Setup already worked out: its record, and the inputs that were in effect
-/// (they aren't in any file).
+/// Setup already worked out: its record, its history, and the inputs that
+/// were in effect (they aren't in any file).
 #[derive(Debug, Clone, Copy)]
 pub struct SetupBase<'a> {
     pub record: &'a SetupRecord,
+    pub loaded_from: &'a LoadedFrom,
     /// The file it came from, for messages.
     pub origin: &'a Path,
     pub inputs: &'a SetupInputs,
@@ -342,6 +354,10 @@ pub struct SetupOptions<'a> {
     pub project_dir: Option<&'a Path>,
     /// The project file in effect: `scoter:project-config`.
     pub project_config: Option<&'a Path>,
+    /// The dev container's mounts: `scoter:dev-container-workspace-dir` and
+    /// `scoter:dev-container-settings-dir`.
+    pub dev_container_workspace_dir: Option<&'a Path>,
+    pub dev_container_settings_dir: Option<&'a Path>,
     /// The project has a dev container, whose directory is set as
     /// `scoter:dev-container-path` once it's found (with
     /// `SystemConfig::set_dev_container_path`).  Until then, references to it
@@ -371,6 +387,8 @@ pub struct SystemConfig {
     project_dir: Option<PathBuf>,
     /// The setup, as read.
     record: SetupRecord,
+    /// The history of the runs' inputs.
+    loaded_from: LoadedFrom,
     /// The tool's own inputs that were in effect.
     inputs: SetupInputs,
 }
@@ -443,6 +461,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     let mut errors = Vec::new();
     let mut base_files = Vec::new();
     let mut record = SetupRecord::default();
+    let mut history = LoadedFrom::default();
     // The tool's inputs: from the base, unless given or found again.
     let mut inputs = SetupInputs::default();
     if let Some(base) = options.base {
@@ -453,15 +472,16 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             }
         }
         record = base.record.clone();
+        history = base.loaded_from.clone();
         inputs = base.inputs.clone();
     }
     let distribution_dir = options.distribution_dir.map(super::absolute);
     if let Some(dir) = &distribution_dir {
         inputs.distribution_dir = Some(path_text(dir));
-        record.distribution_dir.insert(0, path_text(dir));
+        history.distribution_dir.insert(0, path_text(dir));
     }
     if let Some(project) = options.given_project_config {
-        record.project_config.insert(0, path_text(project));
+        history.project_config.insert(0, path_text(project));
     }
 
     let mut found: Vec<(PathBuf, Source)> = Vec::new();
@@ -481,9 +501,9 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             Ok(Some((file, dir))) => {
                 inputs.user_setup_file = Some(path_text(&file));
                 inputs.user_dir = dir.as_deref().map(path_text);
-                record.user_setup_file.insert(0, path_text(&file));
+                history.user_setup_file.insert(0, path_text(&file));
                 if let Some(dir) = &inputs.user_dir {
-                    record.user_dir.insert(0, dir.clone());
+                    history.user_dir.insert(0, dir.clone());
                 }
                 found.push((file, Source::User));
             }
@@ -510,6 +530,14 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     let mut add = |key, value: Option<String>| tool_values.extend(value.map(|v| (key, v)));
     add(PROJECT_CONFIG, options.project_config.map(path_text));
     add(PROJECT_DIR, options.project_dir.map(path_text));
+    add(
+        DEV_CONTAINER_WORKSPACE_DIR,
+        options.dev_container_workspace_dir.map(path_text),
+    );
+    add(
+        DEV_CONTAINER_SETTINGS_DIR,
+        options.dev_container_settings_dir.map(path_text),
+    );
     add(USER_SETUP_FILE, inputs.user_setup_file.clone());
     add(USER_DIR, inputs.user_dir.clone());
     add(DISTRIBUTION_DIR, inputs.distribution_dir.clone());
@@ -553,7 +581,8 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     }
     errors.extend(config.validate(&later));
     record.files = files.iter().map(SetupFile::record).collect();
-    config.record = record.without_duplicates();
+    config.record = record;
+    config.loaded_from = history.without_duplicates();
     config.inputs = inputs;
     if errors.is_empty() {
         Ok(config)
@@ -1019,6 +1048,7 @@ impl SystemConfig {
             env,
             project_dir: project_dir.map(Path::to_path_buf),
             record: SetupRecord::default(),
+            loaded_from: LoadedFrom::default(),
             inputs: SetupInputs::default(),
         }
     }
@@ -1152,6 +1182,11 @@ impl SystemConfig {
     /// The setup as read, to expand again later.
     pub fn setup_record(&self) -> &SetupRecord {
         &self.record
+    }
+
+    /// The history of the runs' inputs.
+    pub fn loaded_from(&self) -> &LoadedFrom {
+        &self.loaded_from
     }
 
     /// The tool's own inputs to the setup that were in effect.
@@ -3000,17 +3035,16 @@ mod tests {
             "dist/setup.yaml",
             "a:\n  paths:\n    x: /dist\n    z: /dist\n",
         );
-        let record = load(
+        let first = load(
             Some(&cli),
             Some(&dir.path().join("dist")),
             None,
             Env::default(),
         )
-        .unwrap()
-        .setup_record()
-        .clone();
+        .unwrap();
+        let record = first.setup_record().clone();
         assert_eq!(
-            record.distribution_dir,
+            first.loaded_from().distribution_dir,
             [dir.path().join("dist").display().to_string()]
         );
 
@@ -3057,10 +3091,18 @@ mod tests {
         distribution_dir: None,
     };
 
-    /// A base with no inputs of its own.
+    const NO_HISTORY: &LoadedFrom = &LoadedFrom {
+        user_setup_file: Vec::new(),
+        user_dir: Vec::new(),
+        distribution_dir: Vec::new(),
+        project_config: Vec::new(),
+    };
+
+    /// A base with no inputs or history of its own.
     fn base<'a>(record: &'a SetupRecord, origin: &'a Path) -> SetupBase<'a> {
         SetupBase {
             record,
+            loaded_from: NO_HISTORY,
             origin,
             inputs: NO_INPUTS,
         }
@@ -3075,13 +3117,17 @@ mod tests {
         let dist2 = dir.path().join("dist2");
         let text = |p: &Path| p.display().to_string();
         let origin = dir.path().join("u.json");
-        let run = |record: Option<&SetupRecord>, dist: Option<&Path>, env: Env| {
+        let record = SetupRecord::default();
+        let run = |history: Option<&LoadedFrom>, dist: Option<&Path>, env: Env| {
             let options = SetupOptions {
                 distribution_dir: dist,
-                base: record.map(|r| base(r, &origin)),
+                base: history.map(|loaded_from| SetupBase {
+                    loaded_from,
+                    ..base(&record, &origin)
+                }),
                 ..SetupOptions::default()
             };
-            load_with(&options, env).unwrap().setup_record().clone()
+            load_with(&options, env).unwrap().loaded_from().clone()
         };
         let no_user = Env::default();
 
@@ -3119,20 +3165,24 @@ mod tests {
 
     #[test]
     fn record_duplicates_are_allowed_and_removed() {
-        let record = SetupRecord {
+        let record = SetupRecord::default();
+        let history = LoadedFrom {
             distribution_dir: vec!["/a".to_string(), "/b".to_string(), "/a".to_string()],
             project_config: vec!["/p".to_string(), "/p".to_string()],
-            ..SetupRecord::default()
+            ..LoadedFrom::default()
         };
         let origin = Path::new("/u.json");
         let options = SetupOptions {
             no_search: true,
-            base: Some(base(&record, origin)),
+            base: Some(SetupBase {
+                loaded_from: &history,
+                ..base(&record, origin)
+            }),
             ..SetupOptions::default()
         };
         let config = load_with(&options, Env::default()).unwrap();
-        assert_eq!(config.setup_record().distribution_dir, ["/a", "/b"]);
-        assert_eq!(config.setup_record().project_config, ["/p"]);
+        assert_eq!(config.loaded_from().distribution_dir, ["/a", "/b"]);
+        assert_eq!(config.loaded_from().project_config, ["/p"]);
     }
 
     #[test]
@@ -3167,7 +3217,7 @@ mod tests {
         );
         assert_eq!(config.setup_inputs(), &inputs);
         // Only a record: the history isn't changed by them.
-        assert!(config.setup_record().user_setup_file.is_empty());
+        assert!(config.loaded_from().user_setup_file.is_empty());
     }
 
     #[test]

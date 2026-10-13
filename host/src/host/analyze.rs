@@ -78,6 +78,11 @@ pub(crate) fn analyze(
                 _ => continue,
             },
         };
+        if rule.unavailable {
+            return Decision::Deny(format!(
+                "'{name}' is not available: its program wasn't found on the host when the configuration was made"
+            ));
+        }
         let envs = match rule.env_plan.apply(&invocation.envs) {
             Ok(envs) => envs,
             Err(reason) => return Decision::Deny(reason),
@@ -387,6 +392,19 @@ mod tests {
             analyze(&inv, &commands, &workspace()),
             Decision::Deny(
                 "the container may not set the environment variable AWS_SECRET_ACCESS_KEY (it matches 'AWS_SECRET_*')"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn unavailable_program_is_refused() {
+        let mut commands = parse_commands("  - command: aws\n    args: [s3, ls]\n");
+        commands[0].unavailable = true;
+        assert_eq!(
+            analyze(&invocation(&["aws", "s3", "ls"]), &commands, &workspace()),
+            Decision::Deny(
+                "'aws' is not available: its program wasn't found on the host when the configuration was made"
                     .to_string()
             )
         );

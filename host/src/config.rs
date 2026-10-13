@@ -33,7 +33,7 @@ use serde::Deserialize;
 use dev_env::DevContainer;
 use environment::{EnvPlan, EnvRules};
 use project::{ContainerRef, ProjectConfig};
-use system::{Env, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
+use system::{Env, LoadedFrom, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
 
 use crate::universal::ActiveConfigLocations;
 
@@ -47,6 +47,10 @@ pub struct LoadOptions {
     pub project: Option<PathBuf>,
     /// The project directory, in place of the project file's (`--project-dir`).
     pub project_dir: Option<PathBuf>,
+    /// The dev container's mounts: the project workspace (`--dev-container-workspace-dir`)
+    /// and the settings directory (`--dev-container-settings-dir`).
+    pub dev_container_workspace_dir: Option<PathBuf>,
+    pub dev_container_settings_dir: Option<PathBuf>,
     /// An extra system setup file, with the highest priority (`--user-setup`).
     pub user_setup: Option<PathBuf>,
     /// Where a distribution installed Surf Scoter, if it did.
@@ -65,6 +69,17 @@ struct UniversalInput {
     #[serde(default)]
     active_config_locations: ActiveConfigLocations,
     setup: SetupRecord,
+    #[serde(default)]
+    loaded_from: LoadedFrom,
+    /// The project file and `dev-env.yaml`, as written; only
+    /// `load_universal` uses them.
+    #[serde(default)]
+    project: Option<serde_json::Value>,
+    #[serde(default)]
+    dev_container: Option<serde_json::Value>,
+    /// The commands, as they run.
+    #[serde(default)]
+    host_brokered: Vec<serde_json::Value>,
 }
 
 impl UniversalInput {
@@ -80,7 +95,8 @@ impl UniversalInput {
 
 /// Read a universal configuration file made earlier.
 fn read_universal(path: &Path) -> Result<UniversalInput, ConfigError> {
-    let text = read::read_limited(path).map_err(|m| ConfigError::new(Some(path), "", m))?;
+    let text = read::read_limited_to(path, read::MAX_UNIVERSAL_FILE_SIZE)
+        .map_err(|m| ConfigError::new(Some(path), "", m))?;
     serde_json::from_str(&text).map_err(|e| {
         ConfigError::new(
             Some(path),
@@ -104,6 +120,133 @@ pub struct FullConfig {
 /// user's setup file and executables.
 pub fn load_all(options: &LoadOptions) -> Result<FullConfig, ConfigErrors> {
     load_all_with_env(options, Env::from_process())
+}
+
+/// Read the whole configuration from a universal configuration file alone,
+/// using the process environment to find executables.
+pub fn load_universal(path: &Path) -> Result<FullConfig, ConfigErrors> {
+    load_universal_with_env(path, Env::from_process())
+}
+
+/// `load_universal`, with the environment given.
+///
+/// No other file is read: the setup comes from the file's `setup` record,
+/// the project file and the dev container's `dev-env.yaml` from its
+/// `project` and `dev-container` contents, and the locations (including
+/// `cwd`) from its `active-config-locations`.
+///
+/// The project's commands are its `host-brokered` list, as written there:
+/// each one's `program` (`null` making it unavailable) and its `env`, which
+/// is already the whole plan, with only `@NAME@` left to expand (see
+/// `expand_host_environments`).  The `project` contents are only a record of
+/// what the list was made from.  So the configuration is the
+/// one the file was made with, however the files change since; and the file
+/// alone recreates it, say for debugging.
+pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, ConfigErrors> {
+    let path = absolute(path);
+    let universal = read_universal(&path).map_err(|e| ConfigErrors(vec![e]))?;
+    let active = &universal.active_config_locations;
+    let mut errors = Vec::new();
+    let mismatch = |key: &str, location: &str| {
+        ConfigError::new(
+            Some(&path),
+            key,
+            format!("goes with `active-config-locations.{location}`, which doesn't match it"),
+        )
+    };
+    // JSON is YAML, so the contents are read as the files would be.
+    let as_yaml = |contents: &serde_json::Value| read::parse_yaml(&contents.to_string());
+
+    let project = match (&universal.project, &active.project_config) {
+        (Some(contents), Some(file)) => project::parse(&contents.to_string(), Path::new(file))
+            .map_err(|e| errors.extend(e))
+            .ok(),
+        (None, None) => None,
+        _ => {
+            errors.push(mismatch("project", "project-config"));
+            None
+        }
+    };
+    let dev_container = match (&universal.dev_container, &active.dev_container_path) {
+        (Some(contents), Some(dir)) => {
+            let dir = PathBuf::from(dir);
+            let file = dir.join(dev_env::DEV_ENV_FILE);
+            as_yaml(contents)
+                .map_err(|m| vec![ConfigError::new(Some(&path), "dev-container", m)])
+                .and_then(|value| dev_env::parse(value, &file))
+                .map(|env| DevContainer { dir, env })
+                .map_err(|e| errors.extend(e))
+                .ok()
+        }
+        (None, None) => None,
+        _ => {
+            errors.push(mismatch("dev-container", "dev-container-path"));
+            None
+        }
+    };
+    if universal.project.is_some() && universal.dev_container.is_none() {
+        errors.push(ConfigError::new(
+            Some(&path),
+            "dev-container",
+            "is missing; a project always has a dev container",
+        ));
+    }
+
+    // As recorded, not wherever this program runs.
+    env.cwd = active.cwd.as_ref().map(PathBuf::from);
+    fn path_of(location: &Option<String>) -> Option<&Path> {
+        location.as_deref().map(Path::new)
+    }
+    let inputs = universal.inputs();
+    let setup = SetupOptions {
+        project_dir: path_of(&active.project_dir),
+        project_config: path_of(&active.project_config),
+        dev_container_workspace_dir: path_of(&active.dev_container_workspace_dir),
+        dev_container_settings_dir: path_of(&active.dev_container_settings_dir),
+        dev_container: universal.dev_container.is_some(),
+        no_search: true,
+        base: Some(SetupBase {
+            record: &universal.setup,
+            loaded_from: &universal.loaded_from,
+            origin: &path,
+            inputs: &inputs,
+        }),
+        ..SetupOptions::default()
+    };
+    let mut system = system::load_with(&setup, env)
+        .map_err(|e| errors.extend(e))
+        .ok();
+    if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
+        system.set_dev_container_path(&dev.dir);
+    }
+    let mut project = project;
+    match (
+        &mut project,
+        brokered_commands(&universal.host_brokered, &path),
+    ) {
+        (Some(project), Ok((commands, raw))) => {
+            project.commands = commands;
+            project.raw_commands = raw;
+        }
+        // Commands without any project; a project that's wrong is reported above.
+        (None, Ok((commands, _)))
+            if !commands.is_empty()
+                && universal.project.is_none()
+                && active.project_config.is_none() =>
+        {
+            errors.push(mismatch("host-brokered", "project-config"))
+        }
+        (None, Ok(_)) => {}
+        (_, Err(e)) => errors.extend(e),
+    }
+    match system {
+        Some(system) if errors.is_empty() => Ok(FullConfig {
+            system,
+            project,
+            dev_container,
+        }),
+        _ => Err(ConfigErrors(errors)),
+    }
 }
 
 /// `load_all`, with the environment given.
@@ -156,11 +299,29 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             .map(PathBuf::from)
             .or_else(project_file_dir),
     };
+    // Given, or else carried over.  They needn't exist yet.
+    let carried = |given: &Option<PathBuf>,
+                   active: fn(&ActiveConfigLocations) -> &Option<String>| {
+        given.as_deref().map(absolute).or_else(|| {
+            universal
+                .as_ref()
+                .and_then(|u| active(&u.active_config_locations).as_ref())
+                .map(PathBuf::from)
+        })
+    };
+    let dev_container_workspace_dir = carried(&options.dev_container_workspace_dir, |a| {
+        &a.dev_container_workspace_dir
+    });
+    let dev_container_settings_dir = carried(&options.dev_container_settings_dir, |a| {
+        &a.dev_container_settings_dir
+    });
     let setup = SetupOptions {
         user_setup: options.user_setup.as_deref(),
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
         project_config: project_path.as_deref(),
+        dev_container_workspace_dir: dev_container_workspace_dir.as_deref(),
+        dev_container_settings_dir: dev_container_settings_dir.as_deref(),
         dev_container: container.is_some(),
         no_search: options.no_setup_search,
         // Only a project file given this time is recorded.
@@ -171,6 +332,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             .zip(universal_inputs.as_ref())
             .map(|((u, origin), inputs)| SetupBase {
                 record: &u.setup,
+                loaded_from: &u.loaded_from,
                 origin,
                 inputs,
             }),
@@ -213,8 +375,70 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     }
 }
 
+/// The commands of a universal configuration file's `host-brokered` list
+/// (from `file`), and each entry as written.
+fn brokered_commands(
+    entries: &[serde_json::Value],
+    file: &Path,
+) -> Result<project::ParsedCommands, Vec<ConfigError>> {
+    const KEY: &str = "host-brokered";
+    let error = |key: &str, message: String| ConfigError::new(Some(file), key, message);
+    let list = serde_json::Value::Array(entries.to_vec());
+    let value = read::parse_yaml(&list.to_string()).map_err(|m| vec![error(KEY, m)])?;
+    let (mut commands, raw) = project::parse_command_list(value, KEY).map_err(|problems| {
+        problems
+            .into_iter()
+            .map(|(key, message)| error(&key, message))
+            .collect::<Vec<_>>()
+    })?;
+    let mut errors = Vec::new();
+    for (i, (rule, entry)) in commands.iter_mut().zip(entries).enumerate() {
+        match entry.get("program") {
+            Some(serde_json::Value::Null) => rule.unavailable = true,
+            Some(_) => {}
+            None => errors.push(error(
+                &index_key(KEY, i),
+                "needs `program`: the program found, or null".to_string(),
+            )),
+        }
+        rule.env_plan = EnvPlan::as_written(&rule.env);
+    }
+    if errors.is_empty() {
+        Ok((commands, raw))
+    } else {
+        Err(errors)
+    }
+}
+
+/// Expand the `@NAME@` references in each command's `env_plan`, with the
+/// environment `system` was loaded with: for the program that runs the
+/// commands, once the configuration is loaded.
+pub fn expand_host_environments(
+    project: &mut ProjectConfig,
+    system: &SystemConfig,
+) -> Result<(), ConfigErrors> {
+    let mut errors = Vec::new();
+    for (i, rule) in project.commands.iter_mut().enumerate() {
+        let key = child_key(&index_key("commands", i), "env");
+        match rule.env_plan.expand_host(system, &key) {
+            Ok(plan) => rule.env_plan = plan,
+            Err(problems) => errors.extend(
+                problems
+                    .into_iter()
+                    .map(|(key, message)| ConfigError::new(Some(&project.path), &key, message)),
+            ),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigErrors(errors))
+    }
+}
+
 /// Work out each command's `env_plan`: the project's `env` with the
-/// command's added, expanded against `system`.
+/// command's added, its `${section:key}` references expanded against
+/// `system`.
 fn plan_environments(project: &mut ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
     let mut errors = Vec::new();
     let mut resolve = |rules: &EnvRules, key: &str| {
@@ -540,7 +764,7 @@ mod tests {
         // The project file given is recorded, most recent first.
         let universal = crate::universal::build(&second).unwrap();
         assert_eq!(
-            universal.setup.project_config,
+            universal.loaded_from.project_config,
             [project.display().to_string()]
         );
         let second_file = dir.write("second.json", &crate::universal::to_json(&universal));
@@ -555,7 +779,7 @@ mod tests {
         let third = load_all_with_env(&third, Env::default()).unwrap();
         assert_eq!(third.project.as_ref().unwrap().path, project);
         assert_eq!(
-            third.system.setup_record().project_config,
+            third.system.loaded_from().project_config,
             [project.display().to_string()]
         );
 
@@ -573,7 +797,7 @@ mod tests {
         let fourth = load_all_with_env(&fourth, Env::default()).unwrap();
         assert_eq!(fourth.project.unwrap().path, other);
         assert_eq!(
-            fourth.system.setup_record().project_config,
+            fourth.system.loaded_from().project_config,
             [other.display().to_string(), project.display().to_string()]
         );
     }
@@ -684,6 +908,55 @@ mod tests {
     }
 
     #[test]
+    fn container_mount_dirs() {
+        let dir = TempDir::new();
+        let get = |config: &FullConfig, key| config.system.get_path(system::SCOTER_SECTION, key);
+        let first = LoadOptions {
+            dev_container_workspace_dir: Some(dir.path().join("ws")),
+            // Made absolute; it needn't exist yet.
+            dev_container_settings_dir: Some(PathBuf::from("relative/settings")),
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&first, Env::default()).unwrap();
+        assert_eq!(
+            get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
+            Some(dir.path().join("ws"))
+        );
+        let settings = absolute(Path::new("relative/settings"));
+        assert_eq!(
+            get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
+            Some(settings.clone())
+        );
+        let universal = crate::universal::build(&config).unwrap();
+        assert_eq!(
+            universal.active_config_locations.dev_container_settings_dir,
+            Some(settings.display().to_string())
+        );
+
+        // They carry over, unless given again.
+        let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
+        let again = LoadOptions {
+            universal: Some(first_file),
+            no_setup_search: true,
+            dev_container_workspace_dir: Some(dir.path().join("other")),
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&again, Env::default()).unwrap();
+        assert_eq!(
+            get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
+            Some(dir.path().join("other"))
+        );
+        assert_eq!(
+            get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
+            Some(settings)
+        );
+
+        // Without them, they're not set.
+        let config = load_all_with_env(&LoadOptions::default(), Env::default()).unwrap();
+        assert_eq!(get(&config, system::DEV_CONTAINER_WORKSPACE_DIR), None);
+    }
+
+    #[test]
     fn command_environments_are_worked_out() {
         let dir = TempDir::new();
         dev_container(&dir, "project/env");
@@ -704,7 +977,11 @@ mod tests {
             ..Env::default()
         };
         let config = load_all_with_env(&opts, env).unwrap();
-        let commands = &config.project.unwrap().commands;
+        let mut project = config.project.unwrap();
+        // `@NAME@` is left for the program running the commands.
+        assert_eq!(project.commands[0].env_plan.set["HOME"], "@HOME@");
+        expand_host_environments(&mut project, &config.system).unwrap();
+        let commands = &project.commands;
         let one = &commands[0].env_plan;
         assert_eq!(one.allow, ["LANG"]);
         assert_eq!(one.set["HOME"], "/home/me");
@@ -742,6 +1019,187 @@ mod tests {
                 "env.set.A: unknown reference `${a:missing}`",
                 "commands[0].env.default.B: unknown reference `${b:missing}`",
             ]
+        );
+    }
+
+    /// A universal configuration file for a project with a dev container,
+    /// made in `dir`, as `gen-scoter-uc` would; and the files it came from.
+    fn universal_for(dir: &TempDir, env: Env) -> (PathBuf, Vec<PathBuf>) {
+        dev_container(dir, "project/env");
+        let opts = LoadOptions {
+            project: Some(dir.write(
+                "project/scoter.yaml",
+                concat!(
+                    "container:\n  dev-container-path: env\n",
+                    "env:\n  allow: [LANG]\n  set: {LOCAL: '${a:local}', HOME: '@HOME@'}\n",
+                    "commands:\n  - {command: one, args: [x]}\n",
+                ),
+            )),
+            user_setup: Some(dir.write("setup.yaml", "a:\n  paths:\n    local: ./here\n")),
+            no_setup_search: true,
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&opts, env).unwrap();
+        let json = crate::universal::to_json(&crate::universal::build(&config).unwrap());
+        let sources = vec![
+            dir.path().join("project/scoter.yaml"),
+            dir.path().join("project/env/dev-env.yaml"),
+            dir.path().join("setup.yaml"),
+        ];
+        (dir.write("universal.json", &json), sources)
+    }
+
+    #[test]
+    fn load_universal_reads_no_other_file() {
+        let dir = TempDir::new();
+        let made_with = Env {
+            vars: HashMap::from([("HOME".to_string(), "/home/me".to_string())]),
+            cwd: Some(PathBuf::from("/where/it/was/made")),
+            ..Env::default()
+        };
+        let (universal, sources) = universal_for(&dir, made_with.clone());
+        let expected = load_universal_with_env(&universal, made_with.clone()).unwrap();
+
+        // The files it came from change, or go away: nothing changes.
+        for file in &sources {
+            std::fs::remove_file(file).unwrap();
+        }
+        // Run with another environment: it's that one's `@NAME@` values.
+        let now = Env {
+            cwd: Some(PathBuf::from("/somewhere/else")),
+            vars: HashMap::from([("HOME".to_string(), "/home/runner".to_string())]),
+            ..made_with
+        };
+        let mut config = load_universal_with_env(&universal, now).unwrap();
+        expand_host_environments(config.project.as_mut().unwrap(), &config.system).unwrap();
+        let project = config.project.as_ref().unwrap();
+        assert_eq!(project.path, dir.path().join("project/scoter.yaml"));
+        assert_eq!(
+            project.commands[0].args,
+            expected.project.as_ref().unwrap().commands[0].args
+        );
+        let plan = &project.commands[0].env_plan;
+        assert_eq!(plan.allow, ["LANG"]);
+        assert_eq!(
+            plan.set["LOCAL"],
+            dir.path().join("project/here").display().to_string()
+        );
+        assert_eq!(plan.set["HOME"], "/home/runner");
+        assert_eq!(config.dev_container, expected.dev_container);
+        assert_eq!(
+            config.dev_container.unwrap().env.broker_bin,
+            "/usr/local/bin/scoter-container"
+        );
+        // The locations are as recorded, `cwd` included.
+        assert_eq!(
+            config.system.get_path(system::SCOTER_SECTION, system::CWD),
+            Some(PathBuf::from("/where/it/was/made"))
+        );
+        assert_eq!(
+            config
+                .system
+                .get_path(system::SCOTER_SECTION, system::DEV_CONTAINER_PATH),
+            Some(dir.path().join("project/env"))
+        );
+    }
+
+    #[test]
+    fn load_universal_contents_must_match_locations() {
+        let dir = TempDir::new();
+        let (universal, _) = universal_for(&dir, Env::default());
+        let edit = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&universal).unwrap()).unwrap();
+            change(&mut json);
+            let file = dir.write("edited.json", &json.to_string());
+            messages(load_universal_with_env(&file, Env::default()).unwrap_err())
+        };
+        assert_eq!(
+            edit(&|j| j["project"] = serde_json::Value::Null),
+            ["project: goes with `active-config-locations.project-config`, which doesn't match it"]
+        );
+        assert_eq!(
+            edit(&|j| j["active-config-locations"]["dev-container-path"] = serde_json::Value::Null),
+            [
+                "dev-container: goes with `active-config-locations.dev-container-path`, which doesn't match it"
+            ]
+        );
+        // The contents are checked as the files would be.
+        let errors = edit(&|j| j["dev-container"]["sshd-port"] = serde_json::json!("nope"));
+        assert!(errors[0].starts_with("sshd-port: "), "{errors:?}");
+        let errors = edit(&|j| j["project"]["commands"] = serde_json::json!("nope"));
+        assert_eq!(errors, ["commands: must be a list of entries"]);
+
+        // Without a project, there's none, nor a dev container.
+        let config = load_universal_with_env(
+            &dir.write(
+                "plain.json",
+                &crate::universal::to_json(
+                    &crate::universal::build(
+                        &load_all_with_env(&LoadOptions::default(), Env::default()).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            Env::default(),
+        )
+        .unwrap();
+        assert!(config.project.is_none() && config.dev_container.is_none());
+    }
+
+    #[test]
+    fn load_universal_runs_the_host_brokered_list() {
+        let dir = TempDir::new();
+        let (universal, _) = universal_for(&dir, Env::default());
+        let load = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&universal).unwrap()).unwrap();
+            change(&mut json);
+            let file = dir.write("edited.json", &json.to_string());
+            load_universal_with_env(&file, Env::default())
+        };
+
+        // What's in `host-brokered` runs, not what's in `project`.
+        let config = load(&|j| {
+            let entry = &mut j["host-brokered"][0];
+            entry["args"] = serde_json::json!(["y"]);
+            entry["program"] = serde_json::json!("/usr/bin/one");
+            entry["env"]["set"]["EXTRA"] = serde_json::json!("from the list");
+        })
+        .unwrap();
+        let project = config.project.unwrap();
+        let rule = &project.commands[0];
+        assert_eq!(rule.args, [project::Token::Literal("y".to_string())]);
+        assert_eq!(rule.program.as_deref(), Some("/usr/bin/one"));
+        assert!(!rule.unavailable);
+        assert_eq!(rule.env_plan.set["EXTRA"], "from the list");
+        // Already expanded when the file was made; `@NAME@` is still to do.
+        assert_eq!(rule.env_plan.set["HOME"], "@HOME@");
+        assert_eq!(project.raw["commands"][0]["args"][0], "x");
+
+        // A program that wasn't found makes the command unavailable.
+        let config = load(&|j| j["host-brokered"][0]["program"] = serde_json::Value::Null).unwrap();
+        assert!(config.project.unwrap().commands[0].unavailable);
+
+        let errors = messages(
+            load(&|j| {
+                j["host-brokered"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("program");
+            })
+            .unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            ["host-brokered[0]: needs `program`: the program found, or null"]
+        );
+        let errors = messages(
+            load(&|j| j["host-brokered"][0]["shell"] = serde_json::json!(true)).unwrap_err(),
+        );
+        assert!(
+            errors[0].starts_with("host-brokered[0]: unknown field `shell`"),
+            "{errors:?}"
         );
     }
 

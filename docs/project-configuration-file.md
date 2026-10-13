@@ -111,7 +111,7 @@ A command's `env` adds its `allow`, `drop` and `error` patterns to the top-level
 
 `set` and `default` values can refer to the [system configuration](system-config-file.md) as `${section:key}`, which gives a `paths` value, the program found for a `programs` value, or a `values` value.  That keeps settings for a particular computer out of this shared file.  `$${` stands for `${`.  A reference to something that isn't set is an error when the configuration is loaded.
 
-`@NAME@` is the host's `NAME` environment variable:
+`@NAME@` is the host's `NAME` environment variable, as `scoter-host` sees it when it starts (it's left as written in the universal configuration file, which another program makes):
 
 * On Windows hosts, the name is matched without regard to case, as Windows does (`@PATH@` finds `Path`).
 * When the host doesn't have the variable, it's the system configuration's `host` section's `NAME` key, matched exactly, if that's set.  So each computer can supply values its environment doesn't have.

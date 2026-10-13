@@ -121,6 +121,8 @@ pub struct ProjectConfig {
     pub commands: Commands,
     /// Each of `commands` as written in the file.
     pub raw_commands: Vec<Value>,
+    /// The whole file, as written.
+    pub raw: Value,
 }
 
 impl ProjectConfig {
@@ -150,6 +152,9 @@ struct ContainerSection {
 
 pub type Commands = Vec<CommandRule>;
 
+/// Commands, and each one as written.
+pub(crate) type ParsedCommands = (Commands, Vec<Value>);
+
 /// One allowed form of a command.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -168,10 +173,17 @@ pub struct CommandRule {
     #[serde(default)]
     pub env: EnvRules,
     /// The project's and this command's `env` worked out against the system
-    /// configuration, by `config::load_all`.  Until then, it's empty: nothing
-    /// comes through.
+    /// configuration, by `config::load_all` (or `load_universal`), with
+    /// `@NAME@` references left for the program running the command to
+    /// expand (`config::expand_host_environments`).  Until then, it's empty:
+    /// nothing comes through.
     #[serde(skip)]
     pub env_plan: EnvPlan,
+    /// The program wasn't found when the universal configuration file was
+    /// made (its `host-brokered` `program` is `null`): requests for it are
+    /// refused.
+    #[serde(skip)]
+    pub unavailable: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -314,6 +326,7 @@ fn parse_checked(
             None,
         );
     }
+    let raw = value.clone();
     let map = match value {
         Value::Mapping(map) => map,
         Value::Null => {
@@ -348,7 +361,9 @@ fn parse_checked(
                 has_container = true;
                 container = parse_container(value, &mut problems);
             }
-            Some("commands") => (commands, raw_commands) = parse_commands(value, &mut problems),
+            Some("commands") => {
+                (commands, raw_commands) = parse_commands(value, "commands", &mut problems)
+            }
             Some("env") => env = parse_env(value, &mut problems),
             Some(other) => problems.push((other.to_string(), "unknown key".to_string())),
             None => problems.push((String::new(), format!("key {key:?} must be a string"))),
@@ -364,6 +379,7 @@ fn parse_checked(
             env,
             commands,
             raw_commands,
+            raw,
         }),
         _ => Err(problems
             .into_iter()
@@ -432,14 +448,33 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
+/// A list of command entries, such as `commands`, checked as `commands` is;
+/// problems are (key, message), with keys under `key`.
+pub(crate) fn parse_command_list(
+    value: Value,
+    key: &str,
+) -> Result<ParsedCommands, Vec<(String, String)>> {
+    let mut problems = Vec::new();
+    let parsed = parse_commands(value, key, &mut problems);
+    if problems.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(problems)
+    }
+}
+
 /// The valid entries, both checked and as written.
-fn parse_commands(value: Value, problems: &mut Vec<(String, String)>) -> (Commands, Vec<Value>) {
+fn parse_commands(
+    value: Value,
+    list_key: &str,
+    problems: &mut Vec<(String, String)>,
+) -> (Commands, Vec<Value>) {
     let entries = match value {
         Value::Null => return (Commands::new(), Vec::new()),
         Value::Sequence(entries) => entries,
         _ => {
             problems.push((
-                "commands".to_string(),
+                list_key.to_string(),
                 "must be a list of entries".to_string(),
             ));
             return (Commands::new(), Vec::new());
@@ -448,7 +483,7 @@ fn parse_commands(value: Value, problems: &mut Vec<(String, String)>) -> (Comman
     let mut commands = Commands::new();
     let mut raw = Vec::new();
     for (i, entry) in entries.into_iter().enumerate() {
-        let key = index_key("commands", i);
+        let key = index_key(list_key, i);
         match yaml_serde::from_value::<CommandRule>(entry.clone()) {
             Ok(rule) => {
                 let before = problems.len();
@@ -593,6 +628,7 @@ mod tests {
                 env: EnvRules::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
+                raw: parse_yaml(CONTAINER).unwrap(),
             }
         );
         let config =
@@ -816,6 +852,7 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    unavailable: false,
                 },
                 CommandRule {
                     command: "aws".to_string(),
@@ -829,6 +866,7 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    unavailable: false,
                 },
             ]
         );

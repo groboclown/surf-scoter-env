@@ -18,21 +18,35 @@ use super::{child_key, index_key};
 /// The largest configuration file the tools read.
 pub const MAX_CONFIG_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
+/// The largest universal configuration file the tools read (or write): it
+/// holds the other files' contents, and more.
+pub const MAX_UNIVERSAL_FILE_SIZE: u64 = 4 * 1024 * 1024;
+
 /// Read a whole configuration file, refusing anything over `MAX_CONFIG_FILE_SIZE`.
-/// The limit applies while reading, so special or growing files can't get around it.
 pub fn read_limited(path: &Path) -> Result<String, String> {
+    read_limited_to(path, MAX_CONFIG_FILE_SIZE)
+}
+
+/// Read a whole file, refusing anything over `max` bytes.  The limit applies
+/// while reading, so special or growing files can't get around it.
+pub fn read_limited_to(path: &Path, max: u64) -> Result<String, String> {
     let file = File::open(path).map_err(|e| format!("cannot read the file: {e}"))?;
     let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_FILE_SIZE + 1)
+    file.take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("cannot read the file: {e}"))?;
-    if bytes.len() as u64 > MAX_CONFIG_FILE_SIZE {
-        return Err(format!(
-            "the file is larger than the {} MB limit",
-            MAX_CONFIG_FILE_SIZE / (1024 * 1024)
-        ));
+    if bytes.len() as u64 > max {
+        return Err(size_error(max));
     }
     String::from_utf8(bytes).map_err(|_| "the file is not valid UTF-8".to_string())
+}
+
+/// The message for a file over `max` bytes.
+pub fn size_error(max: u64) -> String {
+    format!(
+        "the file is larger than the {} MB limit",
+        max / (1024 * 1024)
+    )
 }
 
 /// Parse YAML text.  An empty document is `Value::Null`.
@@ -93,6 +107,18 @@ mod tests {
         assert_eq!(
             read_limited(&over).unwrap_err(),
             "the file is larger than the 2 MB limit"
+        );
+        // The universal configuration file has a larger limit.
+        assert!(read_limited_to(&over, MAX_UNIVERSAL_FILE_SIZE).is_ok());
+        let universal_over = dir.path().join("over.json");
+        fs::write(
+            &universal_over,
+            vec![b' '; MAX_UNIVERSAL_FILE_SIZE as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            read_limited_to(&universal_over, MAX_UNIVERSAL_FILE_SIZE).unwrap_err(),
+            "the file is larger than the 4 MB limit"
         );
     }
 

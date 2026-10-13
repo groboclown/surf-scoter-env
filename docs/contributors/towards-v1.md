@@ -34,7 +34,7 @@ The dev-env container will need to be configurable, so that the user can replace
 
 With this change, the user will need to provide a configuration file that describes how to work with the container.
 
-Additionally, the container will now take 2 mount points - the project workspace directory (writable), and a read-only setup directory that contains runtime configuration files.  Along with the SSH and SSL connection information, it will also take a list of the replaced commands from the project configuration file tha the container should run `ln "client-bin" "/usr/local/bin/cmd-name`.
+Additionally, the container will now take 2 mount points - the project workspace directory (writable), and a read-only setup directory that contains runtime configuration files.  Along with the SSH and SSL connection information, it will also take a list of the replaced commands from the project configuration file tha the container should run `ln "client-bin" "/usr/local/bin/cmd-name"`.
 
 The `scoter` script will read the JSON to build the setup files.
 
