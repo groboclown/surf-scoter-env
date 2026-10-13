@@ -50,7 +50,7 @@ commands:
 The `container` section sets exactly one of:
 
 * `dev-container-path`: a directory, relative to this file, holding the container's `Dockerfile` and its `dev-env.yaml` file (see [the developer environment Dockerfile](project-dockerfile.md)).
-* `dev-container`: the name of such a directory, found in one of the `scoter` section's `path-lists: dev-containers` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
+* `dev-container`: the name of such a directory, found in one of the `scoter` section's `path-lists: dev-containers-search` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
 
 The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 

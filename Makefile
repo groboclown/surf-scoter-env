@@ -49,6 +49,12 @@ lint:
 
 
 # ---------------------------------------------------------------------
+## dev-prep                  Prepare this directory for running the scoter tool from here.
+.PHONY: dev-prep
+dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug
+	test -f setup.yaml || cp defaults/setup.yaml .
+
+# ---------------------------------------------------------------------
 # Rust-related tasks.
 
 ## dev-env-rust-tests        Run unit tests for the `dev-env` container tools.
@@ -201,6 +207,10 @@ script-tests:
 ## mk-installer              Create the installation zip file.
 .PHONY: mk-installer
 mk-installer:
+
+# TODO this target is big and complex.
+# Probably want to make it a script so that this Makefile doesn't fill up
+# with cut-and-paste code.
 
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 mk-installer: mk-installer-x86_64-unknown-linux-gnu

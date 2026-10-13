@@ -38,7 +38,7 @@ use system::{Env, LoadedFrom, SetupBase, SetupInputs, SetupOptions, SetupRecord,
 use crate::universal::ActiveConfigLocations;
 
 /// The `scoter` section's `path-lists` key searched for a `dev-container: NAME`.
-pub const DEV_CONTAINERS: &str = "dev-containers";
+pub const DEV_CONTAINERS_SEARCH: &str = "dev-containers-search";
 
 /// Where to find the configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -347,7 +347,9 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             .ok()
     };
     let lookup = match (&container, &system) {
-        (Some(_), Some(system)) => Some(system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS)),
+        (Some(_), Some(system)) => {
+            Some(system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH))
+        }
         // A path doesn't need the system configuration.
         (Some(ContainerRef::Path(_)), None) => Some(Vec::new()),
         _ => None,
@@ -625,7 +627,7 @@ mod tests {
         let dir = TempDir::new();
         dev_container(&dir, "containers/dev-env");
         let setup = format!(
-            "scoter:\n  path-lists:\n    dev-containers:\n      - ./missing\n      - {}/containers\n",
+            "scoter:\n  path-lists:\n    dev-containers-search:\n      - ./missing\n      - {}/containers\n",
             dir.path().display()
         );
         let opts = options(

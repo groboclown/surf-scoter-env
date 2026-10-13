@@ -5,269 +5,311 @@
 """
 # Compatibility: Python 3.12+
 
-# TODO redo the configuration loading:
-#      1. Find the install directory.  Either it's passed as '--install-dir',
-#         or find it from the script's parent directory if it has the necessary
-#         binaries in the bin/ directory.
-#      2. Run the bin/gen-scoter-uc program with the right arguments.
-#         Capture stdout to pull in the JSON document.  stderr is passed to the
-#         user.
-
 
 import argparse
 from collections.abc import Callable, Sequence
-import configparser
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+import platform
 import shutil
+import subprocess
+import tempfile
 import sys
 
-SCOTER_DEFAULT_INI_FILE = "surf-scoter.ini"
-CONTAINERS_DEFAULT_DIR = "containers"
-DEFAULTS_DEFAULT_DIR = "defaults"
-BACKUP_FILE_EXT = ".backup"
+JsonData = str | int | float | bool | None | list["JsonData"] | dict[str, "JsonData"]
+DictJsonData = dict[str, JsonData]
+ListJsonData = list[JsonData]
+JsonPathPart = str | int
 
-ENV_SCOTER_HOME = "SURF_SCOTER_HOME"
+
+# The few hard-coded items.
+DISTRIBUTION_BIN_DIR = "bin"
+SCOTER_HOST_EXEC = "scoter-host"
+GEN_SCOTER_UC_EXEC = "gen-scoter-uc"
 
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
 
-class IniError(Exception):
-    """An ini file error."""
+class ConfigErr(Exception):
+    """A configuration problem happened."""
 
 
 class UserConfig:
-    """Knows how to deal with the OS and user-wide configuration directory/files."""
+    """Manages the information in the Scoter Universal Configuration (SUC) file."""
 
-    def __init__(self, config: Path | None, global_config: Path | None) -> None:
-        self._user_config = config
-        self._global_config = global_config
-        self._dir_search_order: list[Path] = []
-        self._cache_loaded = False
-        self._cache: configparser.ConfigParser | None = None
+    def __init__(self, universal_config: DictJsonData, bin_dir: Path) -> None:
+        self._config = universal_config
+        self.bin_dir = bin_dir
 
-    def tool_path(self, name: str) -> Path | None:
-        """Find the executable for the tool, as set in the configuration."""
-        lookup = self._lookup(name, "exe")
-        tries = [lookup, None if not lookup else shutil.which(lookup), shutil.which(name)]
-        for item in tries:
-            if not item:
-                continue
-            p_val = Path(item)
-            if p_val.is_file():
-                return p_val
+    def search_path(self, section: str, key: str, file: str | None, is_dir: bool) -> Path | None:
+        """Search the path list at the section/key for the file.
+        
+        If the file is None, then this just tries to find the first of the path list that
+        exists.  If the section/key does not exist, this raises a ConfigErr.
+        """
+        for path,loc in self.__require_list_path("resolved", section, "path-lists", key):
+            if not isinstance(loc, str):
+                raise self.__key_err(path, "expected string")
+            if file is None:
+                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
+                    return Path(loc)
+            else:
+                loc = os.path.join(loc, file)
+                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
+                    return Path(loc)
         return None
-
-    def parsed_template(self, section: str, key: str, params: dict[str, str]) -> str | None:
-        """Parse the key using extra parameters."""
-        return self._lookup(section, key, params)
-
-    def get_str(self, section: str, key: str, default: str) -> str:
-        """Extract the key from the configuration."""
-        ret = self._lookup(section, key)
-        if ret is None:
-            return default
-        return ret
-
-    def require_str(self, section: str, key: str) -> str:
-        """Extract the key from the configuration."""
-        ret = self._lookup(section, key)
-        if ret is None:
-            raise RuntimeError(f"missing key {section}:key")
-        return ret
-
-    def get_path(self, section: str, key: str, default: str | Path) -> Path:
-        """Get the key as a path."""
-        ret = self._lookup(section, key)
-        if ret is not None:
-            return Path(os.path.expanduser(ret))
-        return Path(os.path.expanduser(default))
 
     def require_path(self, section: str, key: str) -> Path:
-        """Get the key as a path."""
-        ret = self._lookup(section, key)
-        if ret is None:
-            raise IniError(f"missing key {section}:{key} from your ini files")
-        return Path(os.path.expanduser(ret))
+        """Load a path that must exist."""
+        loc = self.__opt_str("resolved", section, "paths", key)
+        if loc is None:
+            raise self.__key_err(("resolved", section, "paths", key), "path must exist")
+        return Path(loc)
 
-    def _lookup(
-        self,
-        section: str,
-        key: str,
-        extra: dict[str, str] | None = None,
-        parents: set[str] | None = None,
-    ) -> str | None:
-        """Look in the configuration files for the section/key."""
-        parents = parents or set()
-        joined = section + ":" + key
-        if joined in parents:
-            raise IniError(f"the keys in your ini files include self-referencing in the collection {parents}")
-        parents = {*parents, joined}
-        self._load_cache()
-        if self._cache and section in self._cache:
-            value = self._cache[section].get(key)
-            if value is None:
-                return None
-            # Parse the {[section:]key} format.
-            # This is fun-time recursion.
-            res = str(value)
-            ret = ""
-            while True:
-                pos1 = res.find("{")
-                if pos1 < 0:
-                    return ret + res
-                ret += res[:pos1]
-                res = res[pos1+1:]
-                if not res or res[0] == "{":
-                    # Either '{' at the end, or it's a {{ (escaped).
-                    ret += "{"
-                    res = res[1:]
-                    continue
-                pos2 = res.find("}")
-                if pos2 < 0:
-                    # Unmatched '{'
-                    return ret + "{" + res
-                raw_key = res[:pos2]
-                res = res[pos2+1:]
-                pos3 = raw_key.find(":")
-                if pos3 >= 0:
-                    r_sec = raw_key[:pos3]
-                    r_key = raw_key[pos3+1:]
-                else:
-                    r_sec = section
-                    r_key = raw_key
-                sub: str | None
-                if extra and r_key in extra:
-                    sub = extra[r_key]
-                else:
-                    sub = self._lookup(r_sec, r_key, extra, parents)
-                if sub is not None:
-                    ret += sub
-                else:
-                    ret += "{" + raw_key + "}"
+    def optional_path(self, section: str, key: str) -> Path | None:
+        """Load a path that might exist."""
+        loc = self.__opt_str("resolved", section, "paths", key)
+        if loc:
+            return Path(loc)
         return None
 
-    def _load_cache(self) -> None:
-        """Load the cached parameters.
+    def _get_resolved(self, section: str) -> DictJsonData:
+        """Find the resolved section group.
         
-        This is a bit of recursion, in that it runs _lookup.  To
-        avoid that, this sets _cache_loaded to True at the start.
-
-        See the 'docs/user-ini-file.md' for a description of the
-        load order.
+        If not found, this will return an empty section.
         """
-        if not self._cache_loaded:
-            self._cache_loaded = True
+        ret = self.__require_dict("resolved", section)
+        if ret:
+            return ret
+        return {"paths": {}, "programs": {}, "runs": {}, "path-lists": {}, "values": {}}
 
-            # Need to get the INI file order,
-            # and define the directory search order (for template files).
-            # This is listed in reverse priority.
+    def save(self, outfile: str) -> None:
+        """Save the current configuration to the given file."""
+        with open(outfile, "w", encoding="utf-8") as out:
+            json.dump(self._config, out)
 
-            def or_file(value: Path | str | None) -> str | None:
-                if not value:
-                    return None
-                return os.path.join(str(value), SCOTER_DEFAULT_INI_FILE)
+    def dumps(self) -> str:
+        """Output the current configuration to a string."""
+        return json.dumps(self._config)
 
-            def or_defaults(value: Path | str | None) -> str | None:
-                if not value:
-                    return None
-                return os.path.join(str(value), DEFAULTS_DEFAULT_DIR)
+    def reprocess_with(
+        self,
+        project_config_file: str | None,
+        project_dir: str | None,
+        dev_container_workspace_dir: str | None,
+        dev_container_settings_dir: str | None,
+    ) -> None:
+        """Reprocess this configuration using the new settings."""
+        # Save the configuration for reprocessing.
+        tfd, tmp = tempfile.mkstemp()
+        os.close(tfd)
+        self.save(tmp)
 
-            def filter_files(vals: Sequence[Path | str | None]) -> list[str]:
-                ret: list[str] = []
-                for val in vals:
-                    if not val:
-                        continue
-                    expand = str(val)
-                    if not expand:
-                        continue
-                    expand = os.path.expanduser(expand)
-                    if os.path.isfile(expand):
-                        # TODO put file size limits on this.
-                        ret.append(expand)
-                return ret
+        # Reprocess, now with the project file.
+        try:
+            config = generate_config(
+                bin_dir=self.bin_dir,
+                distribution_dir=self.require_path("scoter", "distribution-dir"),
+                project_config_file=project_config_file,
+                project_dir=project_dir,
+                dev_container_workspace_dir=dev_container_workspace_dir,
+                dev_container_settings_dir=dev_container_settings_dir,
+                user_setup=None,
+                universal_file=tmp,
+                no_setup_search=True,
+            )
+            self._config = config
+        finally:
+            os.unlink(tmp)
 
-            initial_order = filter_files((
-                # "defaults" directories are lower priority than the other locations.
-                or_file(or_defaults(self._global_config)),
-                or_file(Path.home() / ".config" / "scoter.d" / DEFAULTS_DEFAULT_DIR),
-                or_file(or_defaults(os.environ.get("SURF_SCOTER_HOME"))),
+    @staticmethod
+    def load_project_from_args(args: argparse.Namespace) -> "UserConfig":
+        """Load the settings + the project from the CLI arguments.
+        
+        Uses the standard CLI arguments for the project settings, as
+        configured through the '_add_project_args' and
+        '_add_settings_args' function.
+        """
+        return UserConfig.load_project(
+            bin_dir=args.bin_dir,
+            distribution_dir=args.distribution_dir,
+            user_setup=args.user_config,
+            project_config_file=args.project_config,
+            project_dir=args.project_dir,
+        )
 
-                # System-wide globals.
-                or_file(self._global_config),
-                self._global_config,
+    @staticmethod
+    def load_settings_from_args(args: argparse.Namespace) -> "UserConfig":
+        """Load the settings from the CLI arguments.
+        
+        Uses the standard CLI arguments for the project settings, as
+        configured through the '_add_settings_args' function.
+        """
+        return UserConfig.load_settings(
+            bin_dir=args.bin_dir,
+            distribution_dir=args.distribution_dir,
+            user_setup=args.user_config,
+        )
 
-                # User home config directory.
-                or_file(Path.home() / ".config" / "scoter.d"),
-                or_file(Path.home() / ".config"),
+    @staticmethod
+    def load_project(
+        *,
+        bin_dir: str | None,
+        distribution_dir: str | None,
+        user_setup: str | None,
+        project_config_file: str | None,
+        project_dir: str | None,
+    ) -> "UserConfig":
+        """Load the settings + the project information."""
+        dist_dir = UserConfig.require_global_config_path(distribution_dir)
+        resolved_bin_dir = UserConfig.find_bin_dir(bin_dir, dist_dir)
+        settings = UserConfig(generate_config(
+            bin_dir=resolved_bin_dir,
+            distribution_dir=dist_dir,
+            project_config_file=project_config_file,
+            project_dir=project_dir,
+            dev_container_workspace_dir=None,
+            dev_container_settings_dir=None,
+            user_setup=user_setup,
+            universal_file=None,
+            no_setup_search=False,
+        ), resolved_bin_dir)
 
-                # ENV location.
-                or_file(os.environ.get("SURF_SCOTER_HOME")),
+        # Ensure the project configuration was found.
+        if not settings.optional_path("scoter", "project-config"):
+            # It wasn't, so use the search path to find it.
+            project_file = settings.search_path("scoter", "project-file-search", None, is_dir=False)
+            if not project_file:
+                raise ConfigErr(
+                    "could not find the project file from this location.  "
+                    "Try passing it through the --project argument."
+                )
+            # And reload the setup with that discovered path.
+            settings.reprocess_with(
+                project_config_file=str(project_file),
+                project_dir=None,
+                dev_container_workspace_dir=None,
+                dev_container_settings_dir=None,
+            )
+        return settings
 
-                # CLI argument for the configuration.
-                # Can point at a file or a directory.
-                self._user_config,
-                or_file(self._user_config),
-            ))
-            if initial_order:
-                self._cache = configparser.ConfigParser()
-                self._cache.read(initial_order)
+    @staticmethod
+    def load_settings(
+        *,
+        bin_dir: str | None,
+        distribution_dir: str | None,
+        user_setup: str | None,
+    ) -> "UserConfig":
+        """Load just the settings."""
+        dist_dir = UserConfig.require_global_config_path(distribution_dir)
+        resolved_bin_dir = UserConfig.find_bin_dir(bin_dir, dist_dir)
+        return UserConfig(generate_config(
+            bin_dir=resolved_bin_dir,
+            distribution_dir=dist_dir,
+            project_config_file=None,
+            project_dir=None,
+            dev_container_workspace_dir=None,
+            dev_container_settings_dir=None,
+            user_setup=user_setup,
+            universal_file=None,
+            no_setup_search=False,
+        ), resolved_bin_dir)
 
-                # The follow-up defaults come from those files read so far.
-                # From least important to most important
-                install_dir = self._lookup("scoter", "install-dir")
-                user_dir = self._lookup("scoter", "user-dir")
-                self._cache = configparser.ConfigParser()
-                self._cache.read(filter_files((
-                    # "defaults" directories are lower priority than the other locations.
-                    or_file(or_defaults(install_dir)),
-                    or_file(or_defaults(self._global_config)),
-                    or_file(Path.home() / ".config" / "scoter.d" / DEFAULTS_DEFAULT_DIR),
-                    or_file(or_defaults(os.environ.get("SURF_SCOTER_HOME"))),
-                    or_file(or_defaults(user_dir)),
+    @staticmethod
+    def require_global_config_path(distribution_dir: str | None) -> Path:
+        """Find where the OS installed the global configuration path.
+        
+        This can come from the user supplied argument.  That's common for a
+        distribution to supply a `/usr/local/bin/scoter` shell script that runs:
+        
+        `/usr/local/share/scoter/scoter --distribution-dir=/usr/local/share/scoter "$@"`
+        """
+        if distribution_dir:
+            # Use this value, even if it doesn't exist.
+            if os.path.isdir(distribution_dir):
+                # Don't use realpath here.
+                return Path(os.path.abspath(distribution_dir))
+            raise ConfigErr(f"The distribution directory {distribution_dir} doesn't exist.")
 
-                    # Install directory.
-                    or_file(install_dir),
+        # Try to find it based on the location of this script file.
+        this = os.path.realpath(__file__)
+        if os.path.isfile(this):
+            this_dir = os.path.dirname(this)
+            # All we care about here is that the executables exist.
+            if (
+                os.path.isdir(os.path.join(this_dir, DISTRIBUTION_BIN_DIR, SCOTER_HOST_EXEC))
+                and os.path.isdir(os.path.join(this_dir, DISTRIBUTION_BIN_DIR, GEN_SCOTER_UC_EXEC))
+            ):
+                return Path(this_dir)
 
-                    # System-wide globals.
-                    or_file(self._global_config),
-                    self._global_config,
+        # Couldn't find it.
+        raise ConfigErr(
+            "Could not find the Surf Scoter distribution directory.  "
+            "You will need to pass it with the '--distribution-dir=PATH' argument."
+        )
 
-                    # User home config directory.
-                    or_file(Path.home() / ".config" / "scoter.d"),
-                    or_file(Path.home() / ".config"),
+    @staticmethod
+    def find_bin_dir(bin_dir: str | None, dist_dir: Path) -> Path:
+        """Find the bin/ directory."""
+        if bin_dir:
+            if not os.path.isdir(bin_dir):
+                raise ConfigErr(f"Could not find bin directory '{bin_dir}'")
+            return Path(bin_dir)
+        return dist_dir / DISTRIBUTION_BIN_DIR
 
-                    # ENV location.
-                    or_file(os.environ.get("SURF_SCOTER_HOME")),
+    def __require_dict(self, *path: JsonPathPart) -> DictJsonData:
+        obj, exists = self.__get(path)
+        if exists and isinstance(obj, dict):
+            return obj
+        raise UserConfig.__key_err(path, "expected map")
 
-                    # Declared user directory.
-                    or_file(user_dir),
+    def __require_list(self, *path: JsonPathPart) -> ListJsonData:
+        obj, exists = self.__get(path)
+        if exists and isinstance(obj, list):
+            return obj
+        raise UserConfig.__key_err(path, "expected list")
 
-                    # CLI argument for the configuration.
-                    # Can point at a file or a directory.
-                    self._user_config,
-                    or_file(self._user_config),
-                )))
+    def __require_list_path(self, *path: JsonPathPart) -> list[tuple[list[JsonPathPart], JsonData]]:
+        ret: list[tuple[list[JsonPathPart], JsonData]] = []
+        idx = 0
+        for item in self.__require_list(*path):
+            ret.append(([*path, idx], item))
+            idx += 1
+        return ret
 
+    def __opt_str(self, *path: JsonPathPart) -> str | None:
+        obj, exists = self.__get(path)
+        if not exists:
+            return None
+        if isinstance(obj, str):
+            return obj
+        raise UserConfig.__key_err(path, "expected string")
 
-def find_global_config_path() -> Path | None:
-    """Find where the OS installed the global configuration path."""
-    # For now, Surf Scoter only installs as a user application.
-    # If, however, this script still sits in the install location, then
-    # that's a hint.
-    this = os.path.realpath(__file__)
-    print(f"DEBUG looking for global path at {this}", file=sys.stderr)
-    if os.path.isfile(this):
-        this_dir = os.path.dirname(this)
-        # All we care about here is the 'defaults' and 'containers' directories.
-        if (
-            os.path.isdir(os.path.join(this_dir, CONTAINERS_DEFAULT_DIR))
-            and os.path.isdir(os.path.join(this_dir, DEFAULTS_DEFAULT_DIR))
-        ):
-            return Path(this_dir)
-    return None
+    def __get(self, path: Sequence[JsonPathPart]) -> tuple[JsonData, bool]:
+        cur: JsonData = self._config
+        for part in path:
+            if isinstance(cur, dict) and isinstance(part, str):
+                if part in cur:
+                    cur = cur[part]
+                else:
+                    return (None, False)
+            elif isinstance(cur, list) and isinstance(part, int):
+                if part >= 0 and part < len(cur):
+                    cur = cur[part]
+                else:
+                    return (None, False)
+            else:
+                return (None, False)
+        return (cur, True)
+
+    @staticmethod
+    def __key_err(path: Sequence[JsonPathPart], msg: str) -> ConfigErr:
+        path_str = "/".join([str(p) for p in path])
+        return ConfigErr(f"bad universal configuration file format at {path_str}: {msg}")
+
 
 # ---------------------------------------------------------------------
 # User SSH Setup Understanding.
@@ -375,7 +417,7 @@ class SshConfigLine:
 
 # ---------------------------------------------------------------------
 # Basic file operations
-def _backup(file: Path) -> bool:
+def _backup(file: Path, backup_ext: str) -> bool:
     """Backup the file.
     
     Returns 'true' if the backup was successful.
@@ -384,7 +426,7 @@ def _backup(file: Path) -> bool:
         # The file to back up doesn't exist, so there's nothing to back up.
         # This is fine.
         return True
-    to_file = Path(str(file) + BACKUP_FILE_EXT)
+    to_file = Path(str(file) + backup_ext)
     if to_file.is_file():
         to_file.unlink()
     if not to_file.exists():
@@ -395,11 +437,99 @@ def _backup(file: Path) -> bool:
 
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
+# External Tool Code
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
+def generate_config(
+    *,
+    bin_dir: Path | None,
+    distribution_dir: Path,
+    project_config_file: str | None,
+    project_dir: str | None,
+    dev_container_workspace_dir: str | None,
+    dev_container_settings_dir: str | None,
+    user_setup: str | None,
+    universal_file: str | None,
+    no_setup_search: bool,
+) -> DictJsonData:
+    """Run the gen-scoter-uc program."""
+    if bin_dir:
+        gen_uc = _require_exe(bin_dir / GEN_SCOTER_UC_EXEC)
+    else:
+        gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
+    args: list[str] = [str(gen_uc), "--distribution-dir", str(distribution_dir)]
+    if project_config_file:
+        args.extend(("--config", project_config_file))
+    if project_dir:
+        args.extend(("--project-dir", project_dir))
+    if dev_container_workspace_dir:
+        args.extend(("--dev-container-workspace-dir", dev_container_workspace_dir))
+    if dev_container_settings_dir:
+        args.extend(("--dev-container-settings-dir", dev_container_settings_dir))
+    if user_setup:
+        args.extend(("--user-setup", user_setup))
+    if universal_file:
+        args.extend(("--universal", universal_file))
+    if no_setup_search:
+        args.append("--no-setup-search")
+    res = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        # let stderr be passed directly to the user.
+        check=True,
+    )
+    try:
+        ret: JsonData = json.loads(res.stdout)
+    except Exception as err:
+        raise ConfigErr(f"'{gen_uc}' generated an invalid JSON document: {err}") from err
+    if isinstance(ret, dict):
+        return ret
+    raise ConfigErr(f"'{gen_uc}' generated an unexpected format.")
+
+
+def _find_exe(name: str | Path) -> Path | None:
+    """Find the executable."""
+    # Which will work if you pass it the absolute 
+    loc = shutil.which(name)
+    if loc:
+        # If 'name' is relative, which will return a relative path.
+        return Path(os.path.abspath(loc))
+    if platform.system() == "Windows":
+        # Check for a missing PATHEXT.
+        path_ext = os.environ.get("PATHEXT", "").split(os.path.pathsep)
+        for ext in path_ext:
+            if not ext:
+                continue
+            if str(name).endswith(ext) and os.path.isfile(name):
+                return Path(os.path.abspath(name))
+        for ext in path_ext:
+            if not ext:
+                continue
+            if os.path.isfile(str(name) + ext):
+                return Path(os.path.abspath(name))
+        # Not a Windows executable.
+        return None
+    if os.path.isfile(name) and os.access(name, os.X_OK):
+        return Path(os.path.abspath(name))
+    # Not a non-Windows executable.
+    return None
+
+
+def _require_exe(name: str | Path) -> Path:
+    """Require that the executable exists."""
+    ret = _find_exe(name)
+    if not ret:
+        raise ConfigErr(f"could not find '{name}'")
+    return ret
+
+
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Sub Command Handlers
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
-# Each sub-command handler takes the arguments: (UserConfig, argparse.Namespace)
-# and returns int.
+# Each sub-command handler has the signature (argparse.Namespace) -> int
 # They also register an argument parser to the 'SUB_COMMAND_ARGUMENTS' value.
 SUB_COMMAND_ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {}
 
@@ -422,8 +552,9 @@ def user_space_setup_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int:
+def user_space_setup_runner(args: argparse.Namespace) -> int:
     """Run the user-space setup."""
+    config = UserConfig.load_settings_from_args(args)
     ssh_dir = config.require_path("ssh", "home")
     interactive = bool(args.interactive)
 
@@ -432,14 +563,83 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
 
 SUB_COMMAND_ARGUMENTS["user-setup"] = user_space_setup_parser
 
+# ---------------------------------------------------------------------
+# Configuration debugging.
+
+def configuration_debug_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure the CLI arguments."""
+    parser.description = "Output the Surf Scoter universal configuration file."
+    parser.set_defaults(func=configuration_debug_runner)
+    _add_project_args(parser)
+    parser.add_argument(
+        "-n",
+        "--no-project",
+        action="store_false",
+        default=True,
+        dest="use_project",
+        help="Do not try to lookup the project files.",
+    )
+
+
+def configuration_debug_runner(args: argparse.Namespace) -> int:
+    """Output the SUC to stdout."""
+    if args.use_project:
+        config = UserConfig.load_project_from_args(args)
+    else:
+        config = UserConfig.load_settings_from_args(args)
+    print(config.dumps())
+    return 0
+
+
+SUB_COMMAND_ARGUMENTS["parse-config"] = configuration_debug_parser
+
 
 # ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# External Tool Code
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
+# Argument helpers
+
+def _add_project_args(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments used for handling a project."""
+    parser.add_argument(
+        "-c",
+        "--project-config",
+        action="store",
+        dest="project_config",
+        help="Set the project configuration file.",
+    )
+    parser.add_argument(
+        "-d",
+        "--project-dir",
+        action="store",
+        dest="project_dir",
+        help="Set the project configuration directory.",
+    )
 
 
+def _add_settings_args(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments used for handling the user + global settings."""
+    parser.add_argument(
+        "-U",
+        "--user-config",
+        action="store",
+        dest="user_config",
+        help=(
+            "Set your user configuration directory or file.  "
+            "Also set through the SURF_SCOTER_HOME environment variable."
+        ),
+    )
+    parser.add_argument(
+        "-D",
+        "--distribution-dir",
+        action="store",
+        dest="distribution_dir",
+        help="Set the directory where you have Surf Scoter installed.",
+    )
+    parser.add_argument(
+        "--bin-dir",
+        action="store",
+        dest="bin_dir",
+        help="Point to the directory storing the Surf Scoter binary files.",
+    )
 
 
 # ---------------------------------------------------------------------
@@ -452,30 +652,26 @@ def main(argv: Sequence[str]) -> int:
         prog=argv[0],
         description="Surf Scoter development environment maintenance.",
     )
-    parser.add_argument(
-        "-U",
-        "--user-config",
-        dest="user_config",
-        help=(
-            "Set your user configuration directory or file.  "
-            "Also set through the SURF_SCOTER_HOME environment variable."
-        ),
-        action="store",
-    )
+    _add_settings_args(parser)
     subs = parser.add_subparsers()
     for name, populator in SUB_COMMAND_ARGUMENTS.items():
         populator(subs.add_parser(name))
 
     # Parse the arguments.
     args = parser.parse_args(argv[1:])
-    global_config = UserConfig(Path(args.user_config_dir), find_global_config_path())
 
     # Run the sub-command selected.
     if not hasattr(args, "func"):
         print(parser.description)
         print("Run with '--help' to learn how to use the tool.")
         return 1
-    return args.func(global_config, args)
+    try:
+        return args.func(args)
+    except ConfigErr as err:
+        print(f"Configuration problem: {err}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("User interrupted execution.", file=sys.stdout)
+    return 1
 
 
 if __name__ == "__main__":

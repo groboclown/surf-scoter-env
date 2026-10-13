@@ -83,7 +83,7 @@ pub fn find(
             }
             let message = if lookup.is_empty() {
                 format!(
-                    "can't find dev container '{name}': the system configuration sets no `scoter` `path-lists` `dev-containers`"
+                    "can't find dev container '{name}': the system configuration sets no `scoter` `path-lists` `dev-containers-search`"
                 )
             } else {
                 let searched: Vec<String> =
@@ -375,7 +375,7 @@ mod tests {
         let errors = find(&name, project, &[]).unwrap_err();
         assert_eq!(
             errors[0].to_string(),
-            "/p/scoter.yaml: container.dev-container: can't find dev container 'env': the system configuration sets no `scoter` `path-lists` `dev-containers`",
+            "/p/scoter.yaml: container.dev-container: can't find dev container 'env': the system configuration sets no `scoter` `path-lists` `dev-containers-search`",
         );
         let errors = find(&name, project, &[dir.path().to_path_buf()]).unwrap_err();
         assert!(

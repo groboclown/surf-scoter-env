@@ -13,7 +13,7 @@
 //!   # The dev container: a directory with a Dockerfile and dev-env.yaml,
 //!   # relative to this file...
 //!   dev-container-path: ./.scoter/dev-env
-//!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers`.
+//!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers-search`.
 //!   # dev-container: dev-env
 //!
 //! # The environment of the host processes, for every command (optional).
@@ -137,7 +137,7 @@ impl ProjectConfig {
 pub enum ContainerRef {
     /// `dev-container-path`: its directory, relative to the project file.
     Path(String),
-    /// `dev-container`: a directory name, found in the `scoter` `path-lists: dev-containers`.
+    /// `dev-container`: a directory name, found in the `scoter` `path-lists: dev-containers-search`.
     Name(String),
 }
 

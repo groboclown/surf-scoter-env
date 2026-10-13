@@ -646,6 +646,17 @@ fn find_var<'a>(
         .map(|(_, value)| value.as_str())
 }
 
+/// Whether `section:key` is one of the locations the tool sets, which a run
+/// may not have (`project-dir` without a project, say).
+fn is_location(section: &str, key: &str) -> bool {
+    is_tool_only(section, key) || (section == SCOTER_SECTION && key == DISTRIBUTION_DIR)
+}
+
+/// The message for a reference to a location this run doesn't have.
+fn unset_location(section: &str, key: &str) -> String {
+    format!("`${{{section}:{key}}}` isn't set for this run")
+}
+
 /// Whether only the tool can set `section:key`.
 fn is_tool_only(section: &str, key: &str) -> bool {
     section == SCOTER_SECTION && TOOL_ONLY_KEYS.contains(&key)
@@ -1137,6 +1148,8 @@ impl SystemConfig {
                             add(ConfigError::new(file, &at, "the command is empty"));
                         }
                         Ok(_) => {}
+                        // It just has no value this run.
+                        Err(failure) if failure.no_value() => {}
                         Err(failure) => add(self.failure_error(failure, file, &at)),
                     },
                 }
@@ -1248,6 +1261,7 @@ impl SystemConfig {
         let reference = format!("`${{{section}:{key}}}`");
         let unexpanded = || format!("{reference} has no value");
         match self.entry(section, key) {
+            None if is_location(section, key) => Err(unset_location(section, key)),
             None => Err(format!("unknown reference {reference}")),
             Some(Entry::Run(_) | Entry::PathList(_)) => {
                 Err(format!("{reference} is a list; it can't be used here"))
@@ -1389,7 +1403,7 @@ impl SystemConfig {
         let resolve =
             |group: &str, key: &str| match expander.resolve(name, key, &None, &mut Vec::new()) {
                 Ok(resolved) => Ok(Some(resolved)),
-                Err(f) if f.missing => Ok(None),
+                Err(f) if f.no_value() => Ok(None),
                 Err(f) => Err(failure(f, group, key)),
             };
         let template = |key: &str, words: Vec<Vec<Part>>| {
@@ -1457,7 +1471,7 @@ impl SystemConfig {
             let run =
                 match expander.words(name, &RunValue::Line(raw.to_string()), &origin, &mut stack) {
                     Ok(words) => Some(template(key, words)?),
-                    Err(f) if f.missing => None,
+                    Err(f) if f.no_value() => None,
                     Err(f) => return Err(failure(f, RUNS, key)),
                 };
             section.runs.insert(key.to_string(), run);
@@ -1475,15 +1489,32 @@ struct Failure {
     /// The value whose text has the problem; `None` for the text being expanded.
     origin: Origin,
     message: String,
-    /// The value refers to an executable that isn't there: it has no value,
-    /// rather than an error.
-    missing: bool,
+    kind: FailureKind,
+}
+
+/// What kind of failure: most are errors, but a value that needs something
+/// this run doesn't have just has no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    Error,
+    /// It needs a program that isn't there.
+    MissingProgram,
+    /// It needs a `scoter` location this run doesn't have, such as
+    /// `project-dir` without a project.
+    UnsetLocation,
+}
+
+impl Failure {
+    /// The value has no value, rather than an error.
+    fn no_value(&self) -> bool {
+        self.kind != FailureKind::Error
+    }
 }
 
 impl Failure {
     fn at(section: &str, group: &str, key: &str, message: String) -> Self {
         Failure {
-            missing: false,
+            kind: FailureKind::Error,
             origin: Some((section.to_string(), group_key(group, key))),
             message,
         }
@@ -1541,7 +1572,7 @@ impl Expander<'_> {
             return Err(Failure {
                 origin: referrer.clone(),
                 message: format!("the program for `${{{section}:{key}}}` isn't there"),
-                missing: true,
+                kind: FailureKind::MissingProgram,
             });
         }
         if let Some(value) = self.overrides.get(&id) {
@@ -1551,8 +1582,15 @@ impl Expander<'_> {
             return Err(self.loop_failure(&stack[start..]));
         }
         let Some(entry) = self.entry(section, key) else {
+            if is_location(section, key) {
+                return Err(Failure {
+                    kind: FailureKind::UnsetLocation,
+                    origin: referrer.clone(),
+                    message: unset_location(section, key),
+                });
+            }
             return Err(Failure {
-                missing: false,
+                kind: FailureKind::Error,
                 origin: referrer.clone(),
                 message: format!("unknown reference `${{{section}:{key}}}`"),
             });
@@ -1582,7 +1620,7 @@ impl Expander<'_> {
                         "programs are files"
                     };
                     return Err(Failure {
-                        missing: false,
+                        kind: FailureKind::Error,
                         origin,
                         message: format!("{kind}; they can't use `{{x:...}}` values"),
                     });
@@ -1596,7 +1634,7 @@ impl Expander<'_> {
             Entry::Value(value) => match value.text() {
                 Some(text) => Ok(Resolved::Text(vec![Part::Text(text)])),
                 None => Err(Failure {
-                    missing: false,
+                    kind: FailureKind::Error,
                     origin: referrer.clone(),
                     message: format!("`${{{section}:{key}}}` is null, so it can't be used here"),
                 }),
@@ -1623,7 +1661,7 @@ impl Expander<'_> {
     ) -> Result<Vec<Vec<Part>>, Failure> {
         let split = match raw {
             RunValue::Line(line) => command::split_words(line).map_err(|message| Failure {
-                missing: false,
+                kind: FailureKind::Error,
                 origin: origin.clone(),
                 message,
             })?,
@@ -1649,11 +1687,16 @@ impl Expander<'_> {
             section.to_string(),
             index_key(&group_key(PATH_LISTS, key), i),
         ));
+        let words = match self.expand_word(section, entry, &origin, stack) {
+            // Like a `./` entry without a project.
+            Err(f) if f.kind == FailureKind::UnsetLocation => return Ok(Vec::new()),
+            words => words?,
+        };
         let mut paths = Vec::new();
-        for parts in self.expand_word(section, entry, &origin, stack)? {
+        for parts in words {
             if parts.iter().any(|p| matches!(p, Part::External(_))) {
                 return Err(Failure {
-                    missing: false,
+                    kind: FailureKind::Error,
                     origin,
                     message: "paths can't use `{x:...}` values".to_string(),
                 });
@@ -1679,7 +1722,7 @@ impl Expander<'_> {
         if let Some(reference) = whole_reference(word) {
             let (ref_section, ref_key) =
                 parse_reference(reference, section).map_err(|message| Failure {
-                    missing: false,
+                    kind: FailureKind::Error,
                     origin: origin.clone(),
                     message,
                 })?;
@@ -1700,7 +1743,7 @@ impl Expander<'_> {
         stack: &mut Vec<(String, String)>,
     ) -> Result<Vec<Part>, Failure> {
         let here = |message: String| Failure {
-            missing: false,
+            kind: FailureKind::Error,
             origin: origin.clone(),
             message,
         };
@@ -2030,9 +2073,56 @@ mod tests {
         );
         assert_eq!(config.get("a", "w").as_deref(), Some("/work/w"));
 
-        // Unset, they can't be referred to.
-        let errors = load(Some(&setup), None, None, Env::default()).unwrap_err();
-        assert_eq!(errors.len(), 3, "{errors:?}");
+        // Unset, they're not an error: what needs them just has no value.
+        let config = load(Some(&setup), None, None, Env::default()).unwrap();
+        assert_eq!(config.get("a", "p"), None);
+        let section = config.section("a", &SectionDefaults::default()).unwrap();
+        assert_eq!(
+            section.paths,
+            BTreeMap::from([
+                ("c".to_string(), None),
+                ("p".to_string(), None),
+                ("w".to_string(), None),
+            ])
+        );
+    }
+
+    #[test]
+    fn unset_locations() {
+        let config = load_one(concat!(
+            "scoter:\n  path-lists:\n",
+            // Entries needing a location this run doesn't have are left out.
+            "    search: ['${scoter:project-dir}/a', /b, '${scoter:distribution-dir}', '${a:dirs}']\n",
+            "a:\n",
+            "  paths:\n    p: ${scoter:project-dir}/p\n    plain: /plain\n",
+            "  path-lists:\n    dirs: ['${p}', /c]\n",
+            "  runs:\n    go: tool ${scoter:project-dir}\n    ok: tool ${plain}\n",
+            "  values:\n    v: in ${scoter:cwd}\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.path_list(SCOTER_SECTION, "search"),
+            [PathBuf::from("/b"), PathBuf::from("/c")]
+        );
+        let section = config.section("a", &SectionDefaults::default()).unwrap();
+        assert_eq!(section.paths["p"], None);
+        assert_eq!(section.paths["plain"], Some(PathBuf::from("/plain")));
+        assert_eq!(section.path_lists["dirs"], Some(vec![PathBuf::from("/c")]));
+        assert_eq!(section.runs["go"], None);
+        assert!(section.runs["ok"].is_some());
+        assert_eq!(section.values["v"], ScalarValue::Null);
+        // Not programs that are missing.
+        assert!(section.missing.is_empty());
+        assert_eq!(
+            config.scalar_text(SCOTER_SECTION, PROJECT_DIR),
+            Err("`${scoter:project-dir}` isn't set for this run".to_string())
+        );
+
+        // Other unknown references are still errors.
+        assert_eq!(
+            one_error("a:\n  path-lists:\n    l: ['${scoter:project-dirr}']\n"),
+            "a.path-lists.l[0]: unknown reference `${scoter:project-dirr}`"
+        );
     }
 
     #[test]
@@ -2042,11 +2132,9 @@ mod tests {
             "setup.yaml",
             "a:\n  paths:\n    x: ${scoter:dev-container-path}/x\n",
         );
-        let errors = messages(load(Some(&setup), None, None, Env::default()).unwrap_err());
-        assert_eq!(
-            errors,
-            ["a.paths.x: unknown reference `${scoter:dev-container-path}`"]
-        );
+        // Without a dev container, it's not set: no value.
+        let config = load(Some(&setup), None, None, Env::default()).unwrap();
+        assert_eq!(config.get("a", "x"), None);
 
         let options = SetupOptions {
             user_setup: Some(&setup),

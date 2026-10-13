@@ -73,7 +73,7 @@ What a reference gives depends on the kind of value it refers to:
 * `paths`, `programs` and `values` are text, and can be used anywhere.  A `null` value can't be used.  A reference to a program gives the program found (see [Programs](#programs)).
 * `runs` and `path-lists` are lists.  A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
 
-Referring to a key that isn't set anywhere is an error, as is a set of values that refer to each other in a loop.  You can escape a `${` expression by doubling up the dollars - `$${` becomes `${`; you don't need to double-up a `$` unless it's followed by a `{`.
+Referring to a key that isn't set anywhere is an error (except for the `scoter` locations the tool sets; see [below](#the-scoter-section)), as is a set of values that refer to each other in a loop.  You can escape a `${` expression by doubling up the dollars - `$${` becomes `${`; you don't need to double-up a `$` unless it's followed by a `{`.
 
 ### The `scoter:` section
 
@@ -81,7 +81,7 @@ The `scoter` section is special, in that the tool fills in the `paths` that say 
 
 * `project-config` - the project configuration file.  Not set without one.
 * `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)).  This is the directory with the project configuration file in it, unless `gen-scoter-uc --project-dir` gives another.  Not set without either.
-* `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers` (see below), so that list can't refer to it.
+* `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers-search` (see below), so that list can't refer to it.
 * `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
 * `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
 * `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  This is the file the tool found by looking, not the `--user-setup` file.  If the tool didn't find a user setup file, this isn't set.
@@ -93,11 +93,16 @@ All of them are absolute paths.
 
 `distribution-dir` is the only one of these that you can set in a setup file.  The tool needs the others to find the configuration, so changing them afterwards would be a lie.  Setting one is an error (such as `scoter.paths.user-dir: is set by the tool; remove it`).
 
-Like any other key, referring to one of these when it isn't set (say, `${scoter:user-dir}` when your setup file is `~/.config/surf-scoter.setup.yaml`) is an error.
+A run doesn't always have all of these: `project-dir` isn't set without a project, for example.  Referring to one that isn't set (say, `${scoter:user-dir}` when your setup file is `~/.config/surf-scoter.setup.yaml`) isn't an error, so one setup file can serve runs with and without a project:
+
+* A `path-lists` entry that needs it is left out, as a `./` entry is without a project.  So `dev-containers-search: ['${scoter:project-dir}/containers', '${scoter:distribution-dir}/containers']` is just the distribution's directory when there's no project.
+* Any other value that needs it has no value (`null`), like a value that needs a program that isn't there.  The tool using that value reports the problem, if it needs it.
+
+A misspelled location, such as `${scoter:project-dirr}`, is still an error.
 
 When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), `user-setup-file` and `user-dir` aren't set, unless they come from an earlier run's universal configuration file (`--universal`).  A `--universal` file also brings along its `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir` and `distribution-dir`, unless this run gives others.
 
-The rest of the `scoter` section is yours to set.  The tools read its `path-lists: dev-containers` (see [Defining Executables](#defining-executables)).
+The rest of the `scoter` section is yours to set.  The tools read its `path-lists: dev-containers-search` (see [Defining Executables](#defining-executables)).
 
 ## File Locations
 
@@ -156,7 +161,7 @@ The tools use these sections:
     * `paths: key-file`: the private key used to connect to the container.
 * `scoter`: the tool's own settings.
     * `paths`: where the configuration came from, set by the tool (except that you can set `distribution-dir`), as described in [The `scoter:` section](#the-scoter-section).
-    * `path-lists: dev-containers`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.
+    * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.
 

@@ -42,6 +42,12 @@ scoter:
             - ${scoter:cwd}/.surf-scoter.yml
             - ${scoter:cwd}/.surf-scoter/setup.yaml
             - ${scoter:cwd}/.surf-scoter/setup.yml
+            - ${scoter:project-dir}/.surf-scoter.yaml
+            - ${scoter:project-dir}/.surf-scoter.yml
+
+            # Careful with these!
+            - ${scoter:project-dir}/setup.yaml
+            - ${scoter:project-dir}/setup.yml
 
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         dev-containers-search:
@@ -50,3 +56,6 @@ scoter:
             - ${scoter:project-dir}/.surf-scoter
             - ${scoter:project-dir}/.surf-scoter/containers
             - ${scoter:distribution-dir}/containers
+    
+    values:
+        backup-file-extension: .backup

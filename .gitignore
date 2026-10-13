@@ -27,6 +27,8 @@ rustc-ice-*.txt
 /Dockerfile
 /allowed-domains.txt
 .env
+/bin/
+/setup.yaml
 
 
 # Python local files.

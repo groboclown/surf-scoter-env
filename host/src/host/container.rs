@@ -74,6 +74,11 @@ pub(crate) fn broker_argv(
     let template = match section.runs.get(RUN_BROKER) {
         Some(Some(template)) => template,
         // It needs an executable that isn't there.
+        Some(None) if section.missing.is_empty() => {
+            return Err(format!(
+                "`{CONTAINER_TOOL}.runs.{RUN_BROKER}` needs a `scoter` location this run doesn't have"
+            ));
+        }
         Some(None) => {
             let missing: Vec<String> = section
                 .missing
@@ -198,6 +203,14 @@ mod tests {
         assert_eq!(
             broker_argv(&config, "c1", "/b").unwrap_err(),
             "cannot find the program 'no-such-container-tool' (set by `docker.programs.exec`)",
+        );
+        let config = system_config(
+            "docker:\n  programs:\n    exec: sh\n  runs:\n    broker: ${exec} --dir ${scoter:project-dir}\n",
+            &sh_dir(),
+        );
+        assert_eq!(
+            broker_argv(&config, "c1", "/b").unwrap_err(),
+            "`docker.runs.broker` needs a `scoter` location this run doesn't have",
         );
         assert!(
             broker_argv(&config, "--privileged", "/b")

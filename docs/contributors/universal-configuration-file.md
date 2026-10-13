@@ -1,6 +1,6 @@
 # The Universal Configuration File
 
-Because the tooling brings configuration settings from many different places, it provides a program that finds them all and merges them into a universal configuration file, in JSON format.
+Because the tooling brings configuration settings from many different places, it provides a program that finds them all and merges them into a universal configuration file, in JSON format.  This is affectionately called the Scoter Universal Configuration file, or "SUC" for short.
 
 ## Running
 
@@ -135,7 +135,7 @@ The general layout:
             "programs": {},
             "runs": {},
             "path-lists": {
-                "dev-containers": ["/home/user/.local/share/surf-scoter/containers"]
+                "dev-containers-search": ["/home/user/.local/share/surf-scoter/containers"]
             },
             "values": {}
         },
