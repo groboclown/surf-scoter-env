@@ -15,7 +15,7 @@ container:
   # The development container: a directory with a Dockerfile and dev-env.yaml,
   # relative to this file.
   dev-container-path: ./.scoter/dev-env
-  # Or, instead, the name of one found in the system configuration's `dev-container-paths`.
+  # Or, instead, the name of one found in the system configuration's `scoter` `path-lists: dev-containers-search`.
   # dev-container: dev-env
 # What clients may run: one entry per allowed form of a command.
 commands:
@@ -39,9 +39,9 @@ commands:
 The `container` section sets exactly one of:
 
 * `dev-container-path`: a directory, relative to this file, holding the container's `Dockerfile` and its `dev-env.yaml` file (see [the developer environment Dockerfile](project-dockerfile.md)).
-* `dev-container`: the name of such a directory, found in one of the `dev-container-paths` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
+* `dev-container`: the name of such a directory, found in one of the `scoter` section's `path-lists: dev-containers` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
 
-The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `run: broker` key).
+The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 
 ## Host commands
 

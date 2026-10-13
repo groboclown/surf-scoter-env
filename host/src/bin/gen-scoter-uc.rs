@@ -2,11 +2,22 @@
 //! gathered from all its sources, as JSON.  See
 //! `docs/contributors/universal-configuration-file.md`.
 //!
-//! Usage: gen-scoter-uc [--config PROJECT.yaml] [--user-setup SETUP.yaml]
-//!                      [--distribution-dir DIR] [--output FILE]
+//! Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR]
+//!                      [--user-setup SETUP.yaml] [--distribution-dir DIR]
+//!                      [--universal UNIVERSAL.json] [--no-setup-search]
+//!                      [--output FILE]
 //!
 //! Without `--output`, the JSON goes to stdout.  Problems in the
 //! configuration go to stderr, all of them, and nothing is written.
+//!
+//! `--universal` starts from a universal configuration file made earlier:
+//! its system setup is used without reading the setup files again, and its
+//! project file unless `--config` gives another.  `--no-setup-search` skips
+//! looking for the user's setup file and the install directory's.  So a
+//! first run can find the setup, and a second can add the project file:
+//!
+//!     gen-scoter-uc --output first.json
+//!     gen-scoter-uc --universal first.json --no-setup-search --config PROJECT.yaml
 
 use std::ffi::OsString;
 use std::fs;
@@ -20,8 +31,9 @@ const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--user-setup SETUP.yaml] \
-                     [--distribution-dir DIR] [--output FILE]";
+const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] [--user-setup SETUP.yaml] \
+                     [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
+                     [--output FILE]";
 
 fn main() {
     std::process::exit(run(std::env::args_os().skip(1)));
@@ -37,7 +49,16 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             println!("Writes the whole Surf Scoter configuration as JSON.");
             println!("--config gives the project configuration file, if any.");
             println!(
+                "--project-dir gives the project directory, in place of the project file's directory."
+            );
+            println!(
                 "--user-setup gives a system setup file to read first; --distribution-dir, where Surf Scoter is installed."
+            );
+            println!(
+                "--universal starts from a universal configuration file made earlier, without reading its setup files again."
+            );
+            println!(
+                "--no-setup-search skips looking for the user's and the install directory's setup files."
             );
             println!("--output gives the file to write; otherwise, the JSON goes to stdout.");
             return EXIT_OK;
@@ -88,8 +109,11 @@ struct Cli {
 /// Options take a value as `--name VALUE` or `--name=VALUE`.
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
     let mut config: Option<OsString> = None;
+    let mut project_dir: Option<OsString> = None;
     let mut user_setup: Option<OsString> = None;
     let mut distribution_dir: Option<OsString> = None;
+    let mut universal: Option<OsString> = None;
+    let mut no_setup_search = false;
     let mut output: Option<OsString> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -99,14 +123,23 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
         if s == "-h" || s == "--help" {
             return Ok(None);
         }
+        if s == "--no-setup-search" {
+            if no_setup_search {
+                return Err(format!("{s} given more than once"));
+            }
+            no_setup_search = true;
+            continue;
+        }
         let (name, inline) = match s.split_once('=') {
             Some((name, value)) => (name, Some(OsString::from(value))),
             None => (s, None),
         };
         let slot = match name {
             "--config" => &mut config,
+            "--project-dir" => &mut project_dir,
             "--user-setup" => &mut user_setup,
             "--distribution-dir" => &mut distribution_dir,
+            "--universal" => &mut universal,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -125,8 +158,11 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     Ok(Some(Cli {
         options: LoadOptions {
             project: config.map(PathBuf::from),
+            project_dir: project_dir.map(PathBuf::from),
             user_setup: user_setup.map(PathBuf::from),
             distribution_dir: distribution_dir.map(PathBuf::from),
+            universal: universal.map(PathBuf::from),
+            no_setup_search,
         },
         output: output.map(PathBuf::from),
     }))
@@ -162,9 +198,12 @@ mod tests {
         let parsed = parse_args(os_args(&[
             "--config",
             "p.yaml",
+            "--project-dir=proj",
             "--user-setup=s.yaml",
             "--distribution-dir",
             "/opt/scoter",
+            "--universal=first.json",
+            "--no-setup-search",
             "--output=out.json",
         ]));
         assert_eq!(
@@ -172,8 +211,11 @@ mod tests {
             Ok(Some(Cli {
                 options: LoadOptions {
                     project: Some(PathBuf::from("p.yaml")),
+                    project_dir: Some(PathBuf::from("proj")),
                     user_setup: Some(PathBuf::from("s.yaml")),
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
+                    universal: Some(PathBuf::from("first.json")),
+                    no_setup_search: true,
                 },
                 output: Some(PathBuf::from("out.json")),
             })),
@@ -197,6 +239,11 @@ mod tests {
             "--output given more than once"
         );
         assert_eq!(err(&["--workspace", "x"]), "unknown option '--workspace'");
+        assert_eq!(
+            err(&["--no-setup-search", "--no-setup-search"]),
+            "--no-setup-search given more than once"
+        );
+        assert_eq!(err(&["--universal"]), "--universal needs a value");
     }
 
     #[test]
@@ -240,7 +287,11 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         let json: serde_json::Value = serde_json::from_str(&written.unwrap()).unwrap();
         assert_eq!(json["dev-container"]["broker-bin"], "/b");
-        assert_eq!(json["system-configs"][0], path(&dir.join("setup.yaml")));
+        assert_eq!(
+            json["setup"]["files"][0]["file"],
+            path(&dir.join("setup.yaml"))
+        );
+        assert!(json.get("system-configs").is_none());
     }
 
     #[test]

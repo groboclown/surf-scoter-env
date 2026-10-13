@@ -69,6 +69,7 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         project: Some(cli.config.clone()),
         user_setup: cli.user_setup.clone(),
         distribution_dir: cli.distribution_dir.clone(),
+        ..LoadOptions::default()
     };
     let config = match config::load_all(&options) {
         Ok(c) => c,
@@ -637,7 +638,7 @@ mod tests {
             "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
         );
         let project = write("scoter.yaml", "container:\n  dev-container-path: env\n");
-        let setup = write("setup.yaml", "docker:\n  paths:\n    exec: /bin/sh\n");
+        let setup = write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n");
         let ws = workspace_arg();
         let args = |name: &str| {
             let mut args: Vec<OsString> = vec![

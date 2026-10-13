@@ -2,8 +2,10 @@
 //!
 //! ```yaml
 //! docker:
-//!     exec: /usr/sbin/podman
-//!     run-build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dirname}
+//!     programs:
+//!         exec: /usr/sbin/podman
+//!     runs:
+//!         build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dirname}
 //! ```
 //!
 //! A template is split into words before `${...}` references are expanded, so

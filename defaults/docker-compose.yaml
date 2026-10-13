@@ -1,3 +1,7 @@
+# This relies on a generated .env file to fill in the parameters.
+# It's hard-coded to work with the default firewall and gateway
+# containers.
+
 services:
   firewall:
     build: ./containers/firewall-router

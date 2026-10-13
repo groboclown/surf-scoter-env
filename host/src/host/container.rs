@@ -4,9 +4,9 @@
 //!
 //! ```yaml
 //! docker:
-//!     paths:
+//!     programs:
 //!         exec: docker
-//!     run:
+//!     runs:
 //!         broker: ${exec} exec -i {x:container} {x:broker}
 //! ```
 //!
@@ -19,11 +19,11 @@ use std::collections::HashMap;
 use std::io;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use scoter_host::config::system::{EXEC, SectionDefaults, SectionLookup, SystemConfig};
+use scoter_host::config::system::{EXEC, SectionDefaults, SystemConfig};
 
 /// The system configuration section for the container tool.
 pub(crate) const CONTAINER_TOOL: &str = "docker";
-/// The `run` key, in that section, of the command that runs the broker.
+/// The `runs` key, in that section, of the command that runs the broker.
 pub(crate) const RUN_BROKER: &str = "broker";
 pub(crate) const DEFAULT_EXEC: &str = "docker";
 pub(crate) const DEFAULT_RUN_BROKER: &str = "${exec} exec -i {x:container} {x:broker}";
@@ -64,28 +64,32 @@ pub(crate) fn broker_argv(
 ) -> Result<Vec<String>, String> {
     validate_name(container)?;
     let defaults = SectionDefaults {
-        paths: &[(EXEC, DEFAULT_EXEC)],
-        run: &[(RUN_BROKER, DEFAULT_RUN_BROKER)],
+        programs: &[(EXEC, DEFAULT_EXEC)],
+        runs: &[(RUN_BROKER, DEFAULT_RUN_BROKER)],
+        ..SectionDefaults::default()
     };
-    let section = match system
+    let section = system
         .section(CONTAINER_TOOL, &defaults)
-        .map_err(|e| e.to_string())?
-    {
-        SectionLookup::Found(section) => section,
-        SectionLookup::MissingExecutable { key, program } => {
-            return Err(format!(
-                "cannot find the program '{program}' (set by `{CONTAINER_TOOL}.paths.{key}`)"
-            ));
+        .map_err(|e| e.to_string())?;
+    let template = match section.runs.get(RUN_BROKER) {
+        Some(Some(template)) => template,
+        // It needs an executable that isn't there.
+        Some(None) => {
+            let missing: Vec<String> = section
+                .missing
+                .iter()
+                .map(|(key, program)| {
+                    format!("'{program}' (set by `{CONTAINER_TOOL}.programs.{key}`)")
+                })
+                .collect();
+            return Err(format!("cannot find the program {}", missing.join(", ")));
         }
+        None => return Err("no command to run the broker".to_string()),
     };
-    let template = section
-        .run
-        .get(RUN_BROKER)
-        .ok_or("no command to run the broker")?;
     let values = HashMap::from([("container", container), ("broker", broker)]);
     template
         .render(&values)
-        .map_err(|e| format!("`{CONTAINER_TOOL}.run.{RUN_BROKER}`: {e}"))
+        .map_err(|e| format!("`{CONTAINER_TOOL}.runs.{RUN_BROKER}`: {e}"))
 }
 
 /// Build the command for `argv` (the program, then its arguments).
@@ -156,7 +160,7 @@ mod tests {
     #[test]
     fn argv_from_defaults() {
         // `docker` isn't required to be installed: point it at `sh`.
-        let config = system_config("docker:\n  paths:\n    exec: sh\n", &sh_dir());
+        let config = system_config("docker:\n  programs:\n    exec: sh\n", &sh_dir());
         let argv =
             broker_argv(&config, "dev-container", "/usr/local/bin/scoter-container").unwrap();
         assert!(argv[0].ends_with("/sh"), "{argv:?}");
@@ -175,7 +179,7 @@ mod tests {
     #[test]
     fn argv_from_configured_command() {
         let config = system_config(
-            "docker:\n  paths:\n    exec: sh\n  run:\n    broker: ${exec} --context remote exec -i {x:container} {x:broker}\n",
+            "docker:\n  programs:\n    exec: sh\n  runs:\n    broker: ${exec} --context remote exec -i {x:container} {x:broker}\n",
             &sh_dir(),
         );
         let argv = broker_argv(&config, "c1", "/opt/broker").unwrap();
@@ -188,12 +192,12 @@ mod tests {
     #[test]
     fn argv_errors() {
         let config = system_config(
-            "docker:\n  paths:\n    exec: no-such-container-tool\n",
+            "docker:\n  programs:\n    exec: no-such-container-tool\n",
             "/nonexistent",
         );
         assert_eq!(
             broker_argv(&config, "c1", "/b").unwrap_err(),
-            "cannot find the program 'no-such-container-tool' (set by `docker.paths.exec`)",
+            "cannot find the program 'no-such-container-tool' (set by `docker.programs.exec`)",
         );
         assert!(
             broker_argv(&config, "--privileged", "/b")
@@ -206,12 +210,12 @@ mod tests {
     #[test]
     fn argv_unknown_placeholder() {
         let config = system_config(
-            "docker:\n  paths:\n    exec: sh\n  run:\n    broker: ${exec} {x:other}\n",
+            "docker:\n  programs:\n    exec: sh\n  runs:\n    broker: ${exec} {x:other}\n",
             &sh_dir(),
         );
         assert_eq!(
             broker_argv(&config, "c1", "/b").unwrap_err(),
-            "`docker.run.broker`: no value for `{x:other}`"
+            "`docker.runs.broker`: no value for `{x:other}`"
         );
     }
 
@@ -264,7 +268,7 @@ mod tests {
         use std::io::{Read, Write};
         // `sh -c cat ...` runs `cat`; the remaining arguments become $0.. and are ignored.
         let config = system_config(
-            "docker:\n  paths:\n    exec: sh\n  run:\n    broker: ${exec} -c cat {x:container} {x:broker}\n",
+            "docker:\n  programs:\n    exec: sh\n  runs:\n    broker: ${exec} -c cat {x:container} {x:broker}\n",
             &sh_dir(),
         );
         let mut broker = launch(&broker_argv(&config, "c1", "/b").unwrap()).unwrap();

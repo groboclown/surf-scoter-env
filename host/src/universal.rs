@@ -2,54 +2,90 @@
 //! one JSON document that tools without a YAML parser can read.  See
 //! `docs/contributors/universal-configuration-file.md`.
 //!
-//! `sections` holds every section of the system configuration, `scoter`
-//! included, as its `paths` (file locations, with executables found on the
-//! `PATH`) and its `run` command expressions.  A section with an executable
-//! that isn't there is `null`.
+//! `resolved` holds every section of the system configuration, `scoter`
+//! included, as its `paths` (file locations), its `programs` (found on the
+//! `PATH`), its `runs` commands, its `path-lists` and its `values`.  A
+//! program that isn't there is `null`, as is every value referring to it.
 //!
-//! Each `run` command is a list of arguments, the first being the program,
+//! Each `runs` command is a list of arguments, the first being the program,
 //! with quotes already removed and `{x:name}` placeholders left in place.
 //! Fill in the placeholders argument by argument; a value with spaces stays
 //! one argument.
+//!
+//! `setup` holds the system setup files' settings as written, so a later run
+//! can start from this file (with a project file found since, say) without
+//! reading the setup files again.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
-use crate::config::system::{SectionDefaults, SectionLookup};
+use crate::config::system::{self, ScalarValue, SectionDefaults, SetupRecord};
 use crate::config::{ConfigError, ConfigErrors, FullConfig, child_key, index_key};
 
 /// The universal configuration file's contents.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Universal {
-    /// The project configuration file, if one was given.
-    pub project_config: Option<String>,
-    /// The system setup files read, highest priority first.
-    pub system_configs: Vec<String>,
-    /// The project's dev container directory.
-    pub dev_container_path: Option<String>,
-    /// The `NAME-paths` lists, by `NAME`.
-    pub lookup_paths: BTreeMap<String, Vec<String>>,
-    /// Every section, or `null` when one of its executables isn't there.
-    pub sections: BTreeMap<String, Option<UniversalSection>>,
+    /// Where the configuration in effect came from.  (The setup files read
+    /// are in `setup`.)
+    pub active_config_locations: ActiveConfigLocations,
+    /// Every section, expanded.
+    pub resolved: BTreeMap<String, UniversalSection>,
     /// The project's `commands`, with `program` set to the executable found
     /// on the host, or `null`.
     pub host_brokered: Vec<Json>,
     /// The dev container's `dev-env.yaml`.
     pub dev_container: Option<Json>,
+    /// The system setup as read.
+    pub setup: SetupRecord,
 }
 
-/// One section of the system configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Where the configuration in effect came from: the `scoter` section's
+/// `paths` of the same names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ActiveConfigLocations {
+    /// The project configuration file, if any.
+    #[serde(default)]
+    pub project_config: Option<String>,
+    /// The project directory: `--project-dir`, or the project file's.
+    #[serde(default)]
+    pub project_dir: Option<String>,
+    /// The project's dev container directory.
+    #[serde(default)]
+    pub dev_container_path: Option<String>,
+    /// The user's setup file found, and the user directory it's in.
+    #[serde(default)]
+    pub user_setup_file: Option<String>,
+    #[serde(default)]
+    pub user_dir: Option<String>,
+    /// The distribution directory.
+    #[serde(default)]
+    pub distribution_dir: Option<String>,
+    /// The directory the tool ran in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// One section of the system configuration.  A value is `null` when it is,
+/// or refers to, a program that isn't there.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct UniversalSection {
     /// File locations, by key.
-    pub paths: BTreeMap<String, String>,
+    pub paths: BTreeMap<String, Option<String>>,
+    /// Programs found, by key.
+    pub programs: BTreeMap<String, Option<String>>,
     /// Commands, by key, as their arguments.
-    pub run: BTreeMap<String, Vec<String>>,
+    pub runs: BTreeMap<String, Option<Vec<String>>>,
+    /// Lists of file locations, by key.
+    pub path_lists: BTreeMap<String, Option<Vec<String>>>,
+    /// Plain values, by key.
+    pub values: BTreeMap<String, ScalarValue>,
 }
 
 /// Gather the universal configuration from a loaded configuration.
@@ -57,30 +93,40 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     let mut errors = Vec::new();
     let system = &config.system;
 
-    let lookup_paths = system
-        .lookup_paths()
-        .iter()
-        .map(|(name, paths)| (name.clone(), paths.iter().map(|p| path_text(p)).collect()))
-        .collect();
-
-    let mut sections = BTreeMap::new();
+    let mut resolved = BTreeMap::new();
     for name in system.sections() {
         match system.section(name, &SectionDefaults::default()) {
-            Ok(SectionLookup::Found(section)) => {
-                let paths = section
-                    .paths
+            Ok(section) => {
+                let found = |map: &BTreeMap<String, Option<std::path::PathBuf>>| {
+                    map.iter()
+                        .map(|(key, path)| (key.clone(), path.as_deref().map(path_text)))
+                        .collect()
+                };
+                let runs = section
+                    .runs
                     .iter()
-                    .map(|(key, path)| (key.clone(), path_text(path)))
+                    .map(|(key, template)| (key.clone(), template.as_ref().map(|t| t.to_args())))
                     .collect();
-                let run = section
-                    .run
+                let path_lists = section
+                    .path_lists
                     .iter()
-                    .map(|(key, template)| (key.clone(), template.to_args()))
+                    .map(|(key, list)| {
+                        let list = list
+                            .as_ref()
+                            .map(|l| l.iter().map(|p| path_text(p)).collect());
+                        (key.clone(), list)
+                    })
                     .collect();
-                sections.insert(name.to_string(), Some(UniversalSection { paths, run }));
-            }
-            Ok(SectionLookup::MissingExecutable { .. }) => {
-                sections.insert(name.to_string(), None);
+                resolved.insert(
+                    name.to_string(),
+                    UniversalSection {
+                        paths: found(&section.paths),
+                        programs: found(&section.programs),
+                        runs,
+                        path_lists,
+                        values: section.values,
+                    },
+                );
             }
             Err(e) => errors.push(e),
         }
@@ -117,14 +163,21 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     if !errors.is_empty() {
         return Err(ConfigErrors(errors));
     }
+    let location = |key| system.get(system::SCOTER_SECTION, key);
     Ok(Universal {
-        project_config: config.project.as_ref().map(|p| path_text(&p.path)),
-        system_configs: system.files().iter().map(|p| path_text(p)).collect(),
-        dev_container_path: config.dev_container.as_ref().map(|d| path_text(&d.dir)),
-        lookup_paths,
-        sections,
+        active_config_locations: ActiveConfigLocations {
+            project_config: location(system::PROJECT_CONFIG),
+            project_dir: location(system::PROJECT_DIR),
+            dev_container_path: location(system::DEV_CONTAINER_PATH),
+            user_setup_file: location(system::USER_SETUP_FILE),
+            user_dir: location(system::USER_DIR),
+            distribution_dir: location(system::DISTRIBUTION_DIR),
+            cwd: location(system::CWD),
+        },
+        resolved,
         host_brokered,
         dev_container,
+        setup: system.setup_record().clone(),
     })
 }
 
@@ -217,11 +270,23 @@ mod tests {
         path
     }
 
+    impl UniversalSection {
+        fn with_programs(self, programs: &[(&str, Option<String>)]) -> Self {
+            UniversalSection {
+                programs: programs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+                ..self
+            }
+        }
+    }
+
     fn load(dir: &TempDir, project: Option<&str>, setup: &str) -> FullConfig {
         let options = LoadOptions {
             project: project.map(|p| dir.write("proj/scoter.yaml", p)),
             user_setup: Some(dir.write("setup.yaml", setup)),
-            distribution_dir: None,
+            ..LoadOptions::default()
         };
         let env = Env {
             path: Some(dir.path().join("bin").into_os_string()),
@@ -247,87 +312,158 @@ mod tests {
                 "  - {command: deploy, program: /nonexistent/deploy, args: []}\n",
             )),
             concat!(
-                "docker:\n  paths:\n    exec: podman\n  run:\n    build: ${exec} build -t {x:tag} '{x:dir}/a b'\n",
-                "hoodoo:\n  paths:\n    exec: podman\n    helper-cmd: my-hoodoo\n  run:\n    go: ${exec}\n",
+                "docker:\n  programs:\n    exec: podman\n  runs:\n    build: ${exec} build -t {x:tag} '{x:dir}/a b'\n",
+                "hoodoo:\n  programs:\n    exec: podman\n    helper: my-hoodoo\n  runs:\n    go: ${exec}\n    help: ${helper} --help\n",
                 "ssh:\n  paths:\n    config-file: ./ssh/config\n",
-                "scoter:\n  paths:\n    install-dir: /opt/scoter\n    note: ${ssh:config-file}\n",
-                "docker-compose-paths: [./compose, /etc/compose]\n",
+                "  values:\n    port: 22022\n    ratio: 0.5\n    debug: false\n    unset: null\n    note: '${config-file} {x:keep}'\n",
+                "scoter:\n  paths:\n    distribution-dir: /opt/scoter\n    note: ${ssh:config-file}\n",
+                "  path-lists:\n    compose: [./compose, /etc/compose]\n",
             ),
         );
         let universal = build(&config).unwrap();
         let p = |path: &PathBuf| path.display().to_string();
         assert_eq!(
-            universal.project_config,
+            universal.active_config_locations.project_config,
             Some(p(&dir.path().join("proj/scoter.yaml")))
         );
+        assert_eq!(universal.setup.files.len(), 1);
         assert_eq!(
-            universal.system_configs,
-            [p(&dir.path().join("setup.yaml"))]
+            universal.setup.files[0].file,
+            p(&dir.path().join("setup.yaml"))
         );
         // No `./`: the path is canonical.
         assert_eq!(
-            universal.dev_container_path,
+            universal.active_config_locations.dev_container_path,
             Some(p(&dir.path().join("proj/env")))
         );
-        assert_eq!(
-            universal.lookup_paths,
-            BTreeMap::from([(
-                "docker-compose".to_string(),
-                vec![
-                    p(&dir.path().join("proj/compose")),
-                    "/etc/compose".to_string()
-                ],
-            )]),
-        );
-        let section = |paths: &[(&str, String)], run: &[(&str, Vec<String>)]| {
-            Some(UniversalSection {
+        let strings =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+        let section = |paths: &[(&str, Option<String>)], runs: &[(&str, Option<Vec<String>>)]| {
+            UniversalSection {
                 paths: paths
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect(),
-                run: run
+                programs: BTreeMap::new(),
+                runs: runs
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect(),
-            })
+                path_lists: BTreeMap::new(),
+                values: BTreeMap::new(),
+            }
         };
         let ssh_config = p(&dir.path().join("proj/ssh/config"));
+        let podman_text = p(&podman);
         assert_eq!(
-            universal.sections,
+            universal.resolved,
             BTreeMap::from([
                 (
                     "docker".to_string(),
                     section(
-                        &[("exec", p(&podman))],
+                        &[],
                         // Quotes are removed, and the path with a space is one argument.
                         &[(
                             "build",
-                            [p(&podman).as_str(), "build", "-t", "{x:tag}", "{x:dir}/a b"]
-                                .map(String::from)
-                                .to_vec()
+                            Some(strings(&[
+                                &podman_text,
+                                "build",
+                                "-t",
+                                "{x:tag}",
+                                "{x:dir}/a b"
+                            ]))
                         )],
-                    ),
+                    )
+                    .with_programs(&[("exec", Some(podman_text.clone()))]),
                 ),
-                // `helper-cmd` isn't there.
-                ("hoodoo".to_string(), None),
+                // `helper` isn't there: it, and the command using it, are null.
+                (
+                    "hoodoo".to_string(),
+                    section(
+                        &[],
+                        &[("go", Some(strings(&[&podman_text]))), ("help", None),],
+                    )
+                    .with_programs(&[("exec", Some(podman_text.clone())), ("helper", None)]),
+                ),
                 (
                     "scoter".to_string(),
-                    section(
-                        &[
-                            ("install-dir", "/opt/scoter".to_string()),
-                            ("note", ssh_config.clone()),
-                        ],
-                        &[],
-                    ),
+                    UniversalSection {
+                        path_lists: BTreeMap::from([(
+                            "compose".to_string(),
+                            // Kept whether or not they're there.
+                            Some(vec![
+                                p(&dir.path().join("proj/compose")),
+                                "/etc/compose".to_string()
+                            ]),
+                        )]),
+                        ..section(
+                            &[
+                                ("dev-container-path", Some(p(&dir.path().join("proj/env")))),
+                                ("distribution-dir", Some("/opt/scoter".to_string())),
+                                ("note", Some(ssh_config.clone())),
+                                (
+                                    "project-config",
+                                    Some(p(&dir.path().join("proj/scoter.yaml")))
+                                ),
+                                ("project-dir", Some(p(&dir.path().join("proj")))),
+                            ],
+                            &[],
+                        )
+                    },
                 ),
                 (
                     "ssh".to_string(),
-                    section(&[("config-file", ssh_config)], &[])
+                    UniversalSection {
+                        values: BTreeMap::from([
+                            ("debug".to_string(), ScalarValue::Bool(false)),
+                            // Only text is expanded; `{x:...}` is kept as text.
+                            (
+                                "note".to_string(),
+                                ScalarValue::String(format!("{ssh_config} {{x:keep}}"))
+                            ),
+                            ("port".to_string(), ScalarValue::Int(22022)),
+                            ("ratio".to_string(), ScalarValue::Float(0.5)),
+                            ("unset".to_string(), ScalarValue::Null),
+                        ]),
+                        ..section(&[("config-file", Some(ssh_config.clone()))], &[])
+                    },
                 ),
             ]),
         );
 
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
+        // The locations are also the `scoter` section's paths.
+        let active = json["active-config-locations"].as_object().unwrap();
+        assert_eq!(active.len(), 7);
+        for (key, value) in active {
+            let path = &json["resolved"]["scoter"]["paths"][key];
+            if value.is_null() {
+                assert!(path.is_null(), "{key}");
+            } else {
+                assert_eq!(path, value, "{key}");
+            }
+        }
+        // Programs are their own group, found on the `PATH`, and recorded as written.
+        assert_eq!(json["resolved"]["docker"]["programs"]["exec"], podman_text);
+        assert_eq!(
+            json["resolved"]["docker"]["paths"],
+            Json::Object(Map::new())
+        );
+        assert_eq!(
+            json["setup"]["files"][0]["sections"]["docker"]["programs"]["exec"],
+            "podman"
+        );
+        // Values keep their JSON types.
+        let values = &json["resolved"]["ssh"]["values"];
+        assert_eq!(values["port"], 22022);
+        assert_eq!(values["ratio"], 0.5);
+        assert_eq!(values["debug"], false);
+        assert_eq!(values["unset"], Json::Null);
+        assert!(values.as_object().unwrap().contains_key("unset"));
+        assert_eq!(
+            json["resolved"]["scoter"]["path-lists"]["compose"][1],
+            "/etc/compose"
+        );
         assert_eq!(json["host-brokered"][0]["command"], "aws");
         assert_eq!(json["host-brokered"][0]["program"], p(&aws));
         assert_eq!(
@@ -350,17 +486,22 @@ mod tests {
         let dir = TempDir::new();
         let config = load(&dir, None, "ssh:\n  paths:\n    home: /h/.ssh\n");
         let json: Json = serde_json::from_str(&to_json(&build(&config).unwrap())).unwrap();
-        assert_eq!(json["project-config"], Json::Null);
-        assert_eq!(json["sections"]["ssh"]["paths"]["home"], "/h/.ssh");
-        assert_eq!(json["sections"]["ssh"]["run"], Json::Object(Map::new()));
+        let active = &json["active-config-locations"];
+        assert_eq!(active["project-config"], Json::Null);
+        assert!(json.get("project-config").is_none());
+        // Kept, though it isn't there.
+        assert_eq!(json["resolved"]["ssh"]["paths"]["home"], "/h/.ssh");
+        for group in ["programs", "runs", "path-lists", "values"] {
+            assert_eq!(json["resolved"]["ssh"][group], Json::Object(Map::new()));
+        }
         assert_eq!(
-            json["sections"]["scoter"]["paths"],
+            json["resolved"]["scoter"]["paths"],
             Json::Object(Map::new())
         );
-        assert_eq!(json["dev-container-path"], Json::Null);
+        assert_eq!(active["dev-container-path"], Json::Null);
         assert_eq!(json["dev-container"], Json::Null);
         assert_eq!(json["host-brokered"], Json::Array(vec![]));
-        assert_eq!(json["lookup-paths"], Json::Object(Map::new()));
+        assert!(json.get("lookup-paths").is_none());
     }
 
     #[test]
