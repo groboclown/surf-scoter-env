@@ -1,0 +1,159 @@
+//! The `--workspace` directory: where it is on the host and in the container.
+
+use std::fs;
+use std::path::PathBuf;
+
+/// The workspace directory, shared between the host and the container.
+/// Given on the command line, not in the configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Workspace {
+    /// Canonical path of the directory on the host.
+    pub host: PathBuf,
+    /// Absolute path where it's mounted in the container, without a trailing '/'.
+    pub container: String,
+}
+
+impl Workspace {
+    /// Parse `HOST_DIR:CONTAINER_PATH`, split at the last ':' (so a Windows
+    /// drive letter stays with the host directory).  The host directory must exist.
+    pub(crate) fn parse(spec: &str) -> Result<Self, String> {
+        let Some((host, container)) = spec.rsplit_once(':') else {
+            return Err(format!("'{spec}' must be HOST_DIR:CONTAINER_PATH"));
+        };
+        if host.is_empty() {
+            return Err(format!("'{spec}' is missing the host directory"));
+        }
+        let container = normalize_container_path(container)?;
+        let host_dir =
+            fs::canonicalize(host).map_err(|e| format!("host directory '{host}': {e}"))?;
+        if !host_dir.is_dir() {
+            return Err(format!("host directory '{host}' is not a directory"));
+        }
+        Ok(Workspace {
+            host: host_dir,
+            container,
+        })
+    }
+}
+
+/// Check that `path` is an absolute container path, and drop empty and `.` components.
+fn normalize_container_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') {
+        return Err(format!("container path '{path}' must be absolute"));
+    }
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.contains(&"..") {
+        return Err(format!("container path '{path}' must not contain '..'"));
+    }
+    if parts.is_empty() {
+        return Err("the container path can't be '/'".to_string());
+    }
+    Ok(format!("/{}", parts.join("/")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canonical, existing directory to use as the host side.
+    fn host_dir() -> PathBuf {
+        std::env::temp_dir().canonicalize().unwrap()
+    }
+
+    fn workspace_error(spec: &str) -> String {
+        Workspace::parse(spec).unwrap_err()
+    }
+
+    #[test]
+    fn workspace_parse() {
+        let host = host_dir();
+        let spec = format!("{}:/workspace", host.display());
+        assert_eq!(
+            Workspace::parse(&spec),
+            Ok(Workspace {
+                host: host.clone(),
+                container: "/workspace".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_host_is_canonical() {
+        let host = host_dir();
+        let spec = format!("{}/./:/workspace", host.display());
+        assert_eq!(Workspace::parse(&spec).unwrap().host, host);
+    }
+
+    #[test]
+    fn workspace_container_path_is_normalized() {
+        let host = host_dir();
+        for (given, expected) in [
+            ("/workspace/", "/workspace"),
+            ("//a/./b//", "/a/b"),
+            ("/a", "/a"),
+        ] {
+            let spec = format!("{}:{given}", host.display());
+            assert_eq!(
+                Workspace::parse(&spec).unwrap().container,
+                expected,
+                "{given}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_splits_at_last_colon() {
+        // A Windows-style host path keeps its drive letter.
+        let err = workspace_error("C:\\ws:/workspace");
+        assert!(err.starts_with("host directory 'C:\\ws'"), "{err}");
+    }
+
+    #[test]
+    fn workspace_syntax_errors() {
+        let host = host_dir().display().to_string();
+        assert_eq!(
+            workspace_error("/workspace"),
+            "'/workspace' must be HOST_DIR:CONTAINER_PATH"
+        );
+        assert_eq!(
+            workspace_error(":/workspace"),
+            "':/workspace' is missing the host directory"
+        );
+        assert_eq!(
+            workspace_error(&format!("{host}:")),
+            "container path '' must be absolute"
+        );
+        assert_eq!(
+            workspace_error(&format!("{host}:workspace")),
+            "container path 'workspace' must be absolute"
+        );
+        assert_eq!(
+            workspace_error(&format!("{host}:/a/../b")),
+            "container path '/a/../b' must not contain '..'"
+        );
+        assert_eq!(
+            workspace_error(&format!("{host}:/")),
+            "the container path can't be '/'"
+        );
+        assert_eq!(
+            workspace_error(&format!("{host}:/./")),
+            "the container path can't be '/'"
+        );
+    }
+
+    #[test]
+    fn workspace_host_must_be_existing_directory() {
+        assert!(
+            workspace_error("/nonexistent/scoter-ws:/workspace")
+                .starts_with("host directory '/nonexistent/scoter-ws': ")
+        );
+        let file = std::env::temp_dir().join(format!("scoter-host-ws-file-{}", std::process::id()));
+        fs::write(&file, b"").unwrap();
+        let err = workspace_error(&format!("{}:/workspace", file.display()));
+        fs::remove_file(&file).unwrap();
+        assert!(err.ends_with("is not a directory"), "{err}");
+    }
+}

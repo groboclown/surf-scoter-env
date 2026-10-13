@@ -106,7 +106,6 @@ pub fn send_all<W: Write>(rx: &Receiver<Command>, w: &mut W) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,9 +180,7 @@ mod tests {
     fn sequence() {
         let mut buf = Vec::new();
         Command::Started(1).send(&mut buf).unwrap();
-        Command::Message((1, b"x".to_vec()))
-            .send(&mut buf)
-            .unwrap();
+        Command::Message((1, b"x".to_vec())).send(&mut buf).unwrap();
         Command::Terminated((1, 0)).send(&mut buf).unwrap();
         let mut cur = Cursor::new(buf);
         assert_eq!(Command::recv(&mut cur).unwrap(), Command::Started(1));
@@ -297,7 +294,10 @@ mod tests {
         tx.send(Command::Started(0)).unwrap();
         tx.send(Command::Started(1)).unwrap();
         drop(tx);
-        let mut out = Recorder { buf: Vec::new(), flushed: Vec::new() };
+        let mut out = Recorder {
+            buf: Vec::new(),
+            flushed: Vec::new(),
+        };
         send_all(&rx, &mut out).unwrap();
         // Both commands were already queued, so a single flush covers them.
         assert_eq!(out.flushed, vec![18]);

@@ -33,22 +33,19 @@ The container will have a special "setup" directory mounted to it as read-only. 
 * *Future updates will also include a root authority certificate for the SSL proxy.*
 
 
-# The `dev-env.json` file
+# The `dev-env.yaml` file
 
-Beside the `Dockerfile` must exist the `dev-env.json` file.  This JSON formatted file provides basic information for the `scoter` tool to understand how to configure and run the container cluster around it.
+Beside the `Dockerfile` must exist the `dev-env.yaml` file.  This YAML formatted file provides basic information for the `scoter` tool to understand how to configure and run the container cluster around it.
 
 The file must provide at a minimum these values:
 
-```json
-{
-    "user": "USERNAME",
-    "mounts": {
-        "workspace": "PATH",
-        "setup": "PATH"
-    },
-    "broker-bin": "PATH",
-    "sshd-port": 22022
-}
+```yaml
+user: USERNAME
+mounts:
+    workspace: "PATH"
+    setup: "PATH"
+broker-bin: "PATH"
+sshd-port: 22022
 ```
 
 The keys are:

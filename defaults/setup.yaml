@@ -1,0 +1,20 @@
+# The default system setup, read after every other setup file.
+# See docs/system-config-file.md.
+
+ssh:
+    paths:
+        exec: ssh
+        home: ~/.ssh
+        key-file: ${home}/scoter-dev-container
+        config-file: ${home}/config
+
+docker:
+    paths:
+        exec: docker
+    run:
+        # How scoter-host starts the broker inside the dev container.
+        broker: ${exec} exec -i {x:container} {x:broker}
+
+# Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
+dev-container-paths:
+    - ${scoter:install-dir}/containers

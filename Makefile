@@ -208,6 +208,7 @@ mk-installer-x86_64-unknown-linux-gnu: host-build-release-x86_64-unknown-linux-g
 	mkdir -p target/work/x86_64-unknown-linux-gnu
 	mkdir -p target/work/x86_64-unknown-linux-gnu/bin
 	cp host/target/x86_64-unknown-linux-gnu/release/scoter-host target/work/x86_64-unknown-linux-gnu/bin/.
+	cp host/target/x86_64-unknown-linux-gnu/release/gen-scoter-uc target/work/x86_64-unknown-linux-gnu/bin/.
 	cp -R templates containers docs target/work/x86_64-unknown-linux-gnu/.
 	rm -r target/work/x86_64-unknown-linux-gnu/docs/contributors
 	rm -r target/work/x86_64-unknown-linux-gnu/containers/dev-env/target

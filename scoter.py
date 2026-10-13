@@ -5,6 +5,15 @@
 """
 # Compatibility: Python 3.12+
 
+# TODO redo the configuration loading:
+#      1. Find the install directory.  Either it's passed as '--install-dir',
+#         or find it from the script's parent directory if it has the necessary
+#         binaries in the bin/ directory.
+#      2. Run the bin/gen-scoter-uc program with the right arguments.
+#         Capture stdout to pull in the JSON document.  stderr is passed to the
+#         user.
+
+
 import argparse
 from collections.abc import Callable, Sequence
 import configparser

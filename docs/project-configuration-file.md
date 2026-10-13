@@ -2,7 +2,7 @@
 
 Surf Scoter stores its configuration in a YAML formatted file.  By convention, this resides in your project directory named `.scoter-config.yaml`.
 
-This file tells the Scoter tools where to find different executables on your desktop ("host") computer and inside the development container.
+This file tells the Scoter tools which development container the project uses.  It's meant to be shared by everyone working on the project, so settings for a particular computer (such as which executables to use) belong in the [system configuration files](system-config-file.md) instead.
 
 You can also use this with the [scoter-host](../host/) executable to describe ways the container can communicate with the host ("host bypass").  This allows you to grant very limited access to additional privileges that the container normally shouldn't do (access to credentials, the Docker daemon, and so on).  Because those actions run on the host, everything they touch on the file system is restricted to the workspace (or a throwaway temporary directory).
 
@@ -12,10 +12,11 @@ You can also use this with the [scoter-host](../host/) executable to describe wa
 
 ```yaml
 container:
-  # argv prefix used to run the broker; e.g. [podman] or [docker, --context, remote]
-  command: [docker]
-  # optional; path of the broker inside the container
-  broker: /usr/local/bin/scoter-container
+  # The development container: a directory with a Dockerfile and dev-env.yaml,
+  # relative to this file.
+  dev-container-path: ./.scoter/dev-env
+  # Or, instead, the name of one found in the system configuration's `dev-container-paths`.
+  # dev-container: dev-env
 # What clients may run: one entry per allowed form of a command.
 commands:
   - command: aws
@@ -32,6 +33,17 @@ commands:
         - services/*
         - infra/**
 ```
+
+## The development container
+
+The `container` section sets exactly one of:
+
+* `dev-container-path`: a directory, relative to this file, holding the container's `Dockerfile` and its `dev-env.yaml` file (see [the developer environment Dockerfile](project-dockerfile.md)).
+* `dev-container`: the name of such a directory, found in one of the `dev-container-paths` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
+
+The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `run: broker` key).
+
+## Host commands
 
 `command` is the name the client was run as in the container.  A request is allowed by the first entry with that command whose `args` match (and whose current working directory (`cwd`) allows the client's directory, when the entry has one).
 
