@@ -1,4 +1,4 @@
-# v1 Architecture
+# v0 Architecture
 
 The first version of Surf Scoter contains an assembly of pieces to allow for construction of the containers and remote access.  I expect the project to eventually automate this construction.
 
