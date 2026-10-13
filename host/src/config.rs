@@ -19,6 +19,7 @@
 
 pub mod command;
 pub mod dev_env;
+pub mod environment;
 pub mod pattern;
 pub mod project;
 pub mod read;
@@ -30,6 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use dev_env::DevContainer;
+use environment::{EnvPlan, EnvRules};
 use project::{ContainerRef, ProjectConfig};
 use system::{Env, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
 
@@ -121,7 +123,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             active.project_config.as_ref().map(PathBuf::from)
         })
         .map(|p| absolute(&p));
-    let (project, container) = match project_path.as_deref() {
+    let (mut project, container) = match project_path.as_deref() {
         Some(path) => {
             let (project, container) = project::load_checked(path);
             (project.map_err(|e| errors.extend(e)).ok(), container)
@@ -197,6 +199,10 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
         system.set_dev_container_path(&dev.dir);
     }
+    // After the dev container, as `env` values can refer to it.
+    if let (Some(system), Some(project)) = (&system, &mut project) {
+        errors.extend(plan_environments(project, system));
+    }
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
@@ -205,6 +211,37 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }),
         _ => Err(ConfigErrors(errors)),
     }
+}
+
+/// Work out each command's `env_plan`: the project's `env` with the
+/// command's added, expanded against `system`.
+fn plan_environments(project: &mut ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
+    let mut errors = Vec::new();
+    let mut resolve = |rules: &EnvRules, key: &str| {
+        EnvPlan::resolve(rules, system, key)
+            .map_err(|problems| {
+                errors.extend(
+                    problems
+                        .into_iter()
+                        .map(|(key, message)| ConfigError::new(Some(&project.path), &key, message)),
+                )
+            })
+            .unwrap_or_default()
+    };
+    let common = resolve(&project.env, "env");
+    let plans: Vec<EnvPlan> = project
+        .commands
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| {
+            let key = child_key(&index_key("commands", i), "env");
+            common.merged(&resolve(&rule.env, &key))
+        })
+        .collect();
+    for (rule, plan) in project.commands.iter_mut().zip(plans) {
+        rule.env_plan = plan;
+    }
+    errors
 }
 
 /// `path` made absolute (without resolving symlinks).
@@ -318,6 +355,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::TempDir;
     use super::*;
+    use std::collections::HashMap;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
 
@@ -642,6 +680,68 @@ mod tests {
                 "{}: the --project-dir directory doesn't exist",
                 dir.path().join("missing").display()
             )
+        );
+    }
+
+    #[test]
+    fn command_environments_are_worked_out() {
+        let dir = TempDir::new();
+        dev_container(&dir, "project/env");
+        let opts = options(
+            &dir,
+            Some(concat!(
+                "container:\n  dev-container-path: env\n",
+                "env:\n  allow: [LANG]\n  set: {HOME: '@HOME@', TOOL: '${a:t}'}\n",
+                "commands:\n",
+                "  - {command: one, args: []}\n",
+                "  - command: two\n    args: []\n    env:\n",
+                "      allow: [TERM]\n      set: {TOOL: own, DEV: '${scoter:dev-container-path}'}\n",
+            )),
+            Some("a:\n  paths:\n    t: /opt/t\n"),
+        );
+        let env = Env {
+            vars: HashMap::from([("HOME".to_string(), "/home/me".to_string())]),
+            ..Env::default()
+        };
+        let config = load_all_with_env(&opts, env).unwrap();
+        let commands = &config.project.unwrap().commands;
+        let one = &commands[0].env_plan;
+        assert_eq!(one.allow, ["LANG"]);
+        assert_eq!(one.set["HOME"], "/home/me");
+        assert_eq!(one.set["TOOL"], "/opt/t");
+        let two = &commands[1].env_plan;
+        assert_eq!(two.allow, ["LANG", "TERM"]);
+        assert_eq!(two.set["HOME"], "/home/me");
+        assert_eq!(two.set["TOOL"], "own");
+        assert_eq!(
+            two.set["DEV"],
+            dir.path().join("project/env").display().to_string()
+        );
+    }
+
+    #[test]
+    fn command_environment_errors() {
+        let dir = TempDir::new();
+        dev_container(&dir, "project/env");
+        let opts = options(
+            &dir,
+            Some(concat!(
+                "container:\n  dev-container-path: env\n",
+                "env:\n  set: {A: '${a:missing}'}\n",
+                "commands:\n",
+                "  - command: one\n    args: []\n    env:\n      default: {B: '${b:missing}'}\n",
+                "  - {command: two, args: []}\n",
+            )),
+            None,
+        );
+        let errors = messages(load_all_with_env(&opts, Env::default()).unwrap_err());
+        // The project's block is reported once, not per command.
+        assert_eq!(
+            errors,
+            [
+                "env.set.A: unknown reference `${a:missing}`",
+                "commands[0].env.default.B: unknown reference `${b:missing}`",
+            ]
         );
     }
 

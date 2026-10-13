@@ -16,8 +16,10 @@
 //! For an entry with a `cwd` rule, the process runs in the resolved host
 //! directory matching the client's working directory.  Otherwise it runs in a
 //! temporary directory.  `path` arguments are passed as resolved host paths
-//! (or temporary files).  The client's environment is not used: the process
-//! gets the host's environment (see `exec`).
+//! (or temporary files).  The process's environment comes from the matching
+//! entry's `env_plan`: only the container variables it allows come through,
+//! and a container variable matching one of its `error` patterns refuses the
+//! request (see `config::environment`).
 
 use std::cell::OnceCell;
 use std::fs;
@@ -76,8 +78,17 @@ pub(crate) fn analyze(
                 _ => continue,
             },
         };
+        let envs = match rule.env_plan.apply(&invocation.envs) {
+            Ok(envs) => envs,
+            Err(reason) => return Decision::Deny(reason),
+        };
         let program = rule.program.clone().unwrap_or_else(|| name.to_string());
-        return Decision::Allow(ExecRequest { program, args, cwd });
+        return Decision::Allow(ExecRequest {
+            program,
+            args,
+            cwd,
+            envs,
+        });
     }
     if args_matched {
         Decision::Deny(format!("'{name}' is not allowed to run in this directory"))
@@ -299,7 +310,9 @@ fn temp_file_name(value: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::host::exec::TempDir;
+    use scoter_host::config::environment::EnvPlan;
     use scoter_host::config::project;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     /// The rules from the configuration example, plus a few for edge cases.
@@ -341,6 +354,42 @@ mod tests {
             args: args.iter().map(|s| s.to_string()).collect(),
             envs: vec![("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string())],
         }
+    }
+
+    #[test]
+    fn environment_from_the_plan() {
+        let mut commands = parse_commands("  - command: aws\n    args: [s3, ls]\n");
+        commands[0].env_plan = EnvPlan {
+            allow: vec!["AWS_*".to_string()],
+            drop: vec!["AWS_SESSION_TOKEN".to_string()],
+            error: vec!["AWS_SECRET_*".to_string()],
+            set: BTreeMap::from([("HOME".to_string(), "/home/me".to_string())]),
+            ..EnvPlan::default()
+        };
+        let mut inv = invocation(&["aws", "s3", "ls"]);
+        inv.envs.extend([
+            ("AWS_PROFILE".to_string(), "dev".to_string()),
+            ("AWS_SESSION_TOKEN".to_string(), "t".to_string()),
+        ]);
+        match analyze(&inv, &commands, &workspace()) {
+            Decision::Allow(req) => assert_eq!(
+                req.envs,
+                BTreeMap::from([
+                    ("AWS_PROFILE".to_string(), "dev".to_string()),
+                    ("HOME".to_string(), "/home/me".to_string()),
+                ])
+            ),
+            other => panic!("expected allow, got {other:?}"),
+        }
+        inv.envs
+            .push(("AWS_SECRET_ACCESS_KEY".to_string(), "s".to_string()));
+        assert_eq!(
+            analyze(&inv, &commands, &workspace()),
+            Decision::Deny(
+                "the container may not set the environment variable AWS_SECRET_ACCESS_KEY (it matches 'AWS_SECRET_*')"
+                    .to_string()
+            )
+        );
     }
 
     /// Decide in a fresh workspace, with the client at the workspace root.
@@ -398,6 +447,7 @@ mod tests {
                     host_path(ws.host("file.txt"))
                 ],
                 cwd: None,
+                envs: BTreeMap::new(),
             })
         );
         // Relative targets are resolved from the client's directory.
@@ -610,6 +660,7 @@ mod tests {
                 program: "/bin/first".to_string(),
                 args: vec![plain("x")],
                 cwd: None,
+                envs: BTreeMap::new(),
             })
         );
     }
@@ -712,6 +763,7 @@ mod tests {
                 program: "docker".to_string(),
                 args: vec![plain("compose"), plain("up")],
                 cwd: Some(ws.host("services/api")),
+                envs: BTreeMap::new(),
             })
         );
         assert_eq!(

@@ -89,7 +89,7 @@ fn match_parts(parts: &[PatternPart], dirs: &[&str]) -> bool {
 }
 
 /// Match one name against a glob of `*` (any characters) and `?` (one character).
-fn glob_matches(glob: &str, name: &str) -> bool {
+pub(crate) fn glob_matches(glob: &str, name: &str) -> bool {
     let glob: Vec<char> = glob.chars().collect();
     let name: Vec<char> = name.chars().collect();
     let (mut g, mut n) = (0, 0);

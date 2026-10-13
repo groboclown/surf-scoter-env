@@ -16,6 +16,11 @@
 //!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers`.
 //!   # dev-container: dev-env
 //!
+//! # The environment of the host processes, for every command (optional).
+//! env:
+//!   set:
+//!     HOME: '@HOME@'
+//!
 //! # What clients may run: one entry per allowed form of a command.
 //! commands:
 //!   - command: aws
@@ -24,6 +29,11 @@
 //!     # optional; the executable to run on the host (default: `command`, found on the PATH)
 //!     program: /usr/local/bin/aws
 //!     args: [codebuild, start-build, --project-name, {any: {}}]
+//!     # optional; added to the project's `env`
+//!     env:
+//!       allow: ['AWS_*']
+//!       drop: [AWS_SESSION_TOKEN]
+//!       default: {AWS_REGION: us-east-1}
 //!   - command: docker
 //!     args: [compose, up]
 //!     # optional; run in the client's directory, when it matches one of these
@@ -32,6 +42,10 @@
 //!         - services/*
 //!         - infra/**
 //! ```
+//!
+//! The host process starts from an empty environment, built by the `env`
+//! blocks (see `environment`).  A command's `env` adds its patterns to the
+//! project's, and its `set` and `default` values win over the project's.
 //!
 //! `command` is the name the client was run as in the container.  A request is
 //! allowed by the first entry with that command whose `args` match (and whose
@@ -90,6 +104,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use yaml_serde::Value;
 
+use super::environment::{EnvPlan, EnvRules};
 use super::pattern::WorkspacePattern;
 use super::read::{parse_yaml, read_limited, tag_errors};
 use super::{ConfigError, child_key, index_key};
@@ -100,6 +115,8 @@ pub struct ProjectConfig {
     /// The file, as an absolute path.
     pub path: PathBuf,
     pub container: ContainerRef,
+    /// The environment rules for every command.
+    pub env: EnvRules,
     /// The allowed forms of commands, in match order.  Anything not listed is refused.
     pub commands: Commands,
     /// Each of `commands` as written in the file.
@@ -147,6 +164,14 @@ pub struct CommandRule {
     /// Where the process may run; without it, a temporary directory.
     #[serde(default)]
     pub cwd: Option<CwdRule>,
+    /// Environment rules added to the project's.
+    #[serde(default)]
+    pub env: EnvRules,
+    /// The project's and this command's `env` worked out against the system
+    /// configuration, by `config::load_all`.  Until then, it's empty: nothing
+    /// comes through.
+    #[serde(skip)]
+    pub env_plan: EnvPlan,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -315,6 +340,7 @@ fn parse_checked(
     let mut container = None;
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
+    let mut env = EnvRules::default();
     let mut has_container = false;
     for (key, value) in map {
         match key.as_str() {
@@ -323,6 +349,7 @@ fn parse_checked(
                 container = parse_container(value, &mut problems);
             }
             Some("commands") => (commands, raw_commands) = parse_commands(value, &mut problems),
+            Some("env") => env = parse_env(value, &mut problems),
             Some(other) => problems.push((other.to_string(), "unknown key".to_string())),
             None => problems.push((String::new(), format!("key {key:?} must be a string"))),
         }
@@ -334,6 +361,7 @@ fn parse_checked(
         Some(container) if problems.is_empty() => Ok(ProjectConfig {
             path: path.to_path_buf(),
             container: container.clone(),
+            env,
             commands,
             raw_commands,
         }),
@@ -382,6 +410,22 @@ fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option
         ),
     }
     None
+}
+
+fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
+    if value.is_null() {
+        return EnvRules::default();
+    }
+    match yaml_serde::from_value::<EnvRules>(value) {
+        Ok(rules) => {
+            rules.validate("env", problems);
+            rules
+        }
+        Err(e) => {
+            problems.push(("env".to_string(), e.to_string()));
+            EnvRules::default()
+        }
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -443,6 +487,7 @@ impl CommandRule {
                 "cwd.allowed-workspace-dirs must not be empty".to_string(),
             ));
         }
+        self.env.validate(&child_key(key, "env"), problems);
         for (j, token) in self.args.iter().enumerate() {
             if let Token::Path(options) = token
                 && let Err(message) = options.validate()
@@ -545,6 +590,7 @@ mod tests {
             ProjectConfig {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
+                env: EnvRules::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
             }
@@ -768,6 +814,8 @@ mod tests {
                         Token::Path(path_opts(Within::Cwd))
                     ],
                     cwd: None,
+                    env: EnvRules::default(),
+                    env_plan: EnvPlan::default(),
                 },
                 CommandRule {
                     command: "aws".to_string(),
@@ -779,6 +827,8 @@ mod tests {
                         Token::Any(MatchOptions::default())
                     ],
                     cwd: None,
+                    env: EnvRules::default(),
+                    env_plan: EnvPlan::default(),
                 },
             ]
         );
@@ -792,10 +842,45 @@ mod tests {
 
     #[test]
     fn parse_entry_rejects_unknown_keys() {
+        // Including the worked-out environment, which only the tool sets.
         let err = error(&format!(
-            "{CONTAINER}commands:\n  - command: aws\n    args: []\n    env: {{}}\n"
+            "{CONTAINER}commands:\n  - command: aws\n    args: []\n    env-plan: {{}}\n"
         ));
-        assert!(err.contains("env"), "{err}");
+        assert!(err.contains("env-plan"), "{err}");
+    }
+
+    #[test]
+    fn parse_env_blocks() {
+        let config = parse_text(&format!(
+            "{CONTAINER}env:\n  allow: [LANG]\n  set: {{HOME: '@HOME@'}}\n\
+             commands:\n  - command: aws\n    args: []\n\
+             \x20   env:\n      allow: ['AWS_*']\n      drop: [AWS_SESSION_TOKEN]\n"
+        ))
+        .unwrap();
+        assert_eq!(config.env.allow, ["LANG"]);
+        assert_eq!(config.env.set["HOME"], "@HOME@");
+        assert_eq!(config.commands[0].env.allow, ["AWS_*"]);
+        assert_eq!(config.commands[0].env.drop, ["AWS_SESSION_TOKEN"]);
+        // Worked out later, against the system configuration.
+        assert_eq!(config.commands[0].env_plan, EnvPlan::default());
+    }
+
+    #[test]
+    fn parse_env_errors() {
+        let messages = parse_text(&format!(
+            "{CONTAINER}env:\n  allow: ['']\n  pass: [X]\n\
+             commands:\n  - command: aws\n    args: []\n    env:\n      set: {{'A*': v}}\n"
+        ))
+        .unwrap_err();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].contains("env: unknown field `pass`"),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].ends_with("commands[0].env.set.A*: is a variable name, not a pattern"),
+            "{messages:?}"
+        );
     }
 
     #[test]

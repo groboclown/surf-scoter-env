@@ -120,6 +120,8 @@ pub struct Env {
     pub path_ext: Option<OsString>,
     /// The current directory.
     pub cwd: Option<PathBuf>,
+    /// The environment variables (those with UTF-8 names and values).
+    pub vars: HashMap<String, String>,
 }
 
 impl Env {
@@ -133,6 +135,9 @@ impl Env {
             path: var("PATH"),
             path_ext: if cfg!(windows) { var("PATHEXT") } else { None },
             cwd: std::env::current_dir().ok(),
+            vars: std::env::vars_os()
+                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                .collect(),
         }
     }
 
@@ -591,6 +596,25 @@ fn find_setup(dir: &Path, stem: &str) -> Result<Option<PathBuf>, ConfigError> {
         (false, true) => Ok(Some(yml)),
         (false, false) => Ok(None),
     }
+}
+
+/// The variable `name` in `vars`, matched without regard to case when
+/// `ignore_case`.
+fn find_var<'a>(
+    vars: &'a HashMap<String, String>,
+    name: &str,
+    ignore_case: bool,
+) -> Option<&'a str> {
+    if let Some(value) = vars.get(name) {
+        return Some(value);
+    }
+    if !ignore_case {
+        return None;
+    }
+    let name = name.to_uppercase();
+    vars.iter()
+        .find(|(key, _)| key.to_uppercase() == name)
+        .map(|(_, value)| value.as_str())
 }
 
 /// Whether only the tool can set `section:key`.
@@ -1168,6 +1192,42 @@ impl SystemConfig {
             self.env.path.as_deref(),
             self.env.path_ext.as_deref(),
         )
+    }
+
+    /// The host's environment variable `name`.  On Windows, as there, the
+    /// name is matched without regard to case.
+    pub fn host_var(&self, name: &str) -> Option<&str> {
+        find_var(&self.env.vars, name, cfg!(windows))
+    }
+
+    /// Whether any file (or the tool) sets `section:key`.
+    pub fn is_set(&self, section: &str, key: &str) -> bool {
+        self.entry(section, key).is_some()
+    }
+
+    /// The text a `${section:key}` reference outside the setup files stands
+    /// for: a `paths` value as a file location, a `programs` value as the
+    /// program found, or a `values` value as text.  Lists, null values and
+    /// programs that aren't there are errors.
+    pub fn scalar_text(&self, section: &str, key: &str) -> Result<String, String> {
+        let reference = format!("`${{{section}:{key}}}`");
+        let unexpanded = || format!("{reference} has no value");
+        match self.entry(section, key) {
+            None => Err(format!("unknown reference {reference}")),
+            Some(Entry::Run(_) | Entry::PathList(_)) => {
+                Err(format!("{reference} is a list; it can't be used here"))
+            }
+            Some(Entry::Value(ScalarValue::Null)) => {
+                Err(format!("{reference} is null, so it can't be used here"))
+            }
+            Some(Entry::Program(_)) => {
+                let program = self.get(section, key).ok_or_else(unexpanded)?;
+                self.find_program(&program)
+                    .map(|found| path_text(&found))
+                    .ok_or_else(|| format!("the program for {reference} isn't there"))
+            }
+            Some(Entry::Path(_) | Entry::Value(_)) => self.get(section, key).ok_or_else(unexpanded),
+        }
     }
 
     /// A `paths` value as a file location, a `programs` value as configured
@@ -3136,6 +3196,20 @@ mod tests {
         );
         // Unknown fields are refused.
         assert!(serde_json::from_str::<SetupRecord>(r#"{"files": [], "extra": 1}"#).is_err());
+    }
+
+    #[test]
+    fn find_var_case() {
+        let vars = HashMap::from([
+            ("Path".to_string(), "C:\\bin".to_string()),
+            ("HOME".to_string(), "/h".to_string()),
+        ]);
+        assert_eq!(find_var(&vars, "Path", false), Some("C:\\bin"));
+        assert_eq!(find_var(&vars, "PATH", false), None);
+        // As on Windows.
+        assert_eq!(find_var(&vars, "PATH", true), Some("C:\\bin"));
+        assert_eq!(find_var(&vars, "home", true), Some("/h"));
+        assert_eq!(find_var(&vars, "other", true), None);
     }
 
     #[test]

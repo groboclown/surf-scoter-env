@@ -1,14 +1,16 @@
 //! Runs an approved request as a host process, speaking the `client_host`
 //! protocol with the client.
 //!
-//! The process gets the host's environment, and runs in the directory chosen
-//! by `analyze` or else a fresh temporary directory.  Temporary file arguments
+//! The process gets only the environment `analyze` worked out, not the
+//! host's; its program is found on the host's `PATH`.  It runs in the
+//! directory chosen by `analyze` or else a fresh temporary directory.  Temporary file arguments
 //! are placed in a temporary directory too; it's removed once the process
 //! exits.  Client stdin is passed to the process,
 //! its stdout / stderr are passed back, and forwarded signals are delivered
 //! (on Windows, the termination signals kill the process; others are ignored).
 //! If the client goes away, the process is killed.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
@@ -20,7 +22,22 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use scoter_host::config::command::find_executable;
 use surf_scoter_env_launcher::comm::client_host::{self, Command};
+
+/// `program` as a path: a bare name is found on the host's `PATH`.
+fn find_on_host(program: &str) -> Option<PathBuf> {
+    let path_ext = if cfg!(windows) {
+        std::env::var_os("PATHEXT")
+    } else {
+        None
+    };
+    find_executable(
+        Path::new(program),
+        std::env::var_os("PATH").as_deref(),
+        path_ext.as_deref(),
+    )
+}
 
 /// Exit code when the request isn't allowed.
 pub(crate) const EXIT_DENIED: i32 = 126;
@@ -41,6 +58,8 @@ pub(crate) struct ExecRequest {
     pub args: Vec<Arg>,
     /// The host directory to run in; `None` for a new temporary directory.
     pub cwd: Option<PathBuf>,
+    /// The process's whole environment.
+    pub envs: BTreeMap<String, String>,
 }
 
 /// One argument of an approved request.
@@ -134,8 +153,21 @@ pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(
         Some(dir) => dir.as_path(),
         None => temp_path.expect("a temporary working directory"),
     };
-    let child = Process::new(&request.program)
+    // Found on the host's `PATH`: the process's own environment may have none.
+    let Some(program) = find_on_host(&request.program) else {
+        return fail(
+            sink,
+            &format!(
+                "cannot run {}: no such program on the host",
+                request.program
+            ),
+            EXIT_START_FAILED,
+        );
+    };
+    let child = Process::new(&program)
         .args(request.host_args(temp_path))
+        .env_clear()
+        .envs(&request.envs)
         // TODO race: `cwd` and the host path arguments were checked by
         //      `analyze`, but are used here by path; see `analyze::resolve`.
         .current_dir(cwd)
@@ -402,6 +434,7 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::io::{Cursor, PipeWriter};
 
     /// Collects the frames sent to the client.
@@ -477,6 +510,7 @@ mod tests {
             program: program.to_string(),
             args: args.iter().map(|s| Arg::Plain(s.to_string())).collect(),
             cwd: None,
+            envs: BTreeMap::new(),
         }
     }
 
@@ -493,6 +527,7 @@ mod tests {
                 },
             ],
             cwd: Some(PathBuf::from("/h")),
+            envs: BTreeMap::new(),
         };
         assert!(req.needs_temp_dir());
         assert_eq!(
@@ -508,6 +543,7 @@ mod tests {
             program: "p".to_string(),
             args: vec![Arg::Plain("a".to_string())],
             cwd: Some(PathBuf::from("/h")),
+            envs: BTreeMap::new(),
         };
         assert!(!plain.needs_temp_dir());
         assert_eq!(plain.host_args(None), vec![OsString::from("a")]);
@@ -515,6 +551,7 @@ mod tests {
             program: "p".to_string(),
             args: vec![],
             cwd: None,
+            envs: BTreeMap::new(),
         };
         assert!(no_cwd.needs_temp_dir());
     }
@@ -606,6 +643,7 @@ mod tests {
                     Arg::HostPath(PathBuf::from("/home/me/ws/out.txt")),
                 ],
                 cwd: None,
+                envs: BTreeMap::new(),
             };
             assert_eq!(run(&req, input, &sink), 0);
             assert_eq!(sink.stdout(), b"to /home/me/ws/out.txt\n");
@@ -631,6 +669,7 @@ mod tests {
                 program: "sh".to_string(),
                 args,
                 cwd,
+                envs: BTreeMap::new(),
             };
             assert_eq!(
                 run(&req, input, &sink),
@@ -765,17 +804,14 @@ mod tests {
         }
 
         #[test]
-        fn uses_host_environment() {
+        fn uses_only_the_given_environment() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            assert_eq!(
-                run(&request("sh", &["-c", "printf %s \"$PATH\""]), input, &sink),
-                0
-            );
-            assert_eq!(
-                String::from_utf8(sink.stdout()).unwrap(),
-                std::env::var("PATH").unwrap()
-            );
+            let mut req = request("sh", &["-c", "printf %s \"$GIVEN:${HOME-none}\""]);
+            req.envs = BTreeMap::from([("GIVEN".to_string(), "yes".to_string())]);
+            // `sh` is still found on the host's `PATH`.
+            assert_eq!(run(&req, input, &sink), 0);
+            assert_eq!(String::from_utf8(sink.stdout()).unwrap(), "yes:none");
         }
 
         #[test]

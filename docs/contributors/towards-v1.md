@@ -6,6 +6,20 @@ The basic ideas for this tool exist, so now they just need some solidification a
 
 The [`scoter.py`](../../scoter.py) script (will be named `scoter` when installed) works as the user's front-end to everything.  It replaces the existing top-level shell scripts.  It works as glue code for file modification and running other programs.  Because of that, it's left as a script so that people can open it up for inspection and do things manually if they want.
 
+## Configuration setup
+
+Rather than pass all the values to `scoter`, it should collect them from the installation directory, the user configuration directory, and other places.  However, this becomes a hassle to handle, especially in a script that may not have proper format loader libraries.
+
+As an alternative, the tooling uses a "universal configuration file" that joins all the different pieces into a single place.  The installation comes with a program that constructs this from all the different kinds of invocation arguments and settings.
+
+### Configurable as much as possible
+
+The tools should read everything they need from the universal configuration file.  Only the barest defaults are used to find the setup locations, and everything else leads from that discovery.
+
+The developer environment construction also comes from this.
+
+## Installation directory
+
 This leads us to a proper installation directory:
 
 * `surf-scoter/scoter` - the user script.  Expect to link this into `~/.local/bin` or equivalent user-land space.
@@ -14,37 +28,32 @@ This leads us to a proper installation directory:
 * `surf-scoter/defaults` - files that the `scoter` script reads at runtime if the user doesn't have an override.
 * `surf-scoter/docs` - tasty end-user documents.
 
-With this change, the way the configuration settings also changes:
-
-* User-wide configuration file.  For easy out-of-the-box Python usage, it's stored as an `.ini` file, with a default path at `~/.config/surf-scoter.ini`.  It's not required, and, not having it, causes `scoter` to assume defaults.  It stores:
-    * Executable locations and usage patterns.  For example, which 'docker' executable to use, and how to use it (e.g. podman vs. docker, docker compose, openssh).  The focus here is "use this executable for tool X" and then "run action Y like this with tool X."
-    * Installation location.
-    * Default overrides, like the name of the project configuration file.
-    * Names of the built images in the local docker environment.
-* Associate the concept of "a project has a developer environment":
-    * The project contains a configuration file + project-relative referenced files.  This allows the Surf Scoter project configuration to ship with the code, and have all contributors use the same setup.
-    * The parent dev-env container.  We recommend the `dev-env` `Dockerfile`, but the user can choose something different.  This becomes important if they need to develop with a different set of tools, say `musl` libraries instead of `glibc`.  The parent dev-env container, if overwritten, needs to point to the `Dockerfile` and give the local tag.
-    * An optional `Dockerfile`.  It **must** have a `FROM` with the `dev-env` parent container.  The `scoter` tool can optionally change that when building the container, though that's risky.  Instead, the tool should just ensure the two match, and that the project `Dockerfile` just has one `FROM` statement.
-    * The file mustn't allow override the user's installation directory.  I expect this file to be shared between project contributors, so it needs to stay relative to the project.
-        * This means the host executable paths need to move into the `surf-scoter.ini` file.
-    * The existing "allowed commands".
-    * Because `scoter` needs to parse this file, the pieces it needs to parse should remain in "trivial yaml format".
-      Without this, `scoter` needs a full yaml parser, or the host program + scoter need to use something they both can handle.  `ini` is the easiest for Python, but would make the allowed commands list ugly.
-
-Because the executable forms now live outside the configuration, this means the `host` executable needs to read them some other way.  This can come from the assembled workspace directory.
-
-**Late Note:** the script currently reads `ini` files, because they're easy for users to work with, and Python has a ini parser baked in.  JSON would be better, for its richness, but they're harder for people to work with (lack of comments, for example).  This may be a good reason to require a Yaml parser, or at least create a super trivial in-line one.  Additionally, due to the need of the script to parse the project configuration (a yaml file), it may need it anyway.  Alternatively, the `host` directory could also bundle a config load-up parser that spits out a JSON file; that would unify the configuration code for the host program and make that code cleaner in the script.
-
 ## Changes to the development environment container
 
 The dev-env container will need to be configurable, so that the user can replace it with an appropriate custom container if needed.
 
 With this change, the user will need to provide a configuration file that describes how to work with the container.
 
-Additionally, the container will now take 2 mount points - the project workspace directory (writable), and a read-only setup directory that contains runtime configuration files.  Along with the SSH and SSL connection information, it will also take a list of the replaced commands from the project configuration file tha the container should run `ls "client-bin" "/usr/local/bin/cmd-name`.
+Additionally, the container will now take 2 mount points - the project workspace directory (writable), and a read-only setup directory that contains runtime configuration files.  Along with the SSH and SSL connection information, it will also take a list of the replaced commands from the project configuration file tha the container should run `ln "client-bin" "/usr/local/bin/cmd-name`.
 
 The `scoter` script will read the JSON to build the setup files.
 
 * It needs the username and SSHD port  to ensure the `~/.ssh/config` has a Host entry with the right username and port.
 * The mount points.
 * The location of the broker process in the container.
+
+## Changes to the project configuration file
+
+The project configuration file needs additional handlers for environment variables.  Host commands now start from an empty environment, and an `env` block (top-level for every command, and per command, added to the top-level one) says what goes in it:
+
+* `allow:` a list of glob-matching environment variable names that may pass through from the container.  Nothing passes through unless it's listed, so letting a value through is always intentional.
+* `drop:` a list of glob-matching names that don't pass through after all, as an addendum to `allow:`.  For example, `allow: ["foo*"]` with `drop: ["foo*bar"]`.
+* `set:` a map of `name: value` settings to put into the execution's environment variables.
+* `default:` a map of `name: value` to set a value if the container's value didn't pass through.
+* `error:` a list of glob-matching environment variable names to trigger a failure if the container tried to set them.  For example, `AWS_ACCESS_KEY`.
+
+The `set:` and `default:` values can use `${section:key}` references to the universal configuration file's scalar values (`paths`, `programs` and `values`), plus `@ENV_NAME@` for a host environment variable.  That falls back to the system configuration's `host` section value when the host doesn't have it, and is empty when neither does.  On Windows hosts, the environment variable lookup ignores case, as Windows does, but the `host` section lookup and the `allow` / `drop` / `error` patterns are case sensitive.
+
+There's deliberately no built-in list of protected variables: it would lead to subtle differences in developer experiences.
+
+See [the project configuration file](../project-configuration-file.md#host-command-environment).
