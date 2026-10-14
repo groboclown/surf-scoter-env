@@ -150,6 +150,22 @@ class UserConfig:
             return {}
         return val
 
+    def dev_container_parent_builds(self) -> list[tuple[str, Path]]:
+        """Get the dev-container's local parent images to build, lowest first, as (tag, dir)."""
+        val, _ = self.__get(("dev-container", "parent-builds"))
+        if not isinstance(val, list):
+            return []
+        ret: list[tuple[str, Path]] = []
+        for entry in val:
+            if not isinstance(entry, dict):
+                raise self.__key_err(("dev-container", "parent-builds"), "expected {dir, tag} entries")
+            tag = entry.get("tag")
+            path = entry.get("dir")
+            if not isinstance(tag, str) or not isinstance(path, str):
+                raise self.__key_err(("dev-container", "parent-builds"), "expected {dir, tag} entries")
+            ret.append((tag, Path(path)))
+        return ret
+
     def project_str(self, *key: JsonPathPart) -> str | None:
         """Get the project key."""
         val = self.__opt_str("project", *key)
@@ -1196,7 +1212,12 @@ def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | N
         config.require_value("dev-env", "firewall-router-image"),
         config.require_value("dev-env", "gateway-network-image"),
     )
+    # The dev-env's local parents come first, lowest first.
     containers: list[tuple[str, str, Path | None]] = [
+        ("dev-env parent", tag, path)
+        for tag, path in config.dev_container_parent_builds()
+    ]
+    containers += [
         (
             "dev-env",
             ret[0],

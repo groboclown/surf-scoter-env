@@ -183,9 +183,19 @@ The general layout:
         ]
     },
 
-    // Information straight from the 'dev-env.yaml' file.
-    // If no such file exists, this section is instead 'null'.
+    // The 'dev-env.yaml' file, with its parents merged in.  If no such file
+    // exists, this section is instead 'null'.
     "dev-container": {
+        "user": "ubuntu",
+        "mounts": {"workspace": "/workspace", "setup": "/opt/surf-scoter-setup"},
+        "broker-bin": "/usr/local/bin/scoter-container",
+        // 'null' when the container picks the port; then 'sshd-port-env' is set.
+        "sshd-port": 22022,
+        "sshd-port-env": null,
+        // In place of 'parents': the local parent images to build, lowest first.
+        "parent-builds": [
+            {"dir": "/home/user/my-project/.scoter/base-env", "tag": "my-base:latest"}
+        ]
     },
 
     // The system setup files' settings, as written (nothing expanded), so a later
@@ -245,4 +255,4 @@ Notes on the values:
 * `paths` and `path-lists` entries have `~` and `./` already resolved, and are given whether or not they exist.
 * `values` keep their types: text, numbers, `true`/`false` and `null`.  Only text has its `${...}` references expanded.
 * Each `runs` command is a list of arguments, the first being the program.  The quotes from the setup file are already removed, and the `{x:name}` placeholders are left in place: fill them in within each argument, so a value with spaces stays a single argument.
-* `project`, `host-brokered` and `dev-container` keep their keys as written, though not necessarily in the same order.
+* `project`, `host-brokered` and `dev-container` keep their keys as written, though not necessarily in the same order.  `dev-container` is the merge of the `dev-env.yaml` and its parents, so always has `sshd-port`, `sshd-port-env` and `parent-builds` (possibly `null` or empty), and never `parents`.

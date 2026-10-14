@@ -311,6 +311,15 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         let json: serde_json::Value = serde_json::from_str(&written.unwrap()).unwrap();
         assert_eq!(json["dev-container"]["broker-bin"], "/b");
+        // The resolved form has every key, `parent-builds` and all.
+        assert_eq!(
+            json["dev-container"]["sshd-port-env"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["dev-container"]["parent-builds"],
+            serde_json::json!([])
+        );
         assert_eq!(
             json["setup"]["files"][0]["file"],
             path(&dir.join("setup.yaml"))
