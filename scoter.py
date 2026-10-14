@@ -76,6 +76,34 @@ class UserConfig:
             return Path(loc)
         return None
 
+    def run_command(
+        self,
+        section: str,
+        run: str,
+        /, *,
+        check: bool = True,
+        capture_stdout: bool = True,
+        template: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Run the given command.
+        
+        This will return the completed process with stdout captured.  stderr will
+        forward to the user.
+        """
+        raw_args = self.__require_list("resolved", section, "runs", run)
+        args: list[str] = []
+        for arg in raw_args:
+            if not isinstance(arg, str):
+                raise self.__key_err(("resolved", section, "runs", run), "runs must be a list of strings")
+            for key,val in (template or {}).items():
+                arg = arg.replace("{x:" + key + "}", val)
+            args.append(arg)
+        return subprocess.run(
+            args,
+            stdout=subprocess.PIPE if capture_stdout else None,
+            check=check,
+        )
+
     def _get_resolved(self, section: str) -> DictJsonData:
         """Find the resolved section group.
         
@@ -441,6 +469,7 @@ def _backup(file: Path, backup_ext: str) -> bool:
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 
+
 def generate_config(
     *,
     bin_dir: Path | None,
@@ -490,12 +519,12 @@ def generate_config(
 
 def _find_exe(name: str | Path) -> Path | None:
     """Find the executable."""
-    # Which will work if you pass it the absolute 
+    # Which will work if you pass it the absolute location.
     loc = shutil.which(name)
     if loc:
         # If 'name' is relative, which will return a relative path.
         return Path(os.path.abspath(loc))
-    if platform.system() == "Windows":
+    if _is_windows():
         # Check for a missing PATHEXT.
         path_ext = os.environ.get("PATHEXT", "").split(os.path.pathsep)
         for ext in path_ext:
@@ -523,6 +552,9 @@ def _require_exe(name: str | Path) -> Path:
         raise ConfigErr(f"could not find '{name}'")
     return ret
 
+
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
 
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
@@ -553,10 +585,102 @@ def user_space_setup_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def user_space_setup_runner(args: argparse.Namespace) -> int:
-    """Run the user-space setup."""
+    """Run the user-space setup.
+    
+    This performs:
+        1. key file construction, if it doesn't exist.
+        2. Ensure the ssh config file exists.
+    
+    This doesn't construct the Host entry in the config file, because
+    that can vary from container to container.
+    """
     config = UserConfig.load_settings_from_args(args)
-    ssh_dir = config.require_path("ssh", "home")
     interactive = bool(args.interactive)
+
+    # Step 1: generate the key pair.
+    key_file = config.require_path("ssh", "key-file")
+    pub_key_file = Path(str(key_file) + ".pub")
+    if key_file.is_file() and pub_key_file.is_file():
+        answer = _read_user_input(
+            f"The key file pair ({key_file}) already exists.  Replace? [yN]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            key_file.unlink()
+            pub_key_file.unlink()
+    elif key_file.exists() or pub_key_file.exists():
+        answer = _read_user_input(
+            f"Unfortunately, the key file pair used for allowing SSH "
+            f"access into the dev environment "
+            f"don't look right ('{key_file}' and '{pub_key_file}').  "
+            f"Do you want to recreate them? [yN]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            shutil.rmtree(key_file, ignore_errors=True)
+            shutil.rmtree(pub_key_file, ignore_errors=True)
+    if key_file.exists() or pub_key_file.exists():
+        print(f"The key file pair ('{key_file}' and '{pub_key_file}') exist; skipping creation.")
+    else:
+        # Creating a key pair when they don't already exist is safe.
+        answer = _read_user_input(
+            f"Do you want me to create the key pair ('{key_file}' and '{pub_key_file}')? [Yn]",
+            interactive,
+            "y",
+        )
+        if answer and answer[0] == "y":
+            print("Generating the key pair.")
+            config.run_command("ssh", "mk-key", capture_stdout=False)
+        else:
+            print(
+                f"The ssh key pair ('{key_file}' and '{pub_key_file}') "
+                f"don't exist, and the dev container won't work until they do."
+            )
+
+    # Step 2: Ensure the ssh config file exists.
+    ssh_config_file = config.require_path("ssh", "config-file")
+    if ssh_config_file.is_file():
+        print(f"Good.  You already have the ssh config file ({ssh_config_file})")
+    elif ssh_config_file.exists():
+        answer = _read_user_input(
+            f"Your ssh config ({ssh_config_file}) exists but isn't a file.  "
+            f"Do you want me to remove what's there? [yN]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            shutil.rmtree(ssh_config_file, ignore_errors=True)
+
+    if ssh_config_file.is_file() and not _is_windows():
+        # Check its permissions.
+        mode = os.stat(ssh_config_file).st_mode
+        if mode & 0o0077 != 0:
+            answer = _read_user_input(
+                f"Your ssh config file ({ssh_config_file}) exists (excellent!), but has "
+                f"wrong permissions ({mode:o}). Do you want me to fix that? [yN]",
+                interactive,
+                "n",
+            )
+            if answer and answer[0] == "y":
+                os.chmod(ssh_config_file, 0o600)
+                mode = os.stat(ssh_config_file).st_mode
+                print(f"Changed the file ({ssh_config_file}) permissions to {mode:o}")
+        else:
+            print("... and that config file has the right permissions.")
+    if not ssh_config_file.is_file():
+        # Unlike the others, creating the file is a safe option.
+        answer = _read_user_input(
+            f"Your ssh config ({ssh_config_file}) doesn't exist.  "
+            f"You'll need this to run Surf Scoter.  "
+            f"Do you want me to create a blank one? [Yn]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            ssh_config_file.touch(0o600)
+            print(f"Created an empty ssh config file ({ssh_config_file})")
 
     return 0
 
@@ -595,7 +719,7 @@ SUB_COMMAND_ARGUMENTS["parse-config"] = configuration_debug_parser
 
 
 # ---------------------------------------------------------------------
-# Argument helpers
+# Command and Argument helpers
 
 def _add_project_args(parser: argparse.ArgumentParser) -> None:
     """Add the arguments used for handling a project."""
@@ -640,6 +764,23 @@ def _add_settings_args(parser: argparse.ArgumentParser) -> None:
         dest="bin_dir",
         help="Point to the directory storing the Surf Scoter binary files.",
     )
+
+
+def _read_user_input(
+    prompt: str,
+    interactive: bool,
+    default: str,
+) -> str | None:
+    """Used for reading simple multiple-choice questions, not free-form text."""
+    if interactive:
+        try:
+            line = input(prompt + " ")
+        except EOFError:
+            return None
+        line = line.strip()
+        if line:
+            return line.lower()
+    return default
 
 
 # ---------------------------------------------------------------------

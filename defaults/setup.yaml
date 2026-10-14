@@ -7,6 +7,10 @@
 # See docs/system-config-file.md.
 
 ssh:
+    programs:
+        keygen: ssh-keygen
+    runs:
+        mk-key: ${keygen} -t ed25519 -N "" -f ${key-file}
     paths:
         home: ~/.ssh
         key-file: ${home}/scoter-dev-container
