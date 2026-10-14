@@ -1,11 +1,10 @@
 #!/usr/sbin/env python3
 """The surf-scoter user tool."""
 # Compatibility: Python 3.12+
-
-
 import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import datetime
 import json
 import os
 from pathlib import Path
@@ -13,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import time
 import shlex
 import sys
 
@@ -26,6 +26,7 @@ JsonPathPart = str | int
 DISTRIBUTION_BIN_DIR = "bin"
 SCOTER_HOST_EXEC = "scoter-host"
 GEN_SCOTER_UC_EXEC = "gen-scoter-uc"
+VCS_SECTION_SUFFIX = "-vcs"
 
 
 # ---------------------------------------------------------------------
@@ -81,6 +82,19 @@ class UserConfig:
             raise self.__key_err(("resolved", section, "values", key), "value must exist")
         return str(val)
 
+    def active_location(self, name: str) -> Path | None:
+        """Read an active location path."""
+        val = self.__opt_str("active-config-locations", name)
+        if val is None:
+            return None
+        return Path(str(val))
+
+    def set_active_location(self, name: str, path: Path) -> None:
+        """Overwrite the active location."""
+        locs = self._config["active-config-locations"]
+        assert isinstance(locs, dict)
+        locs[name] = str(path)
+
     def require_run(
         self, section: str, run: str, template: dict[str, str] | None = None
     ) -> list[str]:
@@ -103,8 +117,10 @@ class UserConfig:
         section: str,
         run: str,
         /, *,
+        cwd: Path | None = None,
         check: bool = True,
         capture_stdout: bool = True,
+        capture_stderr: bool = False,
         template: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run the given command.
@@ -115,7 +131,9 @@ class UserConfig:
         return subprocess.run(
             self.require_run(section, run, template),
             stdout=subprocess.PIPE if capture_stdout else None,
+            stderr=subprocess.PIPE if capture_stderr else None,
             check=check,
+            cwd=cwd,
         )
 
     def dev_container_str(self, key: str) -> str:
@@ -583,31 +601,371 @@ class SshConfig:
 
 
 # ---------------------------------------------------------------------
+# Active container record
+
+@dataclass(frozen=True)
+class EnvironmentDesc:
+    """Full description of a dev environment.
+
+    This contains "enough" information to help the tool tear down the
+    environment, even if it's partially already removed.
+    """
+
+    # Data extracted from the SUC used to execute the environment.
+    host_prefix: str
+    host_suffix: str
+    dev_env_name: str
+    firewall_router_name: str
+    network_gateway_name: str
+    project_dir: str
+    resources_dir: str
+    workspace_dir: str
+    setup_dir: str
+    compose_env_file: str
+    created_at: str
+
+    # Captures all the data when launched, and allows for
+    # teardown discovery and user debugging.
+    suc: DictJsonData
+
+    @staticmethod
+    def from_json(file: Path, raw: JsonData) -> "EnvironmentDesc":
+        """Extract this from JSON formatted data."""
+
+        def as_dict(data: JsonData) -> DictJsonData:
+            if not isinstance(data, dict):
+                raise ConfigErr(
+                    f"active environment file ({file}) expected dict, found {type(data)}"
+                )
+            return data
+
+        def as_str(data: JsonData) -> str:
+            if not isinstance(data, str):
+                raise ConfigErr(
+                    f"active environment file ({file}) expected str, found {type(data)}"
+                )
+            return data
+
+        data = as_dict(raw)
+        return EnvironmentDesc(
+            host_prefix=as_str(data.get("host_prefix")),
+            host_suffix=as_str(data.get("host_suffix")),
+            dev_env_name=as_str(data.get("dev_env_name")),
+            firewall_router_name=as_str(data.get("firewall_router_name")),
+            network_gateway_name=as_str(data.get("network_gateway_name")),
+            project_dir=as_str(data.get("project_dir")),
+            resources_dir=as_str(data.get("resources_dir")),
+            workspace_dir=as_str(data.get("workspace_dir")),
+            setup_dir=as_str(data.get("setup_dir")),
+            compose_env_file=as_str(data.get("compose_env_file")),
+            created_at=as_str(data.get("created_at")),
+            suc=as_dict(data.get("suc")),
+        )
+
+    def to_json(self) -> JsonData:
+        """Serialize this data."""
+        return {
+            "host_prefix": self.host_prefix,
+            "host_suffix": self.host_suffix,
+            "dev_env_name": self.dev_env_name,
+            "firewall_router_name": self.firewall_router_name,
+            "network_gateway_name": self.network_gateway_name,
+            "project_dir": self.project_dir,
+            "resources_dir": self.resources_dir,
+            "workspace_dir": self.workspace_dir,
+            "setup_dir": self.setup_dir,
+            "compose_env_file": self.compose_env_file,
+            "created_at": self.created_at,
+            "suc": self.suc,
+        }
+
+
+class ActiveEnvironmentSet:
+    """A file record of the active containers."""
+
+    ENVIRON_IDS = "abcdefghijklmnopqrstuvwxyz"
+
+    def __init__(
+        self,
+        *,
+        file: Path,
+        lock_file: Path | None,
+        orig: str,
+        environs: list[EnvironmentDesc],
+    ) -> None:
+        self._file = file
+        self._lock = lock_file
+        self._orig = orig
+        self.environs: dict[str, EnvironmentDesc] = {}
+        for env in environs:
+            if env.host_suffix in self.environs:
+                raise ConfigErr(
+                    f"bad active environment config ({file}): "
+                    f"duplicate id {env.host_suffix}"
+                )
+            self.environs[env.host_suffix] = env
+
+    def __del__(self) -> None:
+        if self._lock:
+            print(
+                f"Warning: the active environment ({self._file}) is left in a locked state.  "
+                f"You'll need to manually clean it up."
+            )
+
+    def to_json(self) -> JsonData:
+        """Serialize this data."""
+        return [e.to_json() for e in self.environs.values()]
+
+    def reserve_environ(self, host_prefix: str) -> str:
+        """Reserve a host environment."""
+        if self._lock is None:
+            raise RuntimeError("read-only")
+        for eid in ActiveEnvironmentSet.ENVIRON_IDS:
+            if eid not in self.environs:
+                self.environs[eid] = EnvironmentDesc(
+                    host_prefix=host_prefix,
+                    host_suffix=eid,
+                    dev_env_name="",
+                    firewall_router_name="",
+                    network_gateway_name="",
+                    project_dir="",
+                    resources_dir="",
+                    workspace_dir="",
+                    setup_dir="",
+                    compose_env_file="",
+                    created_at=datetime.datetime.now().isoformat(),
+                    suc={},
+                )
+                return eid
+        raise ConfigErr("Too many registered environments.")
+
+    def update_environ(self, env: EnvironmentDesc) -> None:
+        """Update the environment description."""
+        if self._lock is None:
+            raise RuntimeError("read-only")
+        if env.host_suffix not in self.environs:
+            raise RuntimeError(f"environment ID {env.host_suffix} not registered")
+        self.environs[env.host_suffix] = env
+
+    def get_active_host_ids(self) -> list[str]:
+        """Get all the active host IDs."""
+        return list(self.environs.keys())
+
+    def get_active_host_ids_for_prefix(self, prefix: str) -> list[str]:
+        """Get all the active host IDs for the given host prefix."""
+        ret: list[str] = []
+        for env in self.environs.values():
+            if env.host_prefix == prefix:
+                ret.append(env.host_suffix)
+        return ret
+
+    def get_environ_by_host(self, host: str) -> EnvironmentDesc | None:
+        """Get the environment description by the host name."""
+        for env in self.environs.values():
+            if env.host_prefix + env.host_suffix == host:
+                return env
+        return None
+
+    def rm_environ_by_host(self, host: str) -> bool:
+        """Attempt to remove the host from the active list."""
+        if self._lock is None:
+            raise RuntimeError("read-only")
+        env = self.get_environ_by_host(host)
+        if env:
+            del self.environs[env.host_suffix]
+            return True
+        return False
+
+    @staticmethod
+    def open_readonly(file: Path) -> "ActiveEnvironmentSet":
+        """Read the active environment set."""
+        orig, environs = ActiveEnvironmentSet._read_contents(file)
+        return ActiveEnvironmentSet(
+            file=file,
+            lock_file=None,
+            orig=orig,
+            environs=environs,
+        )
+
+    @staticmethod
+    def open(
+        file: Path, lock_file: Path, timeout_sec: float | None
+    ) -> "ActiveEnvironmentSet | None":
+        """Open the active environment set for writing."""
+        if timeout_sec is None or timeout_sec <= 0:
+            expires_timeout = 0.0
+        else:
+            expires_timeout = time.time() + timeout_sec
+        while True:
+            if lock_file.is_file():
+                # Something else owns the lock.
+                # The lock should have a short time-to-live.
+                if time.time() >= expires_timeout:
+                    return None
+                time.sleep(0.2)
+                continue
+            if not file.is_file():
+                # No file yet.  Mark the lock and return empty.
+                lock_file.touch(0o400)
+                return ActiveEnvironmentSet(
+                    file=file,
+                    lock_file=lock_file,
+                    orig="",
+                    environs=[],
+                )
+            # Setup the lock and return the contents.
+            # If some OS problem happens when performing the file manipulations,
+            # don't correct the lock - that can mean someone stole it from us.
+            try:
+                lock_file.touch(0o600)  # ensure it exists and is writable.
+                orig, environs = ActiveEnvironmentSet._read_contents(file)
+                lock_file.write_text(orig, encoding="utf-8")
+                lock_file.touch(0o400)  # make read-only
+                return ActiveEnvironmentSet(
+                    file=file,
+                    lock_file=lock_file,
+                    orig=orig,
+                    environs=environs,
+                )
+            except OSError:
+                # Could not capture the lock.
+                return None
+
+    @staticmethod
+    def _read_contents(file: Path) -> tuple[str, list[EnvironmentDesc]]:
+        if file.is_file():
+            # TODO put a cap on file size.
+            with open(file, "r", encoding="utf-8") as inp:
+                text = inp.read()
+            data: JsonData = json.loads(text)
+            if not isinstance(data, list):
+                raise ConfigErr(f"wrong formatted active environment set {file}")
+            return (text, [EnvironmentDesc.from_json(file, e) for e in data])
+        return ("", [])
+
+    def close(self) -> None:
+        """Close without saving, and disallow additional save actions."""
+        # Note: this is explicitly not run at __del__() time.
+        # This allows for leaving things in a reserved state for when something went sideways.
+        if self._lock and self._is_lock_owned():
+            self._lock.touch(0o600)  # turn writable
+            _rm(self._lock)
+            self._lock = None
+
+    def _is_lock_owned(self) -> bool:
+        """Check if the lock file is still the one we think it is."""
+        if not self._lock:
+            # Read-only access.
+            return False
+        if self._lock.is_file():
+            lock_data = ActiveEnvironmentSet.open_readonly(self._lock)
+            # If the contents match, then consider it still owned by us.
+            return lock_data._orig == self._orig
+        # Something stole the lock from us.
+        return False
+
+    def save(self, close: bool = True) -> None:
+        """Save the current file."""
+        # Inspect the lock file.  It should match up with expectations.
+        if self._lock and self._is_lock_owned():
+            # Write the data.
+            with open(self._file, "w", encoding="utf-8") as out:
+                json.dump(self.to_json(), out)
+            if close:
+                self._lock.touch(0o600)  # turn writable
+                _rm(self._lock)
+                self._lock = None
+
+
+# ---------------------------------------------------------------------
 # Basic file operations
+
 def _backup(file: Path, backup_ext: str) -> bool:
     """Backup the file.
     
-    Returns 'true' if the backup was successful.
+    Returns 'True' if the backup was successful.
     """
     if not file.is_file():
         # The file to back up doesn't exist, so there's nothing to back up.
         # This is fine.
         return True
     to_file = Path(str(file) + backup_ext)
-    if to_file.is_file():
-        to_file.unlink()
-    if not to_file.exists():
+    if to_file.exists():
+        _rm(to_file)
+    # Refresh metadata in the check.
+    if not os.path.exists(to_file):
         file.copy(to_file, preserve_metadata=True)
         return True
     return False
 
 
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# External Tool Code
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
+def _restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
+    """Restore the file from backup.
+    
+    Returns 'True' if the restore succeeded.
 
+    If 'delete_allowed' is True, then the restore will remove the
+    file if there exists no backup.
+
+    If the file can't be removed, then the backup goes untouched.
+    """
+    from_file = Path(str(file) + backup_ext)
+    if not from_file.exists():
+        # There is no backup file.
+        if delete_allowed:
+            # Only delete the source file if the caller requests it.
+            if not _rm(file):
+                # It still exists.  Can't restore from backup.
+                return False
+        return True
+    try:
+        # TODO ensure 'move' is Python 3.12 compatible.
+        from_file.move(file)
+    except OSError:
+        return False
+    return True
+
+
+def _rm(file: Path) -> bool:
+    """Try to remove the file.  Does not raise an error, but reports it to stderr.
+    
+    If the file is a directory, it will try to remove it recursively.
+    """
+    if not file.exists():
+        return True
+    if file.is_mount():
+        print(f"Warning: cannot delete mount point at {file}", file=sys.stderr)
+        return False
+    try:
+        if (
+            file.is_file()
+            or file.is_symlink()
+            or file.is_junction()
+            or file.is_char_device()
+            or file.is_socket()
+        ):
+            file.unlink()
+        elif file.is_dir():
+            shutil.rmtree(file)
+        else:
+            print(f"Warning: could not delete unsupported file type at {file}", file=sys.stderr)
+            return False
+
+        # Final check if things worked.
+        if file.exists():
+            print(f"Warning: could not delete {file}", file=sys.stderr)
+            return False
+        return True
+    except PermissionError:
+        print(f"Warning: permission issue deleting {file}", file=sys.stderr)
+        return not file.exists()
+    except IOError as err:
+        print(f"Warning: {err}", file=sys.stderr)
+        return not file.exists()
+
+
+# ---------------------------------------------------------------------
+# Generate the SUC file
 
 def generate_config(
     *,
@@ -645,8 +1003,11 @@ def generate_config(
         args,
         stdout=subprocess.PIPE,
         # let stderr be passed directly to the user.
-        check=True,
+        check=False,
     )
+    if res.returncode != 0:
+        raise ConfigErr("Problem loading the configuration")
+
     try:
         ret: JsonData = json.loads(res.stdout)
     except Exception as err:
@@ -714,6 +1075,29 @@ def start_env_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = "Start the project dev container."
     parser.set_defaults(func=start_env_runner)
     parser.add_argument(
+        "--clean-workspace",
+        action="store_true",
+        dest="clean_workspace",
+        default=False,
+        help=(
+            "If the dev-env workspace directory already exists from a previous run, "
+            "remove it and recreate it."
+        ),
+    )
+    parser.add_argument(
+        "--no-workspace-fetch",
+        action="store_false",
+        dest="workspace_fetch",
+        default=True,
+        help=(
+            "If the workspace directory exists, then don't fetch updates into it "
+            "from the project directory.  This can lead to the workspace directory "
+            "becoming out-of-date.  If the workspace directory doesn't exist, it "
+            "will still be populated from the project (essentially ignoring this "
+            "flag)."
+        ),
+    )
+    parser.add_argument(
         "--vs-settings",
         action="store",
         dest="vs_settings",
@@ -727,24 +1111,53 @@ SUB_COMMAND_ARGUMENTS["start"] = start_env_parser
 def start_env_runner(args: argparse.Namespace) -> int:
     """Start the dev environment."""
     config = UserConfig.load_project_from_args(args)
+    vcs_section = config.project_str("vcs")
+    if vcs_section:
+        vcs_section += VCS_SECTION_SUFFIX
 
     # Setup the SSH config file for running.
     host_prefix = _setup_ssh_config(config)
     if not host_prefix:
         return 1
 
-    # FIXME
+    # Prepare the active environment set for writing.
+    # Note that this requires explicit "close" mechanics when successfully used.
+    active_envs = ActiveEnvironmentSet.open(
+        config.require_path("dev-env", "running-env-config"),
+        config.require_path("dev-env", "running-env-config-lock"),
+        timeout_sec=2.0,
+    )
+    if active_envs is None:
+        print(
+            "Failed accessing the active environment: " +
+            str(config.require_path("dev-env", "running-env-config")),
+            file=sys.stderr,
+        )
+        return 1
 
     # Discover the host suffix to use.
+    host_suffix = active_envs.reserve_environ(host_prefix)
+    host = host_prefix + host_suffix
 
-    # Build the dev-env container + firewall-router + network-gateway.
+    # Build the containers.
+    image_tags = _build_containers(config, host) # (dev-env, firewall, gateway)
+    if not image_tags:
+        return 1
 
     # Setup the workspace directory via the vcs command.
+    workspace_dir = _setup_workspace(config, vcs_section, args.clean_workspace, args.workspace_fetch)
 
     # Setup the working directories by putting a vcs "ignore-file" in each, ignoring everything.
+    settings_dir = config.active_location("dev-container-settings-dir")
+    if settings_dir is None:
+        settings_dir = config.require_path("workspace", "setup-dir")
+        config.set_active_location("dev-container-settings-dir", settings_dir)
+    # TODO complete
 
     # Setup the .env file in the resources directory.  Much of this comes from
     # the host suffix and the config "dev-env" section.
+    resources_dir = config.require_path("dev-env", "resources-dir")
+    # TODO complete
 
     # Setup the docker-compose file in the resources directory.
 
@@ -760,15 +1173,106 @@ def start_env_runner(args: argparse.Namespace) -> int:
     # store those in the user's host store directory.  This is used
     # for assigning host suffixes, for use with parallel dev envs.
 
-    # Capture KeyboardInterrupt to trigger stopping the compose.
+    try:
+        # Start scoter-host
 
-    # Start scoter-host
+        # Tell the user the setup for the container (host name).
 
-    # Tell the user the setup for the container (host name).
+        # Wait until user interrupt.
+        while True:
+            time.sleep(300.0)
+    except KeyboardInterrupt:
+        print("User requested termination.")
 
-    # Wait.
+    # Tear it all down.  Keep the 'workspace' directory, though.
 
     return 0
+
+
+def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | None:
+    # Build the dev-env container + firewall-router + network-gateway.
+    ret = (
+        config.require_value("dev-env", "dev-env-image-prefix") + host,
+        config.require_value("dev-env", "firewall-router-image"),
+        config.require_value("dev-env", "gateway-network-image"),
+    )
+    containers: list[tuple[str, str, Path | None]] = [
+        (
+            "dev-env",
+            ret[0],
+            config.active_location("dev-container-path"),
+        ),
+        (
+            "firewall-router",
+            ret[1],
+            config.require_path("dev-env", "firewall-router"),
+        ),
+        (
+            "gateway-network",
+            ret[2],
+            config.require_path("dev-env", "gateway-network"),
+        ),
+    ]
+    for kind,tag,path in containers:
+        if not path:
+            print(f"No build directory set for {kind} container", file=sys.stderr)
+            return None
+        res = config.run_command(
+            "docker", "build",
+            check=False,
+            capture_stderr=True,
+            template={
+                "tag": tag,
+                "dir": str(path),
+            },
+        )
+        if res.returncode != 0:
+            print(res.stdout)
+            print(res.stderr, file=sys.stderr)
+            print(f"Failed building {kind} image ({path})", file=sys.stderr)
+            return None
+    return ret
+
+
+def _setup_workspace(
+    config: UserConfig,
+    vcs_section: str | None,
+    clean_workspace: bool,
+    workspace_fetch: bool
+) -> Path:
+    # Setup the workspace directory.
+    workspace_dir = config.active_location("dev-container-workspace-dir")
+    if workspace_dir is None:
+        workspace_dir = config.require_path("workspace", "workspace-dir")
+        config.set_active_location("dev-container-workspace-dir", workspace_dir)
+    if workspace_dir.exists():
+        if clean_workspace:
+            print(f"Cleaning out the workspace directory ({workspace_dir})")
+            _rm(workspace_dir)
+        elif workspace_fetch and vcs_section:
+            print("Fetching the workspace contents")
+            config.run_command(
+                vcs_section,
+                "fetch-changes",
+                cwd=workspace_dir,
+            )
+        else:
+            print("Not copying project into the workspace.")
+    if not workspace_dir.exists():
+        if vcs_section:
+            print("Cloning into the workspace")
+            config.run_command(
+                vcs_section,
+                "local-clone",
+                cwd=config.active_location("project-dir"),
+                template={
+                    "workspace-dir": str(workspace_dir),
+                }
+            )
+        else:
+            print("Not copying project into the workspace (no version control system defined).")
+            workspace_dir.mkdir(parents=True)
+    return workspace_dir
 
 
 def _setup_ssh_config(config: UserConfig) -> str | None:
@@ -840,7 +1344,6 @@ def stop_env_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = "Stop the project dev container.  The 'start' should linger around as long as the container is running.  Use this to stop run-away configurations."
     parser.set_defaults(func=stop_env_runner)
     parser.add_argument(
-        "-h",
         "--host",
         action="store",
         dest="host",
@@ -1197,6 +1700,9 @@ def main(argv: Sequence[str]) -> int:
         return args.func(args)
     except ConfigErr as err:
         print(f"Configuration problem: {err}", file=sys.stderr)
+    except subprocess.CalledProcessError as err:
+        print("Failed running command", file=sys.stderr)
+        print(str(err), file=sys.stderr)
     except KeyboardInterrupt:
         print("User interrupted execution.", file=sys.stdout)
     return 1

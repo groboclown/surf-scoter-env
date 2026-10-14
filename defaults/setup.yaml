@@ -26,6 +26,7 @@ docker:
         # How scoter-host starts the broker inside the dev container.
         # Note: adding a `-t` (terminal) will corrupt the binary wire protocol.
         broker: ${exec} exec -i {x:container} {x:broker}
+        build: ${exec} build -t {x:tag} {x:dir}
         compose-up: ${exec} compose --env-file {x:env-file} -f {x:compose-file} up -d
         compose-service-stats: >
             ${exec} compose --env-file {x:env-file}
@@ -39,9 +40,10 @@ docker:
 # Information for the workspace clone.
 workspace:
     paths:
-        setup-dir: ${scoter:project-dir}/.dev-env/setup
-        resources-dir: ${scoter:project-dir}/.dev-env/resources
-        workspace-dir: ${scoter:project-dir}/.dev-env/workspace
+        workspace-parent-dir: ${scoter:project-dir}/.dev-env
+        setup-dir: ${workspace-parent-dir}/.dev-env/setup
+        resources-dir: ${workspace-parent-dir}/.dev-env/resources
+        workspace-dir: ${workspace-parent-dir}/.dev-env/workspace
 
 
 # The 'git' VCS tool.
@@ -52,8 +54,9 @@ git-vcs:
     programs:
         exec: git
     runs:
-        local-clone: ${exec} clone ${scoter:project-dir} ${workspace-dir}
-        fetch-changes: ${exec} fetch ${workspace-dir} {x:branch}
+        local-clone: ${exec} clone ${scoter:project-dir} {x:workspace-dir}
+        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
+        fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
 
         # Requires the user to review the changes and does not commit them.
@@ -64,18 +67,36 @@ git-vcs:
         ignore-file: .gitignore
 
 
+# Default for no vcs - stored as simple files.
+# TODO create a "file vcs" python script in the install directory to handle these mechanisms.
+#      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
+#      support easier.
+file-vcs:
+    programs:
+        cp: cp
+        diff: diff
+        noop: echo
+    runs:
+        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
+        fetch-changes: ${noop}
+        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
+        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+
+
 # Information for dealing with developer environments.
 dev-env:
     paths:
         # Stores the running docker-compose configurations, so that
         # parallel runs can understand how to deal with resource contention.
-        running-env-config: ${user-dir}/running-env.json
-    values:
-        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
-        firewall-router-image: local-surf-scoter/firewall-router
+        running-env-config: ${scoter:user-dir}/running-env.json
+        running-env-config-lock: ${scoter:user-dir}/running-env.json.lock
 
+        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway
+    values:
+        firewall-router-image: local-surf-scoter/firewall-router
         network-gateway-image: local-surf-scoter/network-gateway
+        dev-env-image-prefix: local-surf-scoter/
 
         # Limits for the docker-compose file.
         mem-limit: 8g
@@ -108,10 +129,6 @@ scoter:
             - ${scoter:cwd}/.surf-scoter/setup.yml
             - ${scoter:project-dir}/.surf-scoter.yaml
             - ${scoter:project-dir}/.surf-scoter.yml
-
-            # Careful with these!
-            - ${scoter:project-dir}/setup.yaml
-            - ${scoter:project-dir}/setup.yml
 
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         dev-containers-search:

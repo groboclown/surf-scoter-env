@@ -74,7 +74,7 @@ The general layout:
         // The project configuration file, the project directory (--project-dir, or the
         // project file's directory) and the project's dev container.
         "project-config": "/home/user/my-project/.scoter/settings.yml",
-        "project-dir": "/home/user/my-project/.scoter",
+        "project-dir": "/home/user/my-project",
         "dev-container-path": "/home/user/my-project/.scoter/dev-env",
         // The host directories mounted in the dev container:
         //   --dev-container-workspace-dir - the cloned project workspace
