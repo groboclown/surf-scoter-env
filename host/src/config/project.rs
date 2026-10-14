@@ -9,6 +9,10 @@
 //! host themselves, doesn't belong here.
 //!
 //! ```yaml
+//! # optional; how the project's files are kept, for the `scoter` script.
+//! # The host tools don't use it.
+//! vcs: git
+//!
 //! container:
 //!   # The dev container: a directory with a Dockerfile and dev-env.yaml,
 //!   # relative to this file...
@@ -115,6 +119,9 @@ pub struct ProjectConfig {
     /// The file, as an absolute path.
     pub path: PathBuf,
     pub container: ContainerRef,
+    /// How the project's files are kept, for the `scoter` script: any
+    /// non-empty text.
+    pub vcs: Option<String>,
     /// The environment rules for every command.
     pub env: EnvRules,
     /// The allowed forms of commands, in match order.  Anything not listed is refused.
@@ -354,6 +361,7 @@ fn parse_checked(
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
     let mut env = EnvRules::default();
+    let mut vcs = None;
     let mut has_container = false;
     for (key, value) in map {
         match key.as_str() {
@@ -365,6 +373,13 @@ fn parse_checked(
                 (commands, raw_commands) = parse_commands(value, "commands", &mut problems)
             }
             Some("env") => env = parse_env(value, &mut problems),
+            Some("vcs") => match value {
+                Value::String(text) if !text.is_empty() => vcs = Some(text),
+                Value::String(_) => {
+                    problems.push(("vcs".to_string(), "must not be empty".to_string()))
+                }
+                _ => problems.push(("vcs".to_string(), "must be text".to_string())),
+            },
             Some(other) => problems.push((other.to_string(), "unknown key".to_string())),
             None => problems.push((String::new(), format!("key {key:?} must be a string"))),
         }
@@ -376,6 +391,7 @@ fn parse_checked(
         Some(container) if problems.is_empty() => Ok(ProjectConfig {
             path: path.to_path_buf(),
             container: container.clone(),
+            vcs,
             env,
             commands,
             raw_commands,
@@ -625,6 +641,7 @@ mod tests {
             ProjectConfig {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
+                vcs: None,
                 env: EnvRules::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
@@ -885,6 +902,28 @@ mod tests {
             "{CONTAINER}commands:\n  - command: aws\n    args: []\n    env-plan: {{}}\n"
         ));
         assert!(err.contains("env-plan"), "{err}");
+    }
+
+    #[test]
+    fn parse_vcs() {
+        let config = parse_text(&format!("{CONTAINER}vcs: git\n")).unwrap();
+        assert_eq!(config.vcs.as_deref(), Some("git"));
+        // Kept in the file as written, for the universal configuration file.
+        assert_eq!(config.raw["vcs"], "git");
+        assert_eq!(parse_text(CONTAINER).unwrap().vcs, None);
+        assert_eq!(
+            parse_text(&format!("{CONTAINER}vcs: ''\n")).unwrap_err(),
+            ["vcs: must not be empty"]
+        );
+        assert_eq!(
+            parse_text(&format!("{CONTAINER}vcs: [git]\n")).unwrap_err(),
+            ["vcs: must be text"]
+        );
+        // A number or boolean isn't text either; quote it.
+        assert_eq!(
+            parse_text(&format!("{CONTAINER}vcs: 1\n")).unwrap_err(),
+            ["vcs: must be text"]
+        );
     }
 
     #[test]

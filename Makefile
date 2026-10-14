@@ -210,7 +210,8 @@ mk-installer:
 
 # TODO this target is big and complex.
 # Probably want to make it a script so that this Makefile doesn't fill up
-# with cut-and-paste code.
+# with cut-and-paste code.  Also, this should carefully copy files, so that
+# developer remnants aren't accidentally copied in.
 
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 mk-installer: mk-installer-x86_64-unknown-linux-gnu

@@ -331,6 +331,7 @@ mod tests {
             &dir,
             Some(concat!(
                 "container:\n  dev-container-path: ./env\n",
+                "vcs: git\n",
                 "env:\n  allow: [LANG]\n  error: ['SECRET_*']\n  set: {CONF: '${ssh:config-file}', HOME: '@HOME@'}\n",
                 "commands:\n",
                 "  - command: aws\n    args: [s3, ls, {any: {prefix: 's3://b/'}}]\n",
@@ -502,7 +503,8 @@ mod tests {
             "{}",
             json["setup"]
         );
-        // The project file, as written.
+        // The project file, as written, `vcs` included.
+        assert_eq!(json["project"]["vcs"], "git");
         assert_eq!(json["project"]["container"]["dev-container-path"], "./env");
         assert_eq!(
             json["project"]["commands"][1]["program"],

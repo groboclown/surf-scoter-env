@@ -2,11 +2,16 @@
 set -e
 
 # Assemble the files from the working directory.
-# TODO move the authorized_keys and ssh_host_ed25519_key files into a different (read-only) mount
-cp /workspace/authorized_keys "$HOME/.ssh/authorized_keys"
+cp /opt/surf-scoter-setup/authorized_keys "$HOME/.ssh/authorized_keys"
 test -f "$HOME/.config/sshd/ssh_host_ed25519_key" && rm -f "$HOME/.config/sshd/ssh_host_ed25519_key"
-cp /workspace/ssh_host_ed25519_key "$HOME/.config/sshd/ssh_host_ed25519_key"
+cp /opt/surf-scoter-setup/ssh_host_ed25519_key "$HOME/.config/sshd/ssh_host_ed25519_key"
 chmod 0400 "$HOME/.config/sshd/ssh_host_ed25519_key"
+
+# Read the 'bridge-cmds.txt' file and hard-link the bridge client to those
+# names in the /usr/local/bin directory.
+for name in /opt/surf-scoter-setup/bridge-cmds.txt ; do
+    ln /usr/local/bin/scoter-client /usr/local/bin/$name
+done
 
 # Keep running with the SSHD process.
 exec /usr/sbin/sshd -D -e -f "$HOME/.config/sshd/sshd_config"

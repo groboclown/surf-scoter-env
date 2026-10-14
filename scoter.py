@@ -1,8 +1,5 @@
 #!/usr/sbin/env python3
-"""The surf-scoter user tool.
-
-
-"""
+"""The surf-scoter user tool."""
 # Compatibility: Python 3.12+
 
 
@@ -16,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import shlex
 import sys
 
 JsonData = str | int | float | bool | None | list["JsonData"] | dict[str, "JsonData"]
@@ -76,6 +74,30 @@ class UserConfig:
             return Path(loc)
         return None
 
+    def require_value(self, section: str, key: str) -> str:
+        """Load a value (as a string) that might exist."""
+        val = self.__opt_str("resolved", section, "values", key)
+        if val is None:
+            raise self.__key_err(("resolved", section, "values", key), "value must exist")
+        return str(val)
+
+    def require_run(
+        self, section: str, run: str, template: dict[str, str] | None = None
+    ) -> list[str]:
+        """Return the required run command."""
+        raw_args = self.__require_list("resolved", section, "runs", run)
+        args: list[str] = []
+        for arg in raw_args:
+            if not isinstance(arg, str):
+                raise self.__key_err(
+                    ("resolved", section, "runs", run),
+                    "runs must be a list of strings",
+                )
+            for key,val in (template or {}).items():
+                arg = arg.replace("{x:" + key + "}", val)
+            args.append(arg)
+        return args
+
     def run_command(
         self,
         section: str,
@@ -90,29 +112,32 @@ class UserConfig:
         This will return the completed process with stdout captured.  stderr will
         forward to the user.
         """
-        raw_args = self.__require_list("resolved", section, "runs", run)
-        args: list[str] = []
-        for arg in raw_args:
-            if not isinstance(arg, str):
-                raise self.__key_err(("resolved", section, "runs", run), "runs must be a list of strings")
-            for key,val in (template or {}).items():
-                arg = arg.replace("{x:" + key + "}", val)
-            args.append(arg)
         return subprocess.run(
-            args,
+            self.require_run(section, run, template),
             stdout=subprocess.PIPE if capture_stdout else None,
             check=check,
         )
 
-    def _get_resolved(self, section: str) -> DictJsonData:
-        """Find the resolved section group.
-        
-        If not found, this will return an empty section.
-        """
-        ret = self.__require_dict("resolved", section)
-        if ret:
-            return ret
-        return {"paths": {}, "programs": {}, "runs": {}, "path-lists": {}, "values": {}}
+    def dev_container_str(self, key: str) -> str:
+        """Get the dev-container key."""
+        val = self.__opt_str("dev-container", key)
+        if val is None:
+            raise self.__key_err(("dev-container", key), "dev-env.yaml must provide this value")
+        return val
+
+    def dev_container_mounts(self) -> dict[str, str]:
+        """Get the dev-container volume mount points."""
+        val = self.__get(("dev-container", "mounts"))
+        if not isinstance(val, dict):
+            return {}
+        return val
+
+    def project_str(self, *key: JsonPathPart) -> str | None:
+        """Get the project key."""
+        val = self.__opt_str("project", *key)
+        if val is None:
+            return None
+        return str(val)
 
     def save(self, outfile: str) -> None:
         """Save the current configuration to the given file."""
@@ -288,12 +313,6 @@ class UserConfig:
             return Path(bin_dir)
         return dist_dir / DISTRIBUTION_BIN_DIR
 
-    def __require_dict(self, *path: JsonPathPart) -> DictJsonData:
-        obj, exists = self.__get(path)
-        if exists and isinstance(obj, dict):
-            return obj
-        raise UserConfig.__key_err(path, "expected map")
-
     def __require_list(self, *path: JsonPathPart) -> ListJsonData:
         obj, exists = self.__get(path)
         if exists and isinstance(obj, list):
@@ -362,7 +381,7 @@ class SshConfigLine:
     value: str | None
 
     @staticmethod
-    def _parse_line(host: str | None, line: str, line_no: int) -> "SshConfigLine":
+    def parse_line(host: str | None, line: str, line_no: int) -> "SshConfigLine":
         """Parse the single line of the ssh_config file."""
         if line_no <= 0:
             raise ValueError("line_no must be positive")
@@ -395,15 +414,99 @@ class SshConfigLine:
             line=line, line_no=line_no, valid=False, host=host, key=None, value=None
         )
 
-    @staticmethod
-    def output(by_host: "dict[str | None, list[SshConfigLine]]") -> str:
+
+class SshConfig:
+    """Handler for reading and managing the ssh config file."""
+
+    def __init__(self, hosts: dict[str | None, list[SshConfigLine]]) -> None:
+        self.by_host = hosts
+        self._last_new_line = 0
+
+    def format_errors(self) -> list[SshConfigLine]:
+        """Get all lines with validation problems."""
+        ret: list[SshConfigLine] = []
+        for lines in self.by_host.values():
+            for line in lines:
+                if not line.valid:
+                    ret.append(line)
+        # This expects that only existing, parsed lines have issues.
+        return sorted(ret, key=lambda x: x.line_no)
+
+    def has_host(self, host: str) -> bool:
+        """Test if the config file has the host block."""
+        return host in self.by_host
+
+    def add_key_value(self, host: str, key: str, value: str) -> None:
+        """Add the key/value to the host block.
+        
+        The host block must exist.
+        """
+        if host not in self.by_host:
+            raise ConfigErr(f"ssh config does not have Host block {host}")
+        self._last_new_line -= 1
+        self.by_host[host].append(SshConfigLine(
+            line=f"  {key} {value}\n",
+            line_no=self._last_new_line,
+            valid=True,
+            host=host,
+            key=key,
+            value=value,
+        ))
+
+    def add_comment(self, host: str | None, text: str) -> None:
+        """Add a comment to the host (or at the file start).
+        
+        The host block must already exist.
+        """
+        if host not in self.by_host:
+            raise ConfigErr(f"ssh config does not have Host block {host}")
+        indent = "# "
+        if host:
+            indent = "  # "
+        self._last_new_line -= 1
+        self.by_host[host].append(SshConfigLine(
+            line=indent + text + "\n",
+            line_no=self._last_new_line,
+            valid=True,
+            host=host,
+            key=None,
+            value=None,
+        ))
+
+    def add_host(self, host: str) -> None:
+        """Add a new host block to the config at the end."""
+        if host in self.by_host:
+            raise ConfigErr(f"ssh config already has Host block {host}")
+        self._last_new_line -= 1
+        self.by_host[host] = [
+            SshConfigLine(
+                line=f"Host {host}\n",
+                line_no=self._last_new_line,
+                valid=True,
+                host=host,
+                key="Host",
+                value=host,
+            )
+        ]
+
+    def get_host_key(self, host: str, key: str) -> str | None:
+        """Read the host's key."""
+        if host not in self.by_host:
+            return None
+        key = key.lower()  # keys are case insensitive
+        for line in self.by_host[host]:
+            if line.key and line.key.lower() == key:
+                return line.value
+        return None
+
+    def output(self) -> str:
         """Convert the by-host collection into a Host list.
         
         This will correctly interweave the newly added lines into the configuration.
         """
-        if not by_host:
+        if not self.by_host:
             return ""
-        max_lineno = max([max(n.line_no for n in h) for h in by_host.values()])
+        max_lineno = max([max(n.line_no for n in h) for h in self.by_host.values()])
 
         def line_order(v: SshConfigLine) -> int:
             if v.line_no <= 0:
@@ -412,35 +515,71 @@ class SshConfigLine:
             return v.line_no
 
         host_order = sorted(
-            by_host.keys(),
+            self.by_host.keys(),
             # The host line is always first in the host block.
             # In the case of the None host, it's always first in the file, if it exists.
-            key=lambda a: line_order(by_host[a][0]),
+            key=lambda a: line_order(self.by_host[a][0]),
         )
         ret = ""
 
         for host in host_order:
-            lines = sorted(by_host[host], key=line_order)
+            lines = sorted(self.by_host[host], key=line_order)
             ret += "".join([n.line for n in lines])
 
         return ret
 
     @staticmethod
-    def parse_file(contents: str) -> "dict[str | None, list[SshConfigLine]]":
+    def parse_file(contents: str) -> "SshConfig":
         """Parse a whole ssh_config file."""
         ret: dict[str | None, list[SshConfigLine]] = {}
         host: str | None = None
         line_no = 0
         for line in contents.splitlines(keepends=True):
             line_no += 1
-            parsed = SshConfigLine._parse_line(host, line, line_no)
+            parsed = SshConfigLine.parse_line(host, line, line_no)
             host = parsed.host
             lines = ret.get(parsed.host)
             if not lines:
                 lines = []
                 ret[parsed.host] = lines
             lines.append(parsed)
-        return ret
+        return SshConfig(ret)
+
+    @staticmethod
+    def read_ssh_config(config: UserConfig) -> "SshConfig | None":
+        """Read the ssh config and return only if valid."""
+        has_error = False
+        private_key = config.require_path("ssh", "key-file")
+        if not private_key.is_file():
+            print(
+                f"The ssh private key file ({private_key}) does not exist.  "
+                f"You probably forgot to run the 'user-setup' sub-command.",
+                file=sys.stderr,
+            )
+            has_error = True
+
+        ssh_config = SshConfig({})
+        ssh_config_file = config.require_path("ssh", "config-file")
+        if not ssh_config_file.is_file():
+            print(
+                f"The ssh config file ({ssh_config_file}) does not exist.  "
+                f"You probably forgot to run the 'user-setup' sub-command.",
+                file=sys.stderr,
+            )
+            has_error = True
+        else:
+            with open(ssh_config_file, "r", encoding="utf-8") as inp:
+                ssh_config = SshConfig.parse_file(inp.read())
+            format_errs = ssh_config.format_errors()
+            if format_errs:
+                print(f"Thee ssh config file ({ssh_config_file}) has problems:", file=sys.stderr)
+                for line in format_errs:
+                    print(f"  {line.line_no}: {line.line.rstrip()}")
+                has_error = True
+
+        if has_error:
+            return None
+        return ssh_config
 
 
 # ---------------------------------------------------------------------
@@ -556,6 +695,7 @@ def _require_exe(name: str | Path) -> Path:
 def _is_windows() -> bool:
     return platform.system() == "Windows"
 
+
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 # Sub Command Handlers
@@ -564,6 +704,219 @@ def _is_windows() -> bool:
 # Each sub-command handler has the signature (argparse.Namespace) -> int
 # They also register an argument parser to the 'SUB_COMMAND_ARGUMENTS' value.
 SUB_COMMAND_ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {}
+
+
+# ---------------------------------------------------------------------
+# Start a dev environment.
+
+def start_env_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure the CLI arguments."""
+    parser.description = "Start the project dev container."
+    parser.set_defaults(func=start_env_runner)
+    parser.add_argument(
+        "--vs-settings",
+        action="store",
+        dest="vs_settings",
+        help="Update your VS user settings file to run in this container.",
+    )
+
+
+SUB_COMMAND_ARGUMENTS["start"] = start_env_parser
+
+
+def start_env_runner(args: argparse.Namespace) -> int:
+    """Start the dev environment."""
+    config = UserConfig.load_project_from_args(args)
+
+    # Setup the SSH config file for running.
+    host_prefix = _setup_ssh_config(config)
+    if not host_prefix:
+        return 1
+
+    # FIXME
+
+    # Discover the host suffix to use.
+
+    # Build the dev-env container + firewall-router + network-gateway.
+
+    # Setup the workspace directory via the vcs command.
+
+    # Setup the working directories by putting a vcs "ignore-file" in each, ignoring everything.
+
+    # Setup the .env file in the resources directory.  Much of this comes from
+    # the host suffix and the config "dev-env" section.
+
+    # Setup the docker-compose file in the resources directory.
+
+    # Copy the host key into the setup directory.
+
+    # Write the authorized keys file into the setup directory.
+
+    # Write the host-bridge command list into the setup directory.
+
+    # Start the docker-compose.yaml (daemon mode).
+
+    # Record the running compose containers IDs + the path, and
+    # store those in the user's host store directory.  This is used
+    # for assigning host suffixes, for use with parallel dev envs.
+
+    # Capture KeyboardInterrupt to trigger stopping the compose.
+
+    # Start scoter-host
+
+    # Tell the user the setup for the container (host name).
+
+    # Wait.
+
+    return 0
+
+
+def _setup_ssh_config(config: UserConfig) -> str | None:
+    # Ensure the right SSH config host block exists.
+    # It generates the host prefix.
+    # This isn't 100% right, in that it doesn't check for all host matches.
+    ssh_config = SshConfig.read_ssh_config(config)
+    if not ssh_config:
+        return None
+
+    user = config.dev_container_str("user")
+    port = config.dev_container_str("sshd-port")
+    key_file = config.require_path("ssh", "key-file")
+    proxy = config.require_run("ssh", "proxy-command")
+    host_prefix = (
+        config.require_value("ssh", "host-prefix") +
+        user + "-" +
+        port + "-"
+    )
+    host = host_prefix + "*"
+
+    if ssh_config.has_host(host):
+        errs: list[str] = []
+        r_user = ssh_config.get_host_key(host, "user")
+        if r_user != user:
+            errs.append(f"  User {r_user}, requires {user}")
+        r_identity = ssh_config.get_host_key(host, "IdentityFile")
+        if not r_identity:
+            errs.append("  No IdentityFile line")
+        else:
+            r_identity = os.path.expanduser(r_identity)
+            if not os.path.samefile(r_identity, key_file):
+                errs.append(f"  IdentityFile {r_identity}, requires {key_file}")
+        r_proxy_raw = ssh_config.get_host_key(host, "ProxyCommand")
+        if not r_proxy_raw:
+            errs.append(f"  ProxyCommand requires {proxy}")
+        else:
+            r_proxy = shlex.split(r_proxy_raw)
+            if r_proxy != proxy:
+                errs.append(f"  ProxyCommand '{r_proxy_raw}', requires {proxy}")
+        if errs:
+            print(f"Your {ssh_config} file has issues that prevents execution:", file=sys.stderr)
+            for err in errs:
+                print(err, file=sys.stderr)
+            return None
+        # It's all good.
+    else:
+        ssh_config.add_host(host)
+        ssh_config.add_comment(host, f"For Surf Scoter dev container user {user} on port {port}")
+        ssh_config.add_key_value(host, "User", user)
+        ssh_config.add_key_value(host, "IdentityFile", str(key_file))
+        ssh_config.add_key_value(host, "IdentitiesOnly", "yes")
+        ssh_config.add_key_value(host, "StrictHostKeyChecking", "yes")
+        ssh_config.add_key_value(host, "ProxyCommand", shlex.join(proxy))
+        ssh_config_file = config.require_path("ssh", "config-file")
+        _backup(ssh_config_file, config.require_value("scoter", "backup-file-extension"))
+        ssh_config_file.write_text(ssh_config.output(), encoding="utf-8")
+        # Ensure the file mode wasn't changed.
+        ssh_config_file.touch(0o600)
+
+    return host_prefix
+
+
+# ---------------------------------------------------------------------
+# Stop a dev environment.
+
+def stop_env_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure the CLI arguments."""
+    parser.description = "Stop the project dev container.  The 'start' should linger around as long as the container is running.  Use this to stop run-away configurations."
+    parser.set_defaults(func=stop_env_runner)
+    parser.add_argument(
+        "-h",
+        "--host",
+        action="store",
+        dest="host",
+        help="Force a specific host to stop.  Doesn't need the project.",
+    )
+    parser.add_argument(
+        "-f",
+        "--fetch",
+        action="store",
+        dest="fetch_branch",
+        help=(
+            "Fetch the files from the workspace into your project directory into this branch."
+        ),
+    )
+    parser.add_argument(
+        "--force-clean",
+        action="store_true",
+        default=False,
+        dest="force_clean",
+        help=(
+            "Force delete of the workspace files.  Setting this can potentially"
+            "delete changes, so you should use this with the '--fetch' argument."
+        ),
+    )
+
+
+SUB_COMMAND_ARGUMENTS["stop"] = stop_env_parser
+
+
+def stop_env_runner(args: argparse.Namespace) -> int:
+    """Stop the dev environment."""
+    host = args.host
+    if host:
+        config = UserConfig.load_settings_from_args(args)
+    else:
+        config = UserConfig.load_project_from_args(args)
+        # FIXME find the host by reviewing the 
+
+    # FIXME
+    assert config is not None
+
+    return 0
+
+
+# ---------------------------------------------------------------------
+# Fetch changes from a dev environment.
+
+def fetch_changes_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure the CLI arguments."""
+    parser.description = "Fetch changes committed by the dev container to its local workspace."
+    parser.set_defaults(func=fetch_changes_runner)
+    parser.add_argument(
+        "-b",
+        "--branch",
+        action="store",
+        default="workspace-fetch",
+        dest="branch",
+        help=(
+            "The branch name to fetch the workspace changes into."
+        ),
+    )
+
+# TODO additional commands to use with this:
+#      review, merge.
+SUB_COMMAND_ARGUMENTS["fetch"] = fetch_changes_parser
+
+
+def fetch_changes_runner(args: argparse.Namespace) -> int:
+    """Fetch in changes from the dev environment."""
+    config = UserConfig.load_project_from_args(args)
+
+    # FIXME
+    assert config is not None
+
+    return 0
+
 
 # ---------------------------------------------------------------------
 # User-space setup.
@@ -584,6 +937,9 @@ def user_space_setup_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+SUB_COMMAND_ARGUMENTS["user-setup"] = user_space_setup_parser
+
+
 def user_space_setup_runner(args: argparse.Namespace) -> int:
     """Run the user-space setup.
     
@@ -596,7 +952,12 @@ def user_space_setup_runner(args: argparse.Namespace) -> int:
     """
     config = UserConfig.load_settings_from_args(args)
     interactive = bool(args.interactive)
+    _gen_key_pair(config, interactive)
+    _ensure_ssh_config(config, interactive)
+    return 0
 
+
+def _gen_key_pair(config: UserConfig, interactive: bool) -> None:
     # Step 1: generate the key pair.
     key_file = config.require_path("ssh", "key-file")
     pub_key_file = Path(str(key_file) + ".pub")
@@ -639,6 +1000,8 @@ def user_space_setup_runner(args: argparse.Namespace) -> int:
                 f"don't exist, and the dev container won't work until they do."
             )
 
+
+def _ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
     # Step 2: Ensure the ssh config file exists.
     ssh_config_file = config.require_path("ssh", "config-file")
     if ssh_config_file.is_file():
@@ -682,10 +1045,31 @@ def user_space_setup_runner(args: argparse.Namespace) -> int:
             ssh_config_file.touch(0o600)
             print(f"Created an empty ssh config file ({ssh_config_file})")
 
+
+# ---------------------------------------------------------------------
+# Clean up what Surf Scoter added to the user files.
+
+def cleanup_user_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure the CLI arguments."""
+    parser.description = (
+        "Cleanup the files that this added or modified for the dev "
+        "environments from your user directories."
+    )
+    parser.set_defaults(func=cleanup_user_runner)
+
+
+SUB_COMMAND_ARGUMENTS["user-cleanup"] = cleanup_user_parser
+
+
+def cleanup_user_runner(args: argparse.Namespace) -> int:
+    """Stop the dev environment."""
+    config = UserConfig.load_settings_from_args(args)
+
+    # FIXME
+    assert config is not None
+
     return 0
 
-
-SUB_COMMAND_ARGUMENTS["user-setup"] = user_space_setup_parser
 
 # ---------------------------------------------------------------------
 # Configuration debugging.
@@ -704,6 +1088,8 @@ def configuration_debug_parser(parser: argparse.ArgumentParser) -> None:
         help="Do not try to lookup the project files.",
     )
 
+SUB_COMMAND_ARGUMENTS["parse-config"] = configuration_debug_parser
+
 
 def configuration_debug_runner(args: argparse.Namespace) -> int:
     """Output the SUC to stdout."""
@@ -713,9 +1099,6 @@ def configuration_debug_runner(args: argparse.Namespace) -> int:
         config = UserConfig.load_settings_from_args(args)
     print(config.dumps())
     return 0
-
-
-SUB_COMMAND_ARGUMENTS["parse-config"] = configuration_debug_parser
 
 
 # ---------------------------------------------------------------------
@@ -762,7 +1145,10 @@ def _add_settings_args(parser: argparse.ArgumentParser) -> None:
         "--bin-dir",
         action="store",
         dest="bin_dir",
-        help="Point to the directory storing the Surf Scoter binary files.",
+        help=(
+            "Point to the directory storing the Surf Scoter binary files.  "
+            "Defaults to the 'bin' directory inside the distribution."
+        ),
     )
 
 
@@ -804,6 +1190,7 @@ def main(argv: Sequence[str]) -> int:
     # Run the sub-command selected.
     if not hasattr(args, "func"):
         print(parser.description)
+        print()
         print("Run with '--help' to learn how to use the tool.")
         return 1
     try:

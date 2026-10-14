@@ -175,6 +175,8 @@ The general layout:
 
     // The project configuration file, as written.  If there's none, this is 'null'.
     "project": {
+        // `vcs` is for the `scoter` script; the host tools don't use it.
+        "vcs": "git",
         "container": {"dev-container-path": "./dev-env"},
         "commands": [
             // ...

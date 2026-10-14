@@ -11,6 +11,8 @@ You can also use this with the [scoter-host](../host/) executable to describe wa
 ## Example
 
 ```yaml
+# optional; how the project's files are kept, for the `scoter` script (see "Version control")
+vcs: git
 container:
   # The development container: a directory with a Dockerfile and dev-env.yaml,
   # relative to this file.
@@ -44,6 +46,10 @@ commands:
         - services/*
         - infra/**
 ```
+
+## Version control
+
+`vcs` is optional text (not empty) that tells the `scoter` script how the project's files are kept, such as `git`, so it can set up the project for the development container.  The host tools don't interpret it; they check that it's text, and pass it along in the universal configuration file's `project`.  Quote values that YAML would otherwise read as a number or `true`/`false`.
 
 ## The development container
 

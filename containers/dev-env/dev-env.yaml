@@ -6,7 +6,7 @@ mounts:
     # Where the project workspace is mounted.
     workspace: /workspace
     # Where the read-only setup directory is mounted.
-    setup: /setup
+    setup: /opt/surf-scoter-setup
 # The broker that scoter-host connects to.
 broker-bin: /usr/local/bin/scoter-container
 # The port sshd listens on (see sshd_config).
