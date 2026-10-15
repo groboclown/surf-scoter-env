@@ -1367,10 +1367,14 @@ def run_env_runner(args: argparse.Namespace) -> int:
         # Tell the user the setup for the container (host name).
         print("==========================================")
         print(f"dev-container running as {host}")
+        print(f"Connect to the container using `ssh ${host}`")
         print("Waiting for it to start...")
         if not _wait_for_container(config, host, timeout_sec=CONTAINER_START_TIME_SEC):
             print("Container didn't start in time.")
         else:
+            print("Container started.")
+            print("Running the host-bridge process.")
+            print("Press 'ctrl-c' to stop and tear down the environment.")
             # Start scoter-host
             if args.bin_dir:
                 scoter_host = _require_exe(Path(args.bin_dir) / SCOTER_HOST_EXEC)
@@ -1698,7 +1702,7 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
     user = config.dev_container_str("user")
     port = config.dev_container_str("sshd-port")  # force a value here.
     key_file = config.require_path("ssh", "key-file")
-    proxy = config.require_run("ssh", "proxy-command")
+    proxy = config.require_run("ssh", "proxy-command", template={"port": port})
     host_prefix = (
         config.require_value("ssh", "host-prefix") +
         user + "-" +
@@ -1726,7 +1730,11 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
             if r_proxy != proxy:
                 errs.append(f"  ProxyCommand '{r_proxy_raw}', requires {proxy}")
         if errs:
-            print(f"Your {ssh_config} file has issues that prevents execution:", file=sys.stderr)
+            print(
+                f"Your {config.require_path('ssh', 'key-file')} file "
+                f"has issues that prevents execution:",
+                file=sys.stderr,
+            )
             for err in errs:
                 print(err, file=sys.stderr)
             return None

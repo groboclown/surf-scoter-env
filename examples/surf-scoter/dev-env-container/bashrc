@@ -1,1 +1,19 @@
 # Extra .bashrc settings for the developer environment.
+
+. "$HOME/.cargo/env"
+
+# Allow for storing persistent data across runs.
+mkdir -p $HOME/.config
+
+for name in .config/Code .gitconfig .vscode-server ; do
+    if [ ! -L "$HOME/$name" ] ; then
+        # Copy it to the persistent store
+        # and link it.
+        mkdir -p /workspace/.dev-env/$(dirname "$name")
+        if [ -e "$HOME/$name" ] ; then
+            cp -R "$HOME/$name" /workspace/.dev-env/$(dirname "$name")
+            rm -rf "$HOME/$name"
+        fi
+        ln -s "/workspace/.dev-env/$name" "$HOME/$name"
+    fi
+done

@@ -52,6 +52,15 @@ services:
     # host connects to with `docker exec`.
     container_name: ${CONTAINER_NAME}
     networks: [isolated]
+
+    # Rootless podman maps the host user to container root by default, so bind
+    # mounts show up as owned by root.  keep-id maps the host user to the
+    # container's rootless user (1000) instead.
+    # This is a generalization, where most containers map the rootless user
+    # to uid 1000.
+    # The 'keep-id' is podman-only.  Remove if you're using docker.
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
     environment:
       # Because this performs variable substitution on the names, this needs list mode.
       - HTTP_PROXY=http://gateway:3128
