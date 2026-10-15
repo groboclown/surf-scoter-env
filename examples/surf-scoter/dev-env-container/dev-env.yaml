@@ -1,13 +1,6 @@
-# A copy of the parent's setup; no changes made here.
+# This inherits all settings from the parent.
 
-# The user the container runs as, and that sshd accepts.
-user: ubuntu
-mounts:
-    # Where the project workspace is mounted.
-    workspace: /workspace
-    # Where the read-only setup directory is mounted.
-    setup: /opt/surf-scoter-setup
-# The broker that scoter-host connects to.
-broker-bin: /usr/local/bin/scoter-container
-# The port sshd listens on (see sshd_config).
-sshd-port: 22022
+parents:
+  - dir: ../../../containers/dev-env
+    # This tag comes from the Makefile
+    tag: local-surf-scoter-env/dev-env:build

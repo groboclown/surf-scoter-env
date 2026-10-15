@@ -7,7 +7,7 @@ Scoter allows you to set specific configurations for your particular computer in
 
 The tool will look in *all* these places, in order, not just the first one found.  That means all of the files that exist will load into the configuration.  Earlier files take priority over later ones.
 
-* The `--user-setup` argument.
+* The `--user-setup` arguments.  There may be several, say to add a project's own setup to yours; a later one takes priority over an earlier one.
 * `${scoter:user-setup-file}` (using the internal setup to find the location; see below)
 * `${scoter:distribution-dir}/setup.{yaml,yml}`: the files Surf Scoter itself installs (see below).
 
@@ -26,6 +26,8 @@ scoter:
 ```
 
 then the tool reads `/my/install/dir/setup.{yaml,yml}`, with the lowest priority.  `--distribution-dir` wins over a `distribution-dir` in the setup files.  To use a different installation, give `--distribution-dir` yourself; the setting in a setup file only counts when the tools aren't given one.  Either way, only one distribution directory's file is read, and a file is only read once, even if it's found more than one way.
+
+The tools never look for setup files in a project.  A setup file can run any program on your computer, and change how the containers are put together, and a project can come from anyone.  A project's own setup file is only read when you give it with `--user-setup`.  For the same reason, a `distribution-dir` that comes from the setup files (rather than `--distribution-dir`) must be an absolute path outside the project directory, the project configuration file's directory and the dev container's workspace directory, and must not refer to `${scoter:cwd}` (directly or through another key), as the tools usually run in the project; otherwise the tools stop with an error.
 
 Note: it is an error (will cause the tools to bail out) if you have both a `setup.yaml` and a `setup.yml` (or `surf-scoter.setup.yaml` and `surf-scoter.setup.yml`) file in the same directory.
 

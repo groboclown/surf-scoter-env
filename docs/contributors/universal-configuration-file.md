@@ -8,14 +8,14 @@ The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, wi
 
 ```
 gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] [--dev-container-workspace-dir DIR]
-              [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml] [--distribution-dir DIR]
+              [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml]... [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search] [--output FILE]
 ```
 
 * `--config`: the project configuration file.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir` and `dev-container-path`, `project`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings one along.
 * `--project-dir`: the project directory, where the setup files' `./` locations start, in place of the project configuration file's directory.  It must exist.  It doesn't change where the project configuration file's own relative paths (such as `dev-container-path`) start.
 * `--dev-container-workspace-dir` and `--dev-container-settings-dir`: the directories mounted in the launched dev container: the project workspace (writable), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.
-* `--user-setup` and `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  `--distribution-dir` wins over a `scoter: paths: distribution-dir` in the setup files.
+* `--user-setup` and `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  `--user-setup` may be given more than once; a later one wins.  It's the only way a setup file is read from a project: the tool never looks for one there.  `--distribution-dir` wins over a `scoter: paths: distribution-dir` in the setup files.
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others; a `--config` without `--project-dir` uses that file's directory.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  Files named with `--user-setup` or `--distribution-dir` are still read.
 * `--output`: the file to write; without it, the JSON goes to stdout.

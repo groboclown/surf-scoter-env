@@ -9,12 +9,13 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
-import shlex
-import sys
 
 JsonData = str | int | float | bool | None | list["JsonData"] | dict[str, "JsonData"]
 DictJsonData = dict[str, JsonData]
@@ -27,6 +28,15 @@ DISTRIBUTION_BIN_DIR = "bin"
 SCOTER_HOST_EXEC = "scoter-host"
 GEN_SCOTER_UC_EXEC = "gen-scoter-uc"
 VCS_SECTION_SUFFIX = "-vcs"
+DOCKER_COMPOSE_FILENAME = "docker-compose.yaml"
+PUB_KEY_EXT = ".pub"
+COMPOSE_ENV_FILENAME = ".env"
+CONTAINER_HOST_KEY_FILE_NAME = "ssh_host_ed25519_key"
+AUTHORIZED_KEYS_FILE_NAME = "authorized_keys"
+ALLOWED_DOMAINS_FILE_NAME = "allowed-domains.txt"
+BRIDGE_COMMANDS_FILE_NAME = "bridge-cmds.txt"
+TOP_PORT_NUMBER = 32767
+CONTAINER_START_TIME_SEC = 60.0
 
 
 # ---------------------------------------------------------------------
@@ -89,6 +99,13 @@ class UserConfig:
             return None
         return Path(str(val))
 
+    def require_active_location(self, name: str) -> Path:
+        """Read an active location path."""
+        val = self.__opt_str("active-config-locations", name)
+        if val is None:
+            raise self.__key_err(("active-config-locations", "name"), "value must exist")
+        return Path(str(val))
+
     def set_active_location(self, name: str, path: Path) -> None:
         """Overwrite the active location."""
         locs = self._config["active-config-locations"]
@@ -128,13 +145,33 @@ class UserConfig:
         This will return the completed process with stdout captured.  stderr will
         forward to the user.
         """
+        cmd = self.require_run(section, run, template)
+        print(f"Running {cmd[0]}")
+        print(f"DEBUG {cmd}")
         return subprocess.run(
-            self.require_run(section, run, template),
+            cmd,
             stdout=subprocess.PIPE if capture_stdout else None,
             stderr=subprocess.PIPE if capture_stderr else None,
             check=check,
             cwd=cwd,
         )
+
+    def dev_container_sshd_port_env(self) -> str | None:
+        """Get the sshd-port-env from the dev-container."""
+        return self.__opt_str("dev-container", "sshd-port-env")
+
+    def dev_container_sshd_port(self) -> str | None:
+        """Get the sshd-port from the dev-container."""
+        return self.__opt_str("dev-container", "sshd-port")
+
+    def set_dev_container_sshd_port(self, value: str) -> None:
+        """Set the ssh-port in the dev-container, if it's unset."""
+        current = self.dev_container_sshd_port()
+        if current is not None:
+            raise RuntimeError("tried to set the ssh-port when it's already set")
+        dev_con = self._config["dev-container"]
+        assert isinstance(dev_con, dict)
+        dev_con["sshd-port"] = int(value)
 
     def dev_container_str(self, key: str) -> str:
         """Get the dev-container key."""
@@ -145,8 +182,9 @@ class UserConfig:
 
     def dev_container_mounts(self) -> dict[str, str]:
         """Get the dev-container volume mount points."""
-        val = self.__get(("dev-container", "mounts"))
-        if not isinstance(val, dict):
+        val, exists = self.__get(("dev-container", "mounts"))
+        if not exists or not isinstance(val, dict):
+            print(f"DEBUG container mounts should be dict, found {val} ({type(val)})")
             return {}
         return val
 
@@ -173,7 +211,17 @@ class UserConfig:
             return None
         return str(val)
 
-    def save(self, outfile: str) -> None:
+    def project_bridge_commands(self) -> list[str]:
+        """Get the list of bridge commands."""
+        cmd_list, _ = self.__get(("project", "commands"))
+        if not isinstance(cmd_list, list):
+            return []
+        return [
+            str(cmd["command"])
+            for cmd in cmd_list
+        ]
+
+    def save(self, outfile: str | Path) -> None:
         """Save the current configuration to the given file."""
         with open(outfile, "w", encoding="utf-8") as out:
             json.dump(self._config, out)
@@ -204,7 +252,7 @@ class UserConfig:
                 project_dir=project_dir,
                 dev_container_workspace_dir=dev_container_workspace_dir,
                 dev_container_settings_dir=dev_container_settings_dir,
-                user_setup=None,
+                user_setup=[],
                 universal_file=tmp,
                 no_setup_search=True,
             )
@@ -246,7 +294,7 @@ class UserConfig:
         *,
         bin_dir: str | None,
         distribution_dir: str | None,
-        user_setup: str | None,
+        user_setup: list[str],
         project_config_file: str | None,
         project_dir: str | None,
     ) -> "UserConfig":
@@ -288,7 +336,7 @@ class UserConfig:
         *,
         bin_dir: str | None,
         distribution_dir: str | None,
-        user_setup: str | None,
+        user_setup: list[str],
     ) -> "UserConfig":
         """Load just the settings."""
         dist_dir = UserConfig.require_global_config_path(distribution_dir)
@@ -363,10 +411,10 @@ class UserConfig:
 
     def __opt_str(self, *path: JsonPathPart) -> str | None:
         obj, exists = self.__get(path)
-        if not exists:
+        if not exists or obj is None:
             return None
-        if isinstance(obj, str):
-            return obj
+        if isinstance(obj, str | int | float | bool):
+            return str(obj)
         raise UserConfig.__key_err(path, "expected string")
 
     def __get(self, path: Sequence[JsonPathPart]) -> tuple[JsonData, bool]:
@@ -637,7 +685,10 @@ class EnvironmentDesc:
     resources_dir: str
     workspace_dir: str
     setup_dir: str
+    compose_file: str
     compose_env_file: str
+    dev_env_ssh_port: str
+    dev_env_ssh_user: str
     created_at: str
 
     # Captures all the data when launched, and allows for
@@ -673,7 +724,10 @@ class EnvironmentDesc:
             resources_dir=as_str(data.get("resources_dir")),
             workspace_dir=as_str(data.get("workspace_dir")),
             setup_dir=as_str(data.get("setup_dir")),
+            compose_file=as_str(data.get("compose_file")),
             compose_env_file=as_str(data.get("compose_env_file")),
+            dev_env_ssh_port=as_str(data.get("dev_env_ssh_port")),
+            dev_env_ssh_user=as_str(data.get("dev_env_ssh_user")),
             created_at=as_str(data.get("created_at")),
             suc=as_dict(data.get("suc")),
         )
@@ -690,7 +744,10 @@ class EnvironmentDesc:
             "resources_dir": self.resources_dir,
             "workspace_dir": self.workspace_dir,
             "setup_dir": self.setup_dir,
+            "compose_file": self.compose_file,
             "compose_env_file": self.compose_env_file,
+            "dev_env_ssh_port": self.dev_env_ssh_port,
+            "dev_env_ssh_user": self.dev_env_ssh_user,
             "created_at": self.created_at,
             "suc": self.suc,
         }
@@ -748,7 +805,10 @@ class ActiveEnvironmentSet:
                     resources_dir="",
                     workspace_dir="",
                     setup_dir="",
+                    compose_file="",
                     compose_env_file="",
+                    dev_env_ssh_port="",
+                    dev_env_ssh_user="",
                     created_at=datetime.datetime.now().isoformat(),
                     suc={},
                 )
@@ -805,47 +865,50 @@ class ActiveEnvironmentSet:
 
     @staticmethod
     def open(
-        file: Path, lock_file: Path, timeout_sec: float | None
-    ) -> "ActiveEnvironmentSet | None":
+        file: Path, lock_file: Path
+    ) -> "ActiveEnvironmentSet":
         """Open the active environment set for writing."""
-        if timeout_sec is None or timeout_sec <= 0:
-            expires_timeout = 0.0
-        else:
-            expires_timeout = time.time() + timeout_sec
-        while True:
-            if lock_file.is_file():
-                # Something else owns the lock.
-                # The lock should have a short time-to-live.
-                if time.time() >= expires_timeout:
-                    return None
-                time.sleep(0.2)
-                continue
-            if not file.is_file():
-                # No file yet.  Mark the lock and return empty.
-                lock_file.touch(0o400)
-                return ActiveEnvironmentSet(
-                    file=file,
-                    lock_file=lock_file,
-                    orig="",
-                    environs=[],
-                )
-            # Setup the lock and return the contents.
-            # If some OS problem happens when performing the file manipulations,
-            # don't correct the lock - that can mean someone stole it from us.
-            try:
-                lock_file.touch(0o600)  # ensure it exists and is writable.
-                orig, environs = ActiveEnvironmentSet._read_contents(file)
-                lock_file.write_text(orig, encoding="utf-8")
-                lock_file.touch(0o400)  # make read-only
-                return ActiveEnvironmentSet(
-                    file=file,
-                    lock_file=lock_file,
-                    orig=orig,
-                    environs=environs,
-                )
-            except OSError:
-                # Could not capture the lock.
-                return None
+        if lock_file.is_file():
+            # Something else owns the lock.
+            # This could retry in a loop, but the real issue is either
+            # the files are in a bad state, or the user tried starting
+            # up a bunch of environments too quickly.  Blame it on them.
+            raise ConfigErr(
+                f"The active environment lock is in place ({lock_file}).  "
+                f"That means either something crashed while working on an environment, "
+                f"or you tried to start this environment while another is starting or stopping."
+            )
+        if not file.is_file():
+            # No file yet.  Mark the lock and return empty.
+            lock_file.write_text("[]", encoding="utf-8")
+            _touch(lock_file, 0o400)
+            return ActiveEnvironmentSet(
+                file=file,
+                lock_file=lock_file,
+                orig="[]",
+                environs=[],
+            )
+        # Setup the lock and return the contents.
+        # If some OS problem happens when performing the file manipulations,
+        # don't correct the lock - that can mean someone stole it from us.
+        try:
+            _touch(lock_file, 0o600)  # ensure it exists and is writable.
+            orig, environs = ActiveEnvironmentSet._read_contents(file)
+            lock_file.write_text(orig, encoding="utf-8")
+            _touch(lock_file, 0o400)  # make read-only
+            return ActiveEnvironmentSet(
+                file=file,
+                lock_file=lock_file,
+                orig=orig,
+                environs=environs,
+            )
+        except OSError as err:
+            # Could not capture the lock.
+            raise ConfigErr(
+                f"The active environment lock is in place ({lock_file}).  "
+                f"That means either something crashed while working on an environment, "
+                f"or you tried to start this environment while another is starting or stopping."
+            ) from err
 
     @staticmethod
     def _read_contents(file: Path) -> tuple[str, list[EnvironmentDesc]]:
@@ -863,9 +926,15 @@ class ActiveEnvironmentSet:
         """Close without saving, and disallow additional save actions."""
         # Note: this is explicitly not run at __del__() time.
         # This allows for leaving things in a reserved state for when something went sideways.
-        if self._lock and self._is_lock_owned():
-            self._lock.touch(0o600)  # turn writable
-            _rm(self._lock)
+        if self._lock:
+            if self._is_lock_owned():
+                _touch(self._lock, 0o600)  # turn writable
+                _rm(self._lock)
+            else:
+                print(
+                    f"Looks like someone stole the lock from us ({self._lock}).  "
+                    f"Not touching it."
+                )
             self._lock = None
 
     def _is_lock_owned(self) -> bool:
@@ -880,17 +949,21 @@ class ActiveEnvironmentSet:
         # Something stole the lock from us.
         return False
 
-    def save(self, close: bool = True) -> None:
+    def save(self, close: bool = True) -> bool:
         """Save the current file."""
         # Inspect the lock file.  It should match up with expectations.
-        if self._lock and self._is_lock_owned():
-            # Write the data.
-            with open(self._file, "w", encoding="utf-8") as out:
-                json.dump(self.to_json(), out)
-            if close:
-                self._lock.touch(0o600)  # turn writable
-                _rm(self._lock)
-                self._lock = None
+        if not self._lock:
+            raise RuntimeError("read-only")
+        if not self._is_lock_owned():
+            return False
+        # Write the data.
+        with open(self._file, "w", encoding="utf-8") as out:
+            json.dump(self.to_json(), out)
+        if close:
+            _touch(self._lock, 0o600)  # turn writable
+            _rm(self._lock)
+            self._lock = None
+        return True
 
 
 # ---------------------------------------------------------------------
@@ -942,6 +1015,13 @@ def _restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
     return True
 
 
+def _touch(file: Path, mode: int) -> None:
+    """Ensure the file exists with the given mode."""
+    file.parent.mkdir(exist_ok=True, parents=True)
+    file.touch(mode)
+    os.chmod(file, mode)
+
+
 def _rm(file: Path) -> bool:
     """Try to remove the file.  Does not raise an error, but reports it to stderr.
     
@@ -991,7 +1071,7 @@ def generate_config(
     project_dir: str | None,
     dev_container_workspace_dir: str | None,
     dev_container_settings_dir: str | None,
-    user_setup: str | None,
+    user_setup: list[str],
     universal_file: str | None,
     no_setup_search: bool,
 ) -> DictJsonData:
@@ -1009,8 +1089,8 @@ def generate_config(
         args.extend(("--dev-container-workspace-dir", dev_container_workspace_dir))
     if dev_container_settings_dir:
         args.extend(("--dev-container-settings-dir", dev_container_settings_dir))
-    if user_setup:
-        args.extend(("--user-setup", user_setup))
+    for user_setup_loc in user_setup:
+        args.extend(("--user-setup", user_setup_loc))
     if universal_file:
         args.extend(("--universal", universal_file))
     if no_setup_search:
@@ -1084,12 +1164,16 @@ SUB_COMMAND_ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {}
 
 
 # ---------------------------------------------------------------------
-# Start a dev environment.
+# Start and manage a dev environment.
 
-def start_env_parser(parser: argparse.ArgumentParser) -> None:
+def run_env_parser(parser: argparse.ArgumentParser) -> None:
     """Configure the CLI arguments."""
-    parser.description = "Start the project dev container."
-    parser.set_defaults(func=start_env_runner)
+    parser.description = (
+        "Start and monitor the project dev container.  Press 'ctrl-c' while it's "
+        "running to terminate and clean up the environment."
+    )
+    parser.set_defaults(func=run_env_runner)
+    _add_project_args(parser)
     parser.add_argument(
         "--clean-workspace",
         action="store_true",
@@ -1121,86 +1205,214 @@ def start_env_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-SUB_COMMAND_ARGUMENTS["start"] = start_env_parser
+SUB_COMMAND_ARGUMENTS["run"] = run_env_parser
 
 
-def start_env_runner(args: argparse.Namespace) -> int:
+def run_env_runner(args: argparse.Namespace) -> int:
     """Start the dev environment."""
     config = UserConfig.load_project_from_args(args)
     vcs_section = config.project_str("vcs")
     if vcs_section:
         vcs_section += VCS_SECTION_SUFFIX
 
-    # Setup the SSH config file for running.
-    host_prefix = _setup_ssh_config(config)
-    if not host_prefix:
-        return 1
-
     # Prepare the active environment set for writing.
     # Note that this requires explicit "close" mechanics when successfully used.
     active_envs = ActiveEnvironmentSet.open(
         config.require_path("dev-env", "running-env-config"),
         config.require_path("dev-env", "running-env-config-lock"),
-        timeout_sec=2.0,
     )
-    if active_envs is None:
-        print(
-            "Failed accessing the active environment: " +
-            str(config.require_path("dev-env", "running-env-config")),
-            file=sys.stderr,
+    try:
+        # -- Discovery
+        # Configure the sshd port.  It might be dynamic.
+        _configure_sshd_port(config, active_envs)
+
+        # Setup the SSH config file for running.
+        host_prefix = _setup_ssh_config(config)
+        if not host_prefix:
+            active_envs.close()
+            return 1
+
+        # Discover the host suffix to use.
+        host_suffix = active_envs.reserve_environ(host_prefix)
+        host = host_prefix + host_suffix
+
+        # -- Build the containers
+        image_tags = _build_containers(config, host) # (dev-env, firewall, gateway)
+        if not image_tags:
+            active_envs.close()
+            return 1
+
+        # Remember to mark the work directories as ignored.
+
+        # -- workspace directory
+        # Setup the workspace directory via the vcs command.
+        workspace_dir = _setup_workspace(
+            config, vcs_section, args.clean_workspace, args.workspace_fetch
         )
-        return 1
+        _ignore_directory(config, vcs_section, workspace_dir)
 
-    # Discover the host suffix to use.
-    host_suffix = active_envs.reserve_environ(host_prefix)
-    host = host_prefix + host_suffix
+        # -- settings directory
+        setup_dir = config.active_location("dev-container-settings-dir")
+        if setup_dir is None:
+            setup_dir = config.require_path("workspace", "setup-dir")
+            config.set_active_location("dev-container-settings-dir", setup_dir)
+        setup_dir.mkdir(exist_ok=True)
+        _ignore_directory(config, vcs_section, setup_dir)
 
-    # Build the containers.
-    image_tags = _build_containers(config, host) # (dev-env, firewall, gateway)
-    if not image_tags:
-        return 1
+        # Write the authorized keys file.
+        key_file = config.require_path("ssh", "key-file")
+        pub_key_file = Path(str(key_file) + PUB_KEY_EXT)
+        # Ensure they exists.
+        if not key_file.is_file() or not pub_key_file.is_file():
+            raise ConfigErr(
+                f"Your ssh key pair ({key_file} and {pub_key_file}) don't exist.  "
+                f"Make sure you ran user setup first."
+            )
+        pub_key_file.copy(setup_dir / AUTHORIZED_KEYS_FILE_NAME)
+        _touch(setup_dir / AUTHORIZED_KEYS_FILE_NAME, 0o666)
 
-    # Setup the workspace directory via the vcs command.
-    workspace_dir = _setup_workspace(config, vcs_section, args.clean_workspace, args.workspace_fetch)
+        # Create the host key.
+        host_key_file = setup_dir / CONTAINER_HOST_KEY_FILE_NAME
+        if not host_key_file.exists():
+            print("Creating host key...")
+            config.run_command(
+                "ssh", "mk-host-key", capture_stdout=True,
+                template={"host-key-file": str(host_key_file)},
+            )
+        _touch(host_key_file, 0o666)
+        # Add that as a known host
+        # The file should already exist from the user setup.
+        _add_known_host(config, host, host_key_file)
 
-    # Setup the working directories by putting a vcs "ignore-file" in each, ignoring everything.
-    settings_dir = config.active_location("dev-container-settings-dir")
-    if settings_dir is None:
-        settings_dir = config.require_path("workspace", "setup-dir")
-        config.set_active_location("dev-container-settings-dir", settings_dir)
-    # TODO complete
+        allowed_domains_file = config.require_path("dev-env", "allowed-domains")
+        if allowed_domains_file.exists():
+            allowed_domains_file.copy(setup_dir / ALLOWED_DOMAINS_FILE_NAME)
+        else:
+            _touch(setup_dir / ALLOWED_DOMAINS_FILE_NAME, 0o666)
 
-    # Setup the .env file in the resources directory.  Much of this comes from
-    # the host suffix and the config "dev-env" section.
-    resources_dir = config.require_path("dev-env", "resources-dir")
-    # TODO complete
+        # Write the host-bridge command list into the setup directory.
+        with open(setup_dir / BRIDGE_COMMANDS_FILE_NAME, "w", encoding="utf-8") as inp:
+            inp.write("\n".join(config.project_bridge_commands()))
 
-    # Setup the docker-compose file in the resources directory.
+        # -- resources directory
+        resources_dir = config.require_path("workspace", "resources-dir")
+        resources_dir.mkdir(exist_ok=True)
+        _ignore_directory(config, vcs_section, resources_dir)
 
-    # Copy the host key into the setup directory.
+        # Setup the .env file in the resources directory.
+        _write_docker_compose_env_file(
+            config=config, file=resources_dir / COMPOSE_ENV_FILENAME,
+            host=host, workspace_dir=workspace_dir,
+            settings_dir=setup_dir,
+        )
 
-    # Write the authorized keys file into the setup directory.
+        # Setup the docker-compose file in the resources directory.
+        config.require_path("dev-env", "docker-compose").copy(
+            resources_dir / DOCKER_COMPOSE_FILENAME
+        )
 
-    # Write the host-bridge command list into the setup directory.
+        # Save off a copy of the config file
+        universal_config_file = resources_dir / "suc.json"
+        config.save(universal_config_file)
+    except:
+        print("Aborting execution.", file=sys.stderr)
+        # Close without saving.
+        active_envs.close()
+        raise
 
+    # -- Record this environment
+    # If the save fails, then something grabbed the lock
+    # from under us.
+    if not active_envs.save(close=False):
+        raise ConfigErr(
+            "Lost our lock on the active environments.  "
+            "Please wait longer before launching a second one."
+        )
+    active_envs.update_environ(EnvironmentDesc(
+        host_prefix=host_prefix,
+        host_suffix=host_suffix,
+
+        # See _write_docker_compose_env_file
+        dev_env_name=host,
+        firewall_router_name=f"{host}-fr",
+        network_gateway_name=f"{host}-ng",
+        
+        project_dir=str(config.require_active_location("project-dir")),
+        resources_dir=str(resources_dir),
+        workspace_dir=str(workspace_dir),
+        setup_dir=str(setup_dir),
+        compose_file=str(resources_dir / DOCKER_COMPOSE_FILENAME),
+        compose_env_file=str(resources_dir / COMPOSE_ENV_FILENAME),
+        dev_env_ssh_port=str(config.dev_container_sshd_port()),
+        dev_env_ssh_user=config.dev_container_str("user"),
+        created_at=datetime.datetime.now().isoformat(),
+        suc=json.loads(config.dumps()),  # expensive deep copy
+    ))
+    active_envs.save(close=True)
+
+    # -- start the containers
     # Start the docker-compose.yaml (daemon mode).
-
-    # Record the running compose containers IDs + the path, and
-    # store those in the user's host store directory.  This is used
-    # for assigning host suffixes, for use with parallel dev envs.
+    print("Starting the environment cluster...")
+    config.run_command(
+        "docker", "compose-up",
+        template={
+            "env-file": str(resources_dir / COMPOSE_ENV_FILENAME),
+            "compose-file": str(resources_dir / DOCKER_COMPOSE_FILENAME),
+        },
+        capture_stdout=False,
+        capture_stderr=False,
+    )
 
     try:
-        # Start scoter-host
-
         # Tell the user the setup for the container (host name).
+        print("==========================================")
+        print(f"dev-container running as {host}")
+        print("Waiting for it to start...")
+        if not _wait_for_container(config, host, timeout_sec=CONTAINER_START_TIME_SEC):
+            print("Container didn't start in time.")
+        else:
+            # Start scoter-host
+            if args.bin_dir:
+                scoter_host = _require_exe(Path(args.bin_dir) / SCOTER_HOST_EXEC)
+            else:
+                scoter_host = _require_exe(
+                    Path(args.distribution_dir) / DISTRIBUTION_BIN_DIR / SCOTER_HOST_EXEC
+                )
+            print([scoter_host, "--universal", str(universal_config_file), host])
+            res = subprocess.run(
+                [scoter_host, "--universal", str(universal_config_file), host],
+                check=False,
+            )
+            if res.returncode != 0:
+                print("Failed running the host process.")
 
-        # Wait until user interrupt.
-        while True:
-            time.sleep(300.0)
     except KeyboardInterrupt:
         print("User requested termination.")
 
-    # Tear it all down.  Keep the 'workspace' directory, though.
+    # -- Tear it all down.
+
+    # Shut down the containers
+    print("Stopping the environment cluster...")
+    config.run_command(
+        "docker", "compose-down",
+        template={
+            "env-file": str(resources_dir / COMPOSE_ENV_FILENAME),
+            "compose-file": str(resources_dir / DOCKER_COMPOSE_FILENAME),
+        },
+    )
+
+    # Remove from active mode.
+    active_envs = ActiveEnvironmentSet.open(
+        config.require_path("dev-env", "running-env-config"),
+        config.require_path("dev-env", "running-env-config-lock"),
+    )
+    active_envs.rm_environ_by_host(host)
+    active_envs.save(close=True)
+
+    # Clean up the setup and resource directories.
+    #_rm(setup_dir)
+    #_rm(resources_dir)
+    # Keep the 'workspace' directory, though.
 
     return 0
 
@@ -1210,7 +1422,7 @@ def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | N
     ret = (
         config.require_value("dev-env", "dev-env-image-prefix") + host,
         config.require_value("dev-env", "firewall-router-image"),
-        config.require_value("dev-env", "gateway-network-image"),
+        config.require_value("dev-env", "network-gateway-image"),
     )
     # The dev-env's local parents come first, lowest first.
     containers: list[tuple[str, str, Path | None]] = [
@@ -1229,15 +1441,17 @@ def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | N
             config.require_path("dev-env", "firewall-router"),
         ),
         (
-            "gateway-network",
+            "network-gateway",
             ret[2],
-            config.require_path("dev-env", "gateway-network"),
+            config.require_path("dev-env", "network-gateway"),
         ),
     ]
     for kind,tag,path in containers:
         if not path:
             print(f"No build directory set for {kind} container", file=sys.stderr)
             return None
+        print(f"Building {kind} image...")
+        print(f"DEBUG {path}")
         res = config.run_command(
             "docker", "build",
             check=False,
@@ -1247,12 +1461,69 @@ def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | N
                 "dir": str(path),
             },
         )
+        # TODO write the stderr + stdout to a file in the resources directory
+        # so the user can inspect what happened.
         if res.returncode != 0:
-            print(res.stdout)
-            print(res.stderr, file=sys.stderr)
+            print(res.stdout.decode("utf-8"))
+            print(res.stderr.decode("utf-8"), file=sys.stderr)
             print(f"Failed building {kind} image ({path})", file=sys.stderr)
             return None
     return ret
+
+
+def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bool:
+    # Wait for the host to start running.
+    end_at = time.time() + timeout_sec
+    while time.time() < end_at:
+        # Sleep at the start, because this should be called while the
+        # containers are starting.
+        time.sleep(1.0)
+        res = config.run_command(
+            "docker", "inspect-container",
+            capture_stdout=True,
+            capture_stderr=True,
+            template={"name": host},
+        )
+        if res.returncode == 125:
+            # Not found.
+            continue
+        elif res.returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode=res.returncode,
+                cmd=res.args,
+                output=res.stdout,
+                stderr=res.stderr,
+            )
+
+        try:
+            data: JsonData = json.loads(res.stdout)
+            if isinstance(data, list):
+                if len(data) > 0:
+                    data = data[0]
+            if not isinstance(data, dict):
+                raise RuntimeError(f"unexpected JSON result: {res.stdout.decode('utf-8')}")
+            state = data.get("State")
+            print(f"host image state: {state}")
+            if not isinstance(state, dict):
+                # Assume not good state.
+                continue
+            if state.get("Running", False):
+                return True
+            if state.get("Status") == "exited":
+                print(f"Host process exited quickly (exit code {state.get('ExitCode')})")
+                print("=========== Log Start")
+                config.run_command(
+                    "docker", "image-logs",
+                    capture_stdout=False,
+                    capture_stderr=False,
+                    check=False,
+                    template={"name": host},
+                )
+                print("=========== Log End")
+                return False
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    return False
 
 
 def _setup_workspace(
@@ -1271,7 +1542,7 @@ def _setup_workspace(
             print(f"Cleaning out the workspace directory ({workspace_dir})")
             _rm(workspace_dir)
         elif workspace_fetch and vcs_section:
-            print("Fetching the workspace contents")
+            print(f"Fetching your project into {workspace_dir} ...")
             config.run_command(
                 vcs_section,
                 "fetch-changes",
@@ -1282,6 +1553,7 @@ def _setup_workspace(
     if not workspace_dir.exists():
         if vcs_section:
             print("Cloning into the workspace")
+            print(f"Cloning your project into {workspace_dir} ...")
             config.run_command(
                 vcs_section,
                 "local-clone",
@@ -1296,6 +1568,125 @@ def _setup_workspace(
     return workspace_dir
 
 
+def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -> None:
+    """Mark the directory as ignored by adding the name to the parent's ignore file."""
+    if not vcs_section:
+        # No ignore possible.
+        return
+    ignore_file_name = config.require_value(vcs_section, "ignore-file")
+    if not ignore_file_name:
+        # No ignore possible.
+        return
+    
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ignore_file = path.parent / ignore_file_name
+    ignore_lines: list[str]
+    if ignore_file.exists():
+        # load up the lines.
+        with open(ignore_file, "r", encoding="utf-8") as out:
+            # This includes newlines at the end.
+            ignore_lines = out.readlines()
+    else:
+        ignore_lines = []
+
+    path_pattern = f"/{path.name}/\n"
+    if path_pattern not in ignore_lines:
+        ignore_lines.append("\n")
+        ignore_lines.append("# Surf Scoter work directory\n")
+        ignore_lines.append(path_pattern)
+
+        # Need to modify the file
+        ignore_file.write_text("".join(ignore_lines), encoding="utf-8")
+
+
+def _configure_sshd_port(config: UserConfig, envs: ActiveEnvironmentSet) -> None:
+    port = config.dev_container_sshd_port()
+    if port is not None:
+        # Already set.
+        return
+
+    # Check the ssh config for all ports already declared,
+    # and pick one that isn't active but has the same username.
+    user = config.dev_container_str("user")
+    all_config_ports: set[str] = set()
+    available_config_ports: set[str] = set()
+    ssh_config = SshConfig.read_ssh_config(config)
+    if ssh_config:
+        # It exists.  Find a port with the same username.
+        # The port is baked into the host pattern expression.
+        user_port_pattern = re.compile(
+            r"^" +
+            re.escape(config.require_value("ssh", "host-prefix")) +
+            r"-(.*?)-" +
+            r"-(\d+)-\*$"
+        )
+        for host in ssh_config.by_host.keys():
+            if not host:
+                continue
+            match = user_port_pattern.match(host)
+            if match:
+                all_config_ports.add(match.group(2))
+                if ssh_config.get_host_key(host, "user") == user:
+                    # We have a winner.
+                    available_config_ports.add(match.group(1))
+    # Eliminate active environments' port.
+    for env in envs.environs.values():
+        if (
+            env.dev_env_ssh_port in available_config_ports
+            and env.dev_env_ssh_user == user
+        ):
+            available_config_ports.remove(env.dev_env_ssh_port)
+    ssh_port = ""
+    if available_config_ports:
+        # Reuse one.
+        ssh_port = tuple(available_config_ports)[0]
+    else:
+        # get an available one
+        start_sshd_port = config.require_value("dev-env", "start-sshd-port")
+        try:
+            ssh_port_i = int(start_sshd_port)
+        except (ValueError, TypeError) as err:
+            raise ConfigErr(
+                f"invalid dev-env values start-sshd-port ({start_sshd_port}): "
+                f"it must be an integer"
+            ) from err
+        while ssh_port_i < TOP_PORT_NUMBER:
+            ssh_port = str(ssh_port_i)
+            if ssh_port not in all_config_ports:
+                break
+            ssh_port_i += 1
+    if not ssh_port:
+        raise ConfigErr("no sshd listening port available")
+    config.set_dev_container_sshd_port(ssh_port)
+
+
+def _add_known_host(config: UserConfig, host: str, host_key_file: Path) -> None:
+    # Add the host to the known-hosts file.
+    # It should already exist from the user setup command.
+    known_hosts_file = config.require_path("ssh", "known-hosts")
+    print(f"Removing the {host} entry from {known_hosts_file}")
+    config.run_command(
+        "ssh", "remove-known-host",
+        template={"host": host},
+        # If the host doesn't exist, that's fine.
+        capture_stdout=True,
+        capture_stderr=True,
+    )
+    pub_key_file = Path(str(host_key_file) + PUB_KEY_EXT)
+    pub_key = pub_key_file.read_text(encoding="utf-8")
+    # Format is: type + ' ' + key + ' ' + optional comment
+    parts = pub_key.split(" ")
+    if len(parts) < 2:
+        raise ConfigErr(f"Bad pub key file format ({pub_key_file})")
+    # Added into the known-hosts file in the format:
+    #   host + ' ' + type + ' ' + key
+    known_hosts = known_hosts_file.read_text(encoding="utf-8")
+    if known_hosts and known_hosts[-1] != "\n":
+        known_hosts += "\n"
+    known_hosts += f"{host} {parts[0]} {parts[1]}\n"
+    known_hosts_file.write_text(known_hosts, encoding="utf-8")
+
+
 def _setup_ssh_config(config: UserConfig) -> str | None:
     # Ensure the right SSH config host block exists.
     # It generates the host prefix.
@@ -1305,7 +1696,7 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
         return None
 
     user = config.dev_container_str("user")
-    port = config.dev_container_str("sshd-port")
+    port = config.dev_container_str("sshd-port")  # force a value here.
     key_file = config.require_path("ssh", "key-file")
     proxy = config.require_run("ssh", "proxy-command")
     host_prefix = (
@@ -1352,9 +1743,53 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
         _backup(ssh_config_file, config.require_value("scoter", "backup-file-extension"))
         ssh_config_file.write_text(ssh_config.output(), encoding="utf-8")
         # Ensure the file mode wasn't changed.
-        ssh_config_file.touch(0o600)
+        _touch(ssh_config_file, 0o600)
 
     return host_prefix
+
+
+def _write_docker_compose_env_file(
+    *,
+    config: UserConfig, file: Path,
+    host: str, workspace_dir: Path, settings_dir: Path,
+) -> None:
+    # Write all the settings to the docker-compose file.
+    # 90% of this have well-defined meanings that all docker-compose must use.
+    mounts = config.dev_container_mounts()
+    if "workspace" not in mounts or "setup" not in mounts:
+        raise ConfigErr(f"dev-env does not have expected mounts; has {mounts}")
+
+    lines: dict[str, str] = {
+        # Image tags
+        #   from _build_containers above
+        "FIREWALL_ROUTER": config.require_value("dev-env", "firewall-router-image"),
+        "NETWORK_GATEWAY": config.require_value("dev-env", "network-gateway-image"),
+        "DEV_ENV": config.require_value("dev-env", "dev-env-image-prefix") + host,
+
+        # Container name
+        "FIREWALL_ROUTER_NAME": f"{host}-fr",
+        "NETWORK_GATEWAY_NAME": f"{host}-ng",
+        "CONTAINER_NAME": host,
+
+        # File paths
+        "WORKSPACE_HOST": str(workspace_dir),
+        "SETTINGS_HOST": str(settings_dir),
+
+        # Mount points
+        "WORKSPACE_CONTAINER": mounts["workspace"],
+        "SETTINGS_CONTAINER": mounts["setup"],
+
+        # Limits
+        "PIDS_LIMIT": config.require_value("dev-env", "pids-limit"),
+        "MEM_LIMIT": config.require_value("dev-env", "mem-limit"),
+        "CPUS": config.require_value("dev-env", "cpus"),
+        "LOGGING_MAX_SIZE": config.require_value("dev-env", "logging-max-size"),
+
+        # Environment variables
+        "SSHD_PORT_ENV": (config.dev_container_sshd_port_env() or "SSHD_PORT_ENV_UNSET"),
+        "SSHD_PORT": (config.dev_container_sshd_port() or "not set"),
+    }
+    file.write_text("\n".join([f"{k}={v}" for k,v in lines.items()]), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------
@@ -1362,8 +1797,13 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
 
 def stop_env_parser(parser: argparse.ArgumentParser) -> None:
     """Configure the CLI arguments."""
-    parser.description = "Stop the project dev container.  The 'start' should linger around as long as the container is running.  Use this to stop run-away configurations."
+    parser.description = (
+        "Stop the project dev container.  The 'run' should stop the configurations"
+        "when it terminates, but unexpected issues can leave dangling resources.  "
+        "Use this to stop run-away configurations."
+    )
     parser.set_defaults(func=stop_env_runner)
+    _add_project_args(parser)
     parser.add_argument(
         "--host",
         action="store",
@@ -1416,6 +1856,7 @@ def fetch_changes_parser(parser: argparse.ArgumentParser) -> None:
     """Configure the CLI arguments."""
     parser.description = "Fetch changes committed by the dev container to its local workspace."
     parser.set_defaults(func=fetch_changes_runner)
+    _add_project_args(parser)
     parser.add_argument(
         "-b",
         "--branch",
@@ -1478,13 +1919,15 @@ def user_space_setup_runner(args: argparse.Namespace) -> int:
     interactive = bool(args.interactive)
     _gen_key_pair(config, interactive)
     _ensure_ssh_config(config, interactive)
+    _ensure_ssh_known_hosts(config, interactive)
+    _try_user_home(config, interactive)
     return 0
 
 
 def _gen_key_pair(config: UserConfig, interactive: bool) -> None:
     # Step 1: generate the key pair.
     key_file = config.require_path("ssh", "key-file")
-    pub_key_file = Path(str(key_file) + ".pub")
+    pub_key_file = Path(str(key_file) + PUB_KEY_EXT)
     if key_file.is_file() and pub_key_file.is_file():
         answer = _read_user_input(
             f"The key file pair ({key_file}) already exists.  Replace? [yN]",
@@ -1492,8 +1935,8 @@ def _gen_key_pair(config: UserConfig, interactive: bool) -> None:
             "n",
         )
         if answer and answer[0] == "y":
-            key_file.unlink()
-            pub_key_file.unlink()
+            _rm(key_file)
+            _rm(pub_key_file)
     elif key_file.exists() or pub_key_file.exists():
         answer = _read_user_input(
             f"Unfortunately, the key file pair used for allowing SSH "
@@ -1504,8 +1947,8 @@ def _gen_key_pair(config: UserConfig, interactive: bool) -> None:
             "n",
         )
         if answer and answer[0] == "y":
-            shutil.rmtree(key_file, ignore_errors=True)
-            shutil.rmtree(pub_key_file, ignore_errors=True)
+            _rm(key_file)
+            _rm(pub_key_file)
     if key_file.exists() or pub_key_file.exists():
         print(f"The key file pair ('{key_file}' and '{pub_key_file}') exist; skipping creation.")
     else:
@@ -1566,8 +2009,69 @@ def _ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
             "n",
         )
         if answer and answer[0] == "y":
-            ssh_config_file.touch(0o600)
+            _touch(ssh_config_file, 0o600)
             print(f"Created an empty ssh config file ({ssh_config_file})")
+
+
+def _ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
+    # Step 3: Ensure the known-hosts file exists.
+    known_hosts_file = config.require_path("ssh", "known-hosts")
+    if known_hosts_file.exists() and not known_hosts_file.is_file():
+        answer = _read_user_input(
+            f"Your ssh known-hosts file ({known_hosts_file}) exists but isn't a file.  "
+            f"Do you want me to remove what's there? [yN]",
+            interactive,
+            "n"
+        )
+        if answer and answer[0] == "y":
+            print(f"Removing whatever lives at {known_hosts_file}")
+            if not _rm(known_hosts_file):
+                print("Couldn't remove it.")
+                return
+    if not known_hosts_file.is_file():
+        # An empty known-hosts file is fine.
+        answer = _read_user_input(
+            f"Your ssh known-hosts file ({known_hosts_file}) doesn't exist.  "
+            f"Do you want me to create it for you? [Yn]",
+            interactive,
+            "y",
+        )
+        if answer and answer == "y":
+            _touch(known_hosts_file, 0o600)
+    elif not _is_windows():
+        # Set the permissions without asking.
+        _touch(known_hosts_file, 0o600)
+
+
+def _try_user_home(config: UserConfig, interactive: bool) -> None:
+    # Step 4: Create the ~/.config/surf-scoter.d directory + basic setup
+    #  if the user-dir isn't set.
+    user_dir = config.optional_path("scoter", "user-dir")
+    if not user_dir:
+        answer = _read_user_input(
+            "The way you've invoked this command meant that I couldn't find "
+            "a place to hold your personal configuration settings.  "
+            "You'll need this directory in order to get running.  Do you want "
+            "me to create it under ~/.config/surf-scoter.d (the default location)? [yN]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            user_dir = Path("~/.config/surf-scoter.d").expanduser()
+            user_dir.mkdir(parents=True, exist_ok=True)
+    user_setup = config.optional_path("scoter", "user-setup-file")
+    if user_dir and not user_setup:
+        user_setup = user_dir / "setup.yaml"
+    if user_dir and user_setup and not user_setup.exists():
+        answer = _read_user_input(
+            f"You don't have a setup file in your user directory ({user_dir}).  "
+            f"Would you like me to create a stub out there? [yN]",
+            interactive,
+            "n",
+        )
+        if answer and answer[0] == "y":
+            # This could eventually copy a sample from the distribution defaults directory.
+            _touch(user_setup, 0o666)
 
 
 # ---------------------------------------------------------------------
@@ -1651,8 +2155,9 @@ def _add_settings_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-U",
         "--user-config",
-        action="store",
+        action="append",
         dest="user_config",
+        default=[],
         help=(
             "Set your user configuration directory or file.  "
             "Also set through the SURF_SCOTER_HOME environment variable."

@@ -528,7 +528,7 @@ mod tests {
         fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
             let options = LoadOptions {
                 project: with_project.then(|| self.project.clone()),
-                user_setup: Some(self.setup.clone()),
+                user_setup: vec![self.setup.clone()],
                 dev_container_workspace_dir: workspace.map(Path::to_path_buf),
                 no_setup_search: true,
                 ..LoadOptions::default()

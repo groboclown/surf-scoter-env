@@ -11,11 +11,14 @@ ssh:
         keygen: ssh-keygen
     runs:
         mk-key: ${keygen} -t ed25519 -N "" -f ${key-file}
+        mk-host-key: ${keygen} -t ed25519 -N "" -f {x:host-key-file}
+        remove-known-host: ${keygen} -R {x:host} -f ${known-hosts}
         proxy-command: ${docker:exec} exec -i %h socat STDIO TCP:127.0.0.1:{x:port}
     paths:
         home: ~/.ssh
         key-file: ${home}/scoter-dev-container
         config-file: ${home}/config
+        known-hosts: ${home}/known_hosts
     values:
         host-prefix: scoter-
 
@@ -34,16 +37,17 @@ docker:
             --no-stream --format json
         compose-down: ${exec} compose --env-file {x:env-file} -f {x:compose-file} down --volumes
         inspect-image: ${exec} image inspect {x:name} --format json
-        inspect-container: ${exec} inspect --format json
+        inspect-container: ${exec} inspect --format json {x:name}
+        image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
 
 # Information for the workspace clone.
 workspace:
     paths:
         workspace-parent-dir: ${scoter:project-dir}/.dev-env
-        setup-dir: ${workspace-parent-dir}/.dev-env/setup
-        resources-dir: ${workspace-parent-dir}/.dev-env/resources
-        workspace-dir: ${workspace-parent-dir}/.dev-env/workspace
+        setup-dir: ${workspace-parent-dir}/setup
+        resources-dir: ${workspace-parent-dir}/resources
+        workspace-dir: ${workspace-parent-dir}/workspace
 
 
 # The 'git' VCS tool.
@@ -81,6 +85,8 @@ file-vcs:
         fetch-changes: ${noop}
         show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
         merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+    values:
+        ignore-file: ""
 
 
 # Information for dealing with developer environments.
@@ -93,6 +99,10 @@ dev-env:
 
         firewall-router: ${scoter:distribution-dir}/containers/firewall-router
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway
+
+        docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
+
+        allowed-domains: ${scoter:project-dir}/.surf-scoter/allowed-domains.txt
     values:
         firewall-router-image: local-surf-scoter/firewall-router
         network-gateway-image: local-surf-scoter/network-gateway
@@ -103,6 +113,9 @@ dev-env:
         cpus: 4
         pids-limit: 4096
         logging-max-size: 10m
+
+        # For auto-assigned sshd port, start at this number.
+        start-sshd-port: 20000
 
 
 # The configuration loader will alter the "scoter" section to match the
@@ -125,10 +138,12 @@ scoter:
         project-file-search:
             - ${scoter:cwd}/.surf-scoter.yaml
             - ${scoter:cwd}/.surf-scoter.yml
-            - ${scoter:cwd}/.surf-scoter/setup.yaml
-            - ${scoter:cwd}/.surf-scoter/setup.yml
+            - ${scoter:cwd}/.surf-scoter/container.yaml
+            - ${scoter:cwd}/.surf-scoter/container.yml
             - ${scoter:project-dir}/.surf-scoter.yaml
             - ${scoter:project-dir}/.surf-scoter.yml
+            - ${scoter:project-dir}/.surf-scoter/container.yaml
+            - ${scoter:project-dir}/.surf-scoter/container.yml
 
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         dev-containers-search:
@@ -137,6 +152,6 @@ scoter:
             - ${scoter:project-dir}/.surf-scoter
             - ${scoter:project-dir}/.surf-scoter/containers
             - ${scoter:distribution-dir}/containers
-    
+
     values:
         backup-file-extension: .backup

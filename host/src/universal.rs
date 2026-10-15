@@ -309,7 +309,7 @@ mod tests {
     fn load(dir: &TempDir, project: Option<&str>, setup: &str) -> FullConfig {
         let options = LoadOptions {
             project: project.map(|p| dir.write("proj/scoter.yaml", p)),
-            user_setup: Some(dir.write("setup.yaml", setup)),
+            user_setup: vec![dir.write("setup.yaml", setup)],
             ..LoadOptions::default()
         };
         let env = Env {

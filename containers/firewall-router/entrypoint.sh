@@ -47,4 +47,5 @@ nft -D "isolated_if=\"$isolated_if\"" -D "dns_servers={ $dns_servers }" -f /usr/
 nft list table inet egress
 
 # Keep the container alive to keep the network forwarding active.
+# TODO make it respond to SIGINT
 exec sleep infinity
