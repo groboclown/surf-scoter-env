@@ -1,0 +1,7 @@
+# Developer access
+.repo1.maven.org
+
+# VS Code may want to download
+.marketplace.visualstudio.com
+.gallerycdn.vsassets.io
+.vscode-cdn.net

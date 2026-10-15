@@ -11,6 +11,10 @@ Surf Scoter has your back, but it can never prevent social engineering.  In the 
 
 ## Security Notes
 
+### Review the project configuration file
+
+If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the project configuration file.  This file defines how the container can communicate outside its sandbox, which means it can do things you're not ready for.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md).
+
 ### Don't run git or your IDE on the workspace from your host
 
 Part of running Surf Scoter copies your project directory into a workspace directory.  This allows the dev container to make alterations to it without affecting your local copy.

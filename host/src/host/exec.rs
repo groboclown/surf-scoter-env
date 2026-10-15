@@ -1,14 +1,16 @@
 //! Runs an approved request as a host process, speaking the `client_host`
 //! protocol with the client.
 //!
-//! The process gets the host's environment, and runs in the directory chosen
-//! by `analyze` or else a fresh temporary directory.  Temporary file arguments
+//! The process gets only the environment `analyze` worked out, not the
+//! host's; its program is found on the host's `PATH`.  It runs in the
+//! directory chosen by `analyze` or else a fresh temporary directory.  Temporary file arguments
 //! are placed in a temporary directory too; it's removed once the process
 //! exits.  Client stdin is passed to the process,
 //! its stdout / stderr are passed back, and forwarded signals are delivered
 //! (on Windows, the termination signals kill the process; others are ignored).
 //! If the client goes away, the process is killed.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
@@ -20,8 +22,22 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use scoter_host::config::command::find_executable;
 use surf_scoter_env_launcher::comm::client_host::{self, Command};
 
+/// `program` as a path: a bare name is found on the host's `PATH`.
+fn find_on_host(program: &str) -> Option<PathBuf> {
+    let path_ext = if cfg!(windows) {
+        std::env::var_os("PATHEXT")
+    } else {
+        None
+    };
+    find_executable(
+        Path::new(program),
+        std::env::var_os("PATH").as_deref(),
+        path_ext.as_deref(),
+    )
+}
 
 /// Exit code when the request isn't allowed.
 pub(crate) const EXIT_DENIED: i32 = 126;
@@ -35,7 +51,6 @@ const STDIN_BACKLOG: usize = 64;
 /// How often to check whether the process exited, once its output has closed.
 const WAIT_POLL: Duration = Duration::from_millis(10);
 
-
 /// What to run.  Built by `analyze`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExecRequest {
@@ -43,6 +58,8 @@ pub(crate) struct ExecRequest {
     pub args: Vec<Arg>,
     /// The host directory to run in; `None` for a new temporary directory.
     pub cwd: Option<PathBuf>,
+    /// The process's whole environment.
+    pub envs: BTreeMap<String, String>,
 }
 
 /// One argument of an approved request.
@@ -76,7 +93,11 @@ impl ExecRequest {
     }
 
     fn needs_temp_dir(&self) -> bool {
-        self.cwd.is_none() || self.args.iter().any(|arg| matches!(arg, Arg::TempFile { .. }))
+        self.cwd.is_none()
+            || self
+                .args
+                .iter()
+                .any(|arg| matches!(arg, Arg::TempFile { .. }))
     }
 }
 
@@ -86,7 +107,10 @@ pub(crate) trait FrameSink: Clone + Send + 'static {
 }
 
 /// Encode one message and send it whole.
-pub(crate) fn emit<S: FrameSink>(sink: &S, build: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> io::Result<()> {
+pub(crate) fn emit<S: FrameSink>(
+    sink: &S,
+    build: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
+) -> io::Result<()> {
     let mut frame = Vec::new();
     build(&mut frame)?;
     sink.send_frame(frame)
@@ -95,19 +119,31 @@ pub(crate) fn emit<S: FrameSink>(sink: &S, build: impl FnOnce(&mut Vec<u8>) -> i
 /// Report a failed request to the client: `message` on stderr, then `exit_code`.
 /// Returns `exit_code`.
 pub(crate) fn fail<S: FrameSink>(sink: &S, message: &str, exit_code: i32) -> i32 {
-    let _ = emit(sink, |f| client_host::send_stderr(f, format!("scoter-host: {message}\n").as_bytes()));
+    let _ = emit(sink, |f| {
+        client_host::send_stderr(f, format!("scoter-host: {message}\n").as_bytes())
+    });
     let _ = emit(sink, |f| client_host::send_exit_code(f, exit_code));
     exit_code
 }
 
 /// Run `request` until it exits, reading the client's stdin and signals from `input`.
 /// Output and the exit code go to `sink`.  Returns the exit code.
-pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(request: &ExecRequest, input: R, sink: &S) -> i32 {
+pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(
+    request: &ExecRequest,
+    input: R,
+    sink: &S,
+) -> i32 {
     // For the working directory and temporary files; removed once the process exits.
     let temp_dir = if request.needs_temp_dir() {
         match TempDir::new() {
             Ok(dir) => Some(dir),
-            Err(e) => return fail(sink, &format!("cannot create a temporary directory: {e}"), EXIT_START_FAILED),
+            Err(e) => {
+                return fail(
+                    sink,
+                    &format!("cannot create a temporary directory: {e}"),
+                    EXIT_START_FAILED,
+                );
+            }
         }
     } else {
         None
@@ -117,8 +153,21 @@ pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(request: &ExecRequest,
         Some(dir) => dir.as_path(),
         None => temp_path.expect("a temporary working directory"),
     };
-    let child = Process::new(&request.program)
+    // Found on the host's `PATH`: the process's own environment may have none.
+    let Some(program) = find_on_host(&request.program) else {
+        return fail(
+            sink,
+            &format!(
+                "cannot run {}: no such program on the host",
+                request.program
+            ),
+            EXIT_START_FAILED,
+        );
+    };
+    let child = Process::new(&program)
         .args(request.host_args(temp_path))
+        .env_clear()
+        .envs(&request.envs)
         // TODO race: `cwd` and the host path arguments were checked by
         //      `analyze`, but are used here by path; see `analyze::resolve`.
         .current_dir(cwd)
@@ -128,12 +177,21 @@ pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(request: &ExecRequest,
         .spawn();
     let mut child = match child {
         Ok(child) => child,
-        Err(e) => return fail(sink, &format!("cannot run {}: {e}", request.program), EXIT_START_FAILED),
+        Err(e) => {
+            return fail(
+                sink,
+                &format!("cannot run {}: {e}", request.program),
+                EXIT_START_FAILED,
+            );
+        }
     };
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
-    let running = Arc::new(Mutex::new(Running { child, status: None }));
+    let running = Arc::new(Mutex::new(Running {
+        child,
+        status: None,
+    }));
 
     {
         // Not joined: it ends when the client's input closes.
@@ -158,10 +216,13 @@ pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(request: &ExecRequest,
             let _ = emit(sink, |f| client_host::send_exit_code(f, code));
             code
         }
-        Err(e) => fail(sink, &format!("lost track of {}: {e}", request.program), EXIT_START_FAILED),
+        Err(e) => fail(
+            sink,
+            &format!("lost track of {}: {e}", request.program),
+            EXIT_START_FAILED,
+        ),
     }
 }
-
 
 /// The child process, and its exit status once it has been reaped.
 /// Signals are only delivered before the status is known, so the pid can't
@@ -244,9 +305,10 @@ fn delivery_for(wire: u32) -> Delivery {
 #[cfg(not(unix))]
 fn delivery_for(wire: u32) -> Delivery {
     match wire {
-        client_host::SIGNAL_HUP | client_host::SIGNAL_INT | client_host::SIGNAL_QUIT | client_host::SIGNAL_TERM => {
-            Delivery::Kill
-        }
+        client_host::SIGNAL_HUP
+        | client_host::SIGNAL_INT
+        | client_host::SIGNAL_QUIT
+        | client_host::SIGNAL_TERM => Delivery::Kill,
         _ => Delivery::Ignore,
     }
 }
@@ -266,7 +328,6 @@ fn exit_code(status: ExitStatus) -> i32 {
     }
     1
 }
-
 
 /// Handle the client's messages: stdin goes to the process, signals are delivered.
 /// When the client goes away (or misbehaves), the process is killed.
@@ -308,7 +369,11 @@ fn write_stdin(rx: Receiver<Vec<u8>>, mut stdin: ChildStdin) {
 }
 
 /// Send everything read from `r` to the client, using `send` to frame it.
-fn pump_output<R: Read, S: FrameSink>(mut r: R, sink: &S, send: fn(&mut Vec<u8>, &[u8]) -> io::Result<()>) {
+fn pump_output<R: Read, S: FrameSink>(
+    mut r: R,
+    sink: &S,
+    send: fn(&mut Vec<u8>, &[u8]) -> io::Result<()>,
+) {
     let mut buf = vec![0u8; OUTPUT_CHUNK];
     loop {
         let n = match r.read(&mut buf) {
@@ -323,7 +388,6 @@ fn pump_output<R: Read, S: FrameSink>(mut r: R, sink: &S, send: fn(&mut Vec<u8>,
         }
     }
 }
-
 
 /// A private, uniquely named directory, removed (with its contents) on drop.
 pub(crate) struct TempDir(PathBuf);
@@ -350,7 +414,10 @@ impl TempDir {
                 Err(e) => return Err(e),
             }
         }
-        Err(io::Error::new(ErrorKind::AlreadyExists, "no free temporary directory name"))
+        Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "no free temporary directory name",
+        ))
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -364,10 +431,10 @@ impl Drop for TempDir {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::io::{Cursor, PipeWriter};
 
     /// Collects the frames sent to the client.
@@ -384,27 +451,44 @@ mod tests {
     impl VecSink {
         /// Each frame must hold exactly one message.
         fn commands(&self) -> Vec<Command> {
-            self.0.lock().unwrap().iter().map(|frame| {
-                let mut cur = Cursor::new(frame);
-                let cmd = Command::read(&mut cur).unwrap();
-                assert_eq!(cur.position() as usize, frame.len(), "one message per frame");
-                cmd
-            }).collect()
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|frame| {
+                    let mut cur = Cursor::new(frame);
+                    let cmd = Command::read(&mut cur).unwrap();
+                    assert_eq!(
+                        cur.position() as usize,
+                        frame.len(),
+                        "one message per frame"
+                    );
+                    cmd
+                })
+                .collect()
         }
 
         #[cfg_attr(not(unix), allow(dead_code))]
         fn stdout(&self) -> Vec<u8> {
-            self.commands().into_iter().filter_map(|c| match c {
-                Command::Stdout(d) => Some(d),
-                _ => None,
-            }).flatten().collect()
+            self.commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Stdout(d) => Some(d),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
         }
 
         fn stderr(&self) -> Vec<u8> {
-            self.commands().into_iter().filter_map(|c| match c {
-                Command::Stderr(d) => Some(d),
-                _ => None,
-            }).flatten().collect()
+            self.commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Stderr(d) => Some(d),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
         }
 
         fn last(&self) -> Command {
@@ -426,6 +510,7 @@ mod tests {
             program: program.to_string(),
             args: args.iter().map(|s| Arg::Plain(s.to_string())).collect(),
             cwd: None,
+            envs: BTreeMap::new(),
         }
     }
 
@@ -437,21 +522,37 @@ mod tests {
                 Arg::Plain("a".to_string()),
                 Arg::HostPath(PathBuf::from("/h/x")),
                 Arg::TempFile { name: None },
-                Arg::TempFile { name: Some("keep.txt".to_string()) },
+                Arg::TempFile {
+                    name: Some("keep.txt".to_string()),
+                },
             ],
             cwd: Some(PathBuf::from("/h")),
+            envs: BTreeMap::new(),
         };
         assert!(req.needs_temp_dir());
-        assert_eq!(req.host_args(Some(Path::new("/t"))), vec![
-            OsString::from("a"),
-            OsString::from("/h/x"),
-            Path::new("/t").join("arg-3").into_os_string(),
-            Path::new("/t").join("keep.txt").into_os_string(),
-        ]);
-        let plain = ExecRequest { program: "p".to_string(), args: vec![Arg::Plain("a".to_string())], cwd: Some(PathBuf::from("/h")) };
+        assert_eq!(
+            req.host_args(Some(Path::new("/t"))),
+            vec![
+                OsString::from("a"),
+                OsString::from("/h/x"),
+                Path::new("/t").join("arg-3").into_os_string(),
+                Path::new("/t").join("keep.txt").into_os_string(),
+            ]
+        );
+        let plain = ExecRequest {
+            program: "p".to_string(),
+            args: vec![Arg::Plain("a".to_string())],
+            cwd: Some(PathBuf::from("/h")),
+            envs: BTreeMap::new(),
+        };
         assert!(!plain.needs_temp_dir());
         assert_eq!(plain.host_args(None), vec![OsString::from("a")]);
-        let no_cwd = ExecRequest { program: "p".to_string(), args: vec![], cwd: None };
+        let no_cwd = ExecRequest {
+            program: "p".to_string(),
+            args: vec![],
+            cwd: None,
+            envs: BTreeMap::new(),
+        };
         assert!(no_cwd.needs_temp_dir());
     }
 
@@ -475,10 +576,13 @@ mod tests {
     fn fail_reports_message_and_code() {
         let sink = VecSink::default();
         assert_eq!(fail(&sink, "no way", EXIT_DENIED), EXIT_DENIED);
-        assert_eq!(sink.commands(), vec![
-            Command::Stderr(b"scoter-host: no way\n".to_vec()),
-            Command::ExitCode(EXIT_DENIED),
-        ]);
+        assert_eq!(
+            sink.commands(),
+            vec![
+                Command::Stderr(b"scoter-host: no way\n".to_vec()),
+                Command::ExitCode(EXIT_DENIED),
+            ]
+        );
     }
 
     #[test]
@@ -490,9 +594,15 @@ mod tests {
     fn start_failure() {
         let sink = VecSink::default();
         let (input, _w) = idle_client();
-        assert_eq!(run(&request("/nonexistent/program", &[]), input, &sink), EXIT_START_FAILED);
+        assert_eq!(
+            run(&request("/nonexistent/program", &[]), input, &sink),
+            EXIT_START_FAILED
+        );
         let stderr = String::from_utf8(sink.stderr()).unwrap();
-        assert!(stderr.starts_with("scoter-host: cannot run /nonexistent/program"), "{stderr}");
+        assert!(
+            stderr.starts_with("scoter-host: cannot run /nonexistent/program"),
+            "{stderr}"
+        );
         assert_eq!(sink.last(), Command::ExitCode(EXIT_START_FAILED));
     }
 
@@ -501,7 +611,10 @@ mod tests {
         use super::*;
         use std::thread::JoinHandle;
 
-        fn run_in_background(req: ExecRequest, input: std::io::PipeReader) -> (VecSink, JoinHandle<i32>) {
+        fn run_in_background(
+            req: ExecRequest,
+            input: std::io::PipeReader,
+        ) -> (VecSink, JoinHandle<i32>) {
             let sink = VecSink::default();
             let handle = {
                 let sink = sink.clone();
@@ -525,28 +638,64 @@ mod tests {
             let (input, _w) = idle_client();
             let req = ExecRequest {
                 program: "echo".to_string(),
-                args: vec![Arg::Plain("to".to_string()), Arg::HostPath(PathBuf::from("/home/me/ws/out.txt"))],
+                args: vec![
+                    Arg::Plain("to".to_string()),
+                    Arg::HostPath(PathBuf::from("/home/me/ws/out.txt")),
+                ],
                 cwd: None,
+                envs: BTreeMap::new(),
             };
             assert_eq!(run(&req, input, &sink), 0);
             assert_eq!(sink.stdout(), b"to /home/me/ws/out.txt\n");
         }
 
         /// Run `script` with temporary file arguments, printing `$1`, `$2`, ...
-        fn run_with_temp_files(cwd: Option<PathBuf>, names: &[Option<&str>], script: &str) -> Vec<String> {
+        fn run_with_temp_files(
+            cwd: Option<PathBuf>,
+            names: &[Option<&str>],
+            script: &str,
+        ) -> Vec<String> {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            let mut args = vec![Arg::Plain("-c".to_string()), Arg::Plain(script.to_string()), Arg::Plain("sh".to_string())];
-            args.extend(names.iter().map(|n| Arg::TempFile { name: n.map(str::to_string) }));
-            let req = ExecRequest { program: "sh".to_string(), args, cwd };
-            assert_eq!(run(&req, input, &sink), 0, "{}", String::from_utf8_lossy(&sink.stderr()));
-            String::from_utf8(sink.stdout()).unwrap().lines().map(str::to_string).collect()
+            let mut args = vec![
+                Arg::Plain("-c".to_string()),
+                Arg::Plain(script.to_string()),
+                Arg::Plain("sh".to_string()),
+            ];
+            args.extend(names.iter().map(|n| Arg::TempFile {
+                name: n.map(str::to_string),
+            }));
+            let req = ExecRequest {
+                program: "sh".to_string(),
+                args,
+                cwd,
+                envs: BTreeMap::new(),
+            };
+            assert_eq!(
+                run(&req, input, &sink),
+                0,
+                "{}",
+                String::from_utf8_lossy(&sink.stderr())
+            );
+            String::from_utf8(sink.stdout())
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect()
         }
 
         #[test]
         fn temp_files_are_generated_and_removed() {
-            let out = run_with_temp_files(None, &[None, Some("out.json")], "echo x > \"$1\"; echo y > \"$2\"; echo \"$1\"; echo \"$2\"; pwd");
-            let (first, second, cwd) = (PathBuf::from(&out[0]), PathBuf::from(&out[1]), PathBuf::from(&out[2]));
+            let out = run_with_temp_files(
+                None,
+                &[None, Some("out.json")],
+                "echo x > \"$1\"; echo y > \"$2\"; echo \"$1\"; echo \"$2\"; pwd",
+            );
+            let (first, second, cwd) = (
+                PathBuf::from(&out[0]),
+                PathBuf::from(&out[1]),
+                PathBuf::from(&out[2]),
+            );
             // Generated names are numbered by argument position.
             assert_eq!(first.file_name().unwrap(), "arg-4");
             assert_eq!(second.file_name().unwrap(), "out.json");
@@ -560,7 +709,11 @@ mod tests {
         #[test]
         fn temp_files_with_a_requested_cwd() {
             let dir = TempDir::new().unwrap();
-            let out = run_with_temp_files(Some(dir.path().to_path_buf()), &[None], "echo x > \"$1\"; echo \"$1\"; pwd");
+            let out = run_with_temp_files(
+                Some(dir.path().to_path_buf()),
+                &[None],
+                "echo x > \"$1\"; echo \"$1\"; pwd",
+            );
             let temp_file = PathBuf::from(&out[0]);
             // The temporary file isn't in the requested directory, which is left alone.
             assert_ne!(temp_file.parent().unwrap(), dir.path());
@@ -574,7 +727,11 @@ mod tests {
         fn stdout_and_stderr_are_separate() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            let code = run(&request("sh", &["-c", "echo out; echo err >&2; exit 3"]), input, &sink);
+            let code = run(
+                &request("sh", &["-c", "echo out; echo err >&2; exit 3"]),
+                input,
+                &sink,
+            );
             assert_eq!(code, 3);
             assert_eq!(sink.stdout(), b"out\n");
             assert_eq!(sink.stderr(), b"err\n");
@@ -585,7 +742,11 @@ mod tests {
         fn large_output_is_chunked() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            let code = run(&request("head", &["-c", "200000", "/dev/zero"]), input, &sink);
+            let code = run(
+                &request("head", &["-c", "200000", "/dev/zero"]),
+                input,
+                &sink,
+            );
             assert_eq!(code, 0);
             assert_eq!(sink.stdout(), vec![0u8; 200_000]);
             for cmd in sink.commands() {
@@ -599,7 +760,10 @@ mod tests {
         fn runs_in_private_temp_dir_that_is_removed() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            assert_eq!(run(&request("sh", &["-c", "pwd; ls -ld ."]), input, &sink), 0);
+            assert_eq!(
+                run(&request("sh", &["-c", "pwd; ls -ld ."]), input, &sink),
+                0
+            );
             let out = String::from_utf8(sink.stdout()).unwrap();
             let mut lines = out.lines();
             let dir = PathBuf::from(lines.next().unwrap());
@@ -619,8 +783,14 @@ mod tests {
             req.cwd = Some(dir.path().to_path_buf());
             assert_eq!(run(&req, input, &sink), 0);
             let out = String::from_utf8(sink.stdout()).unwrap();
-            assert_eq!(out, format!("{}\nmarker\n", dir.path().canonicalize().unwrap().display()));
-            assert!(dir.path().join("marker").exists(), "the requested directory must not be removed");
+            assert_eq!(
+                out,
+                format!("{}\nmarker\n", dir.path().canonicalize().unwrap().display())
+            );
+            assert!(
+                dir.path().join("marker").exists(),
+                "the requested directory must not be removed"
+            );
         }
 
         #[test]
@@ -634,11 +804,14 @@ mod tests {
         }
 
         #[test]
-        fn uses_host_environment() {
+        fn uses_only_the_given_environment() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
-            assert_eq!(run(&request("sh", &["-c", "printf %s \"$PATH\""]), input, &sink), 0);
-            assert_eq!(String::from_utf8(sink.stdout()).unwrap(), std::env::var("PATH").unwrap());
+            let mut req = request("sh", &["-c", "printf %s \"$GIVEN:${HOME-none}\""]);
+            req.envs = BTreeMap::from([("GIVEN".to_string(), "yes".to_string())]);
+            // `sh` is still found on the host's `PATH`.
+            assert_eq!(run(&req, input, &sink), 0);
+            assert_eq!(String::from_utf8(sink.stdout()).unwrap(), "yes:none");
         }
 
         #[test]
@@ -747,7 +920,10 @@ mod tests {
         #[test]
         fn signal_after_exit_is_not_delivered() {
             let child = Process::new("true").spawn().unwrap();
-            let running = Mutex::new(Running { child, status: None });
+            let running = Mutex::new(Running {
+                child,
+                status: None,
+            });
             wait(&running).unwrap();
             // Would target a possibly reused pid if delivered.
             deliver_signal(&running, client_host::SIGNAL_TERM);

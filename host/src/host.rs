@@ -6,9 +6,9 @@
 //! stream, decides what to do with it, and runs it.
 
 pub(crate) mod analyze;
-pub(crate) mod config;
 pub(crate) mod container;
 pub(crate) mod exec;
+pub(crate) mod workspace;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -21,17 +21,19 @@ use std::thread::{self, JoinHandle};
 use surf_scoter_env_launcher::comm::broker_host::{self, ProcessId};
 use surf_scoter_env_launcher::comm::client_host::Invocation;
 
-use analyze::Decision;
-use config::{Commands, Workspace};
-use exec::FrameSink;
+use scoter_host::config;
+use scoter_host::config::project::Commands;
+use scoter_host::config::system::{DEV_CONTAINER_WORKSPACE_DIR, SCOTER_SECTION};
 
+use analyze::Decision;
+use exec::FrameSink;
+use workspace::Workspace;
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: scoter-host --config CONFIG.yaml --workspace HOST_DIR:CONTAINER_PATH CONTAINER_NAME";
-
+const USAGE: &str = "Usage: scoter-host --universal UNIVERSAL.json CONTAINER_NAME";
 
 /// Run the host with the command line arguments (without the program name).
 /// Returns the process exit code.
@@ -41,7 +43,9 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         Ok(None) => {
             println!("{USAGE}");
             println!("Runs the broker in the container, and the commands its clients request.");
-            println!("--workspace gives the workspace directory on the host and where it's mounted in the container.");
+            println!(
+                "--universal gives the universal configuration file from gen-scoter-uc, with the project file and the dev container's workspace directory."
+            );
             return EXIT_OK;
         }
         Err(e) => {
@@ -50,24 +54,61 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let workspace = match Workspace::parse(&cli.workspace) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("scoter-host: --workspace: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    let config = match config::load(&cli.config) {
+    // Only the universal file is read, so this runs with the configuration
+    // its maker saw, even if the files it came from change.
+    let config = match config::load_universal(&cli.universal) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("scoter-host: {}: {e}", cli.config.display());
+        Err(errors) => {
+            for e in &errors.0 {
+                eprintln!("scoter-host: {e}");
+            }
             return EXIT_FAILURE;
         }
     };
-    let broker = match container::launch(&config.container, &cli.container) {
+    let universal = cli.universal.display();
+    // Both are there when there's a project file.
+    let (Some(mut project), Some(dev_container)) = (config.project, config.dev_container) else {
+        eprintln!(
+            "scoter-host: {universal}: has no project configuration file; make it with `gen-scoter-uc --config`"
+        );
+        return EXIT_FAILURE;
+    };
+    // `@NAME@` values come from this program's environment.
+    if let Err(errors) = config::expand_host_environments(&mut project, &config.system) {
+        for e in &errors.0 {
+            eprintln!("scoter-host: {e}");
+        }
+        return EXIT_FAILURE;
+    }
+    let Some(workspace_dir) = config
+        .system
+        .get_path(SCOTER_SECTION, DEV_CONTAINER_WORKSPACE_DIR)
+    else {
+        eprintln!(
+            "scoter-host: {universal}: has no {DEV_CONTAINER_WORKSPACE_DIR}; make it with `gen-scoter-uc --{DEV_CONTAINER_WORKSPACE_DIR}`"
+        );
+        return EXIT_FAILURE;
+    };
+    let workspace = match Workspace::new(&workspace_dir, &dev_container.env.mounts.workspace) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("scoter-host: {universal}: the workspace: {e}");
+            return EXIT_FAILURE;
+        }
+    };
+    let broker = container::broker_argv(
+        &config.system,
+        &cli.container,
+        &dev_container.env.broker_bin,
+    )
+    .and_then(|argv| container::launch(&argv).map_err(|e| e.to_string()));
+    let broker = match broker {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("scoter-host: cannot start the broker in container '{}': {e}", cli.container);
+            eprintln!(
+                "scoter-host: cannot start the broker in container '{}': {e}",
+                cli.container
+            );
             return EXIT_FAILURE;
         }
     };
@@ -77,9 +118,16 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         workspace.host.display(),
         workspace.container,
     );
-    let settings = Arc::new(Settings { commands: config.commands, workspace });
+    let settings = Arc::new(Settings {
+        commands: project.commands,
+        workspace,
+    });
 
-    let container::Broker { mut child, stdin, stdout } = broker;
+    let container::Broker {
+        mut child,
+        stdin,
+        stdout,
+    } = broker;
     // Returns once the broker closes its stdout; the broker's stdin is closed on the way out.
     let result = serve(stdout, stdin, settings);
     let status = child.wait();
@@ -100,20 +148,17 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq)]
 struct Cli {
-    config: PathBuf,
-    /// `HOST_DIR:CONTAINER_PATH`; checked by `Workspace::parse`.
-    workspace: String,
+    /// The universal configuration file.
+    universal: PathBuf,
     container: String,
 }
 
 /// Parse the arguments.  `Ok(None)` means help was requested.
 /// Options take a value as `--name VALUE` or `--name=VALUE`.
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
-    let mut config: Option<OsString> = None;
-    let mut workspace: Option<OsString> = None;
+    let mut universal: Option<OsString> = None;
     let mut container: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -125,8 +170,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
                     None => (s, None),
                 };
                 let slot = match name {
-                    "--config" => &mut config,
-                    "--workspace" => &mut workspace,
+                    "--universal" => &mut universal,
                     _ => return Err(format!("unknown option '{s}'")),
                 };
                 let value = match inline {
@@ -141,25 +185,22 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
                 }
                 *slot = Some(value);
             }
-            _ if container.is_some() => return Err(format!("unexpected argument '{}'", arg.to_string_lossy())),
+            _ if container.is_some() => {
+                return Err(format!("unexpected argument '{}'", arg.to_string_lossy()));
+            }
             _ => {
-                let name = arg.into_string().map_err(|a| format!("invalid container name '{}'", a.to_string_lossy()))?;
+                let name = arg
+                    .into_string()
+                    .map_err(|a| format!("invalid container name '{}'", a.to_string_lossy()))?;
                 container = Some(name);
             }
         }
     }
-    let workspace = workspace
-        .ok_or("--workspace is required")?
-        // Container paths and mapped arguments are strings.
-        .into_string()
-        .map_err(|w| format!("--workspace '{}' must be valid UTF-8", w.to_string_lossy()))?;
     Ok(Some(Cli {
-        config: PathBuf::from(config.ok_or("--config is required")?),
-        workspace,
+        universal: PathBuf::from(universal.ok_or("--universal is required")?),
         container: container.ok_or("a container name is required")?,
     }))
 }
-
 
 /// What client requests are checked against.
 struct Settings {
@@ -186,7 +227,13 @@ where
 
     let inputs: Inputs = Arc::default();
     let mut sessions = Vec::new();
-    let result = route(BufReader::new(from_broker), &tx, &inputs, &settings, &mut sessions);
+    let result = route(
+        BufReader::new(from_broker),
+        &tx,
+        &inputs,
+        &settings,
+        &mut sessions,
+    );
 
     // Closing every client's input kills whatever is still running.
     lock(&inputs).clear();
@@ -194,7 +241,9 @@ where
         let _ = session.join();
     }
     drop(tx);
-    let written = writer.join().unwrap_or_else(|_| Err(io::Error::other("broker writer panicked")));
+    let written = writer
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("broker writer panicked")));
     result.and(written)
 }
 
@@ -218,12 +267,16 @@ fn route<R: BufRead>(
             broker_host::Command::Started(proc) => {
                 let (input_tx, input_rx) = mpsc::channel();
                 lock(inputs).insert(proc, input_tx);
-                let outbox = Outbox { proc, tx: tx.clone() };
+                let outbox = Outbox {
+                    proc,
+                    tx: tx.clone(),
+                };
                 let inputs = inputs.clone();
                 let settings = settings.clone();
                 sessions.retain(|s| !s.is_finished());
                 sessions.push(thread::spawn(move || {
-                    let code = handle_process(proc, ChannelReader::new(input_rx), &outbox, &settings);
+                    let code =
+                        handle_process(proc, ChannelReader::new(input_rx), &outbox, &settings);
                     lock(&inputs).remove(&proc);
                     outbox.close(code);
                 }));
@@ -263,7 +316,10 @@ fn handle_process<R: Read + Send + 'static, S: FrameSink>(
     };
     match analyze::analyze(&invocation, &settings.commands, &settings.workspace) {
         Decision::Deny(reason) => {
-            eprintln!("scoter-host: process {proc}: denied {:?}: {reason}", invocation.args);
+            eprintln!(
+                "scoter-host: process {proc}: denied {:?}: {reason}",
+                invocation.args
+            );
             exec::fail(sink, &reason, exec::EXIT_DENIED)
         }
         Decision::Allow(request) => {
@@ -274,13 +330,15 @@ fn handle_process<R: Read + Send + 'static, S: FrameSink>(
                     request.args,
                     dir.display(),
                 ),
-                None => eprintln!("scoter-host: process {proc}: running {} {:?}", request.program, request.args),
+                None => eprintln!(
+                    "scoter-host: process {proc}: running {} {:?}",
+                    request.program, request.args
+                ),
             }
             exec::run(&request, input, sink)
         }
     }
 }
-
 
 /// Sends a process's client-bound messages to the broker.
 #[derive(Clone)]
@@ -292,7 +350,9 @@ struct Outbox {
 impl Outbox {
     /// Tell the broker the process is done, so it closes the client connection.
     fn close(&self, exit_code: i32) {
-        let _ = self.tx.send(broker_host::Command::Terminated((self.proc, exit_code)));
+        let _ = self
+            .tx
+            .send(broker_host::Command::Terminated((self.proc, exit_code)));
     }
 }
 
@@ -304,7 +364,6 @@ impl FrameSink for Outbox {
     }
 }
 
-
 /// Reads the byte chunks sent on a channel as one stream; it ends when the
 /// channel closes.
 struct ChannelReader {
@@ -315,7 +374,11 @@ struct ChannelReader {
 
 impl ChannelReader {
     fn new(rx: Receiver<Vec<u8>>) -> Self {
-        ChannelReader { rx, chunk: Vec::new(), pos: 0 }
+        ChannelReader {
+            rx,
+            chunk: Vec::new(),
+            pos: 0,
+        }
     }
 }
 
@@ -340,63 +403,81 @@ impl Read for ChannelReader {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use surf_scoter_env_launcher::comm::client_host::{self, Command};
+    use scoter_host::config::LoadOptions;
     use std::io::Cursor;
+    use std::path::Path;
+    use surf_scoter_env_launcher::comm::client_host::{self, Command};
 
     fn os_args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
 
-    fn cli(config: &str, workspace: &str, container: &str) -> Option<Cli> {
-        Some(Cli { config: PathBuf::from(config), workspace: workspace.to_string(), container: container.to_string() })
+    fn cli(universal: &str, container: &str) -> Option<Cli> {
+        Some(Cli {
+            universal: PathBuf::from(universal),
+            container: container.to_string(),
+        })
     }
 
     // ---- parse_args ----
 
     #[test]
     fn args_valid() {
-        let expected = cli("h.yaml", "/ws:/workspace", "dev");
-        assert_eq!(parse_args(os_args(&["--config", "h.yaml", "--workspace", "/ws:/workspace", "dev"])), Ok(expected));
         assert_eq!(
-            parse_args(os_args(&["dev", "--workspace=/ws:/workspace", "--config", "h.yaml"])),
-            Ok(cli("h.yaml", "/ws:/workspace", "dev")),
+            parse_args(os_args(&["--universal", "u.json", "dev"])),
+            Ok(cli("u.json", "dev"))
         );
         assert_eq!(
-            parse_args(os_args(&["--config=/etc/h.yaml", "--workspace", "C:\\ws:/w", "dev"])),
-            Ok(cli("/etc/h.yaml", "C:\\ws:/w", "dev")),
+            parse_args(os_args(&["dev", "--universal=/tmp/u.json"])),
+            Ok(cli("/tmp/u.json", "dev")),
         );
         // Only the first '=' separates the value.
         assert_eq!(
-            parse_args(os_args(&["--config=a=b.yaml", "--workspace=/x=y:/w", "dev"])),
-            Ok(cli("a=b.yaml", "/x=y:/w", "dev")),
+            parse_args(os_args(&["--universal=a=b.json", "dev"])),
+            Ok(cli("a=b.json", "dev")),
         );
     }
 
     #[test]
     fn args_help() {
         assert_eq!(parse_args(os_args(&["-h"])), Ok(None));
-        assert_eq!(parse_args(os_args(&["--config", "x", "--help"])), Ok(None));
+        assert_eq!(
+            parse_args(os_args(&["--universal", "x", "--help"])),
+            Ok(None)
+        );
     }
 
     #[test]
     fn args_errors() {
         let err = |args: &[&str]| parse_args(os_args(args)).unwrap_err();
-        assert_eq!(err(&[]), "--workspace is required");
-        assert_eq!(err(&["--workspace", "/w:/w", "dev"]), "--config is required");
-        assert_eq!(err(&["--config", "h.yaml", "dev"]), "--workspace is required");
-        assert_eq!(err(&["--config", "h.yaml", "--workspace", "/w:/w"]), "a container name is required");
-        assert_eq!(err(&["dev", "--config"]), "--config needs a value");
-        assert_eq!(err(&["dev", "--workspace"]), "--workspace needs a value");
-        assert_eq!(err(&["--config=", "dev"]), "--config needs a value");
-        assert_eq!(err(&["--workspace=", "dev"]), "--workspace needs a value");
-        assert_eq!(err(&["--config", "a", "--config", "b", "dev"]), "--config given more than once");
-        assert_eq!(err(&["--workspace", "/a:/a", "--workspace=/b:/b", "dev"]), "--workspace given more than once");
-        assert_eq!(err(&["--config", "h.yaml", "--workspace", "/w:/w", "dev", "other"]), "unexpected argument 'other'");
-        assert_eq!(err(&["--verbose", "dev"]), "unknown option '--verbose'");
+        assert_eq!(err(&[]), "--universal is required");
+        assert_eq!(err(&["dev"]), "--universal is required");
+        assert_eq!(
+            err(&["--universal", "u.json"]),
+            "a container name is required"
+        );
+        assert_eq!(err(&["dev", "--universal"]), "--universal needs a value");
+        assert_eq!(err(&["--universal=", "dev"]), "--universal needs a value");
+        assert_eq!(
+            err(&["--universal", "a", "--universal", "b", "dev"]),
+            "--universal given more than once"
+        );
+        assert_eq!(
+            err(&["--universal", "u.json", "dev", "other"]),
+            "unexpected argument 'other'"
+        );
+        // The configuration only comes through the universal file now.
+        for old in [
+            "--config",
+            "--user-setup",
+            "--distribution-dir",
+            "--workspace",
+        ] {
+            assert_eq!(err(&[old, "x", "dev"]), format!("unknown option '{old}'"));
+        }
         assert_eq!(err(&["--verbose=1", "dev"]), "unknown option '--verbose=1'");
     }
 
@@ -405,56 +486,120 @@ mod tests {
     fn args_non_utf8() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'd', 0xff]);
-        let with = |extra: Vec<OsString>| {
-            let mut args = os_args(&["--config", "h.yaml"]);
-            args.extend(extra);
-            parse_args(args)
-        };
-        let err = with(vec!["--workspace".into(), "/w:/w".into(), bad.clone()]).unwrap_err();
+        let err = parse_args(vec!["--universal".into(), "u.json".into(), bad.clone()]).unwrap_err();
         assert!(err.starts_with("invalid container name"), "{err}");
-        let err = with(vec!["--workspace".into(), bad.clone(), "dev".into()]).unwrap_err();
-        assert!(err.starts_with("--workspace 'd"), "{err}");
-        assert!(err.ends_with("must be valid UTF-8"), "{err}");
-        // The configuration path doesn't need to be UTF-8.
-        let args = vec!["--config".into(), bad.clone(), "--workspace".into(), "/w:/w".into(), "dev".into()];
-        assert_eq!(parse_args(args).unwrap().unwrap().config, PathBuf::from(bad));
+        // The universal file's path doesn't need to be UTF-8.
+        let args = vec!["--universal".into(), bad.clone(), "dev".into()];
+        assert_eq!(
+            parse_args(args).unwrap().unwrap().universal,
+            PathBuf::from(bad)
+        );
     }
 
-    /// A `--workspace` value whose host side exists.
-    fn workspace_arg() -> String {
-        format!("{}:/workspace", std::env::temp_dir().display())
+    // ---- run ----
+
+    /// A project with a dev container, and a system setup using `/bin/sh`
+    /// as the container tool, in `dir`.
+    struct TestProject {
+        project: PathBuf,
+        setup: PathBuf,
+    }
+
+    impl TestProject {
+        fn new(dir: &Path) -> Self {
+            let write = |name: &str, text: &str| {
+                let path = dir.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, text).unwrap();
+                path
+            };
+            write("env/Dockerfile", "FROM scratch\n");
+            write(
+                "env/dev-env.yaml",
+                "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+            );
+            TestProject {
+                project: write("scoter.yaml", "container:\n  dev-container-path: env\n"),
+                setup: write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n"),
+            }
+        }
+
+        /// The universal configuration file, as `gen-scoter-uc` would write it.
+        fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
+            let options = LoadOptions {
+                project: with_project.then(|| self.project.clone()),
+                user_setup: vec![self.setup.clone()],
+                dev_container_workspace_dir: workspace.map(Path::to_path_buf),
+                no_setup_search: true,
+                ..LoadOptions::default()
+            };
+            let config = config::load_all(&options).unwrap();
+            let json =
+                scoter_host::universal::to_json(&scoter_host::universal::build(&config).unwrap());
+            let path = self.project.with_file_name(format!(
+                "universal-{with_project}-{}.json",
+                workspace.is_some()
+            ));
+            std::fs::write(&path, json).unwrap();
+            path
+        }
+    }
+
+    fn universal_args(universal: &Path, container: &str) -> Vec<OsString> {
+        vec!["--universal".into(), universal.into(), container.into()]
     }
 
     #[test]
-    fn run_usage_and_config_errors() {
-        let ws = workspace_arg();
+    fn run_usage_and_missing_file() {
         assert_eq!(run(os_args(&["--help"])), EXIT_OK);
         assert_eq!(run(os_args(&["dev"])), EXIT_USAGE);
-        assert_eq!(run(os_args(&["--config", "/nonexistent/host.yaml", "--workspace", &ws, "dev"])), EXIT_FAILURE);
+        assert_eq!(
+            run(os_args(&["--universal", "/nonexistent/u.json", "dev"])),
+            EXIT_FAILURE
+        );
     }
 
     #[test]
-    fn run_rejects_bad_workspace() {
-        let args = |ws: &str| os_args(&["--config", "/nonexistent/host.yaml", "--workspace", ws, "dev"]);
-        // Checked before the configuration is read.
-        assert_eq!(run(args("/nonexistent/scoter-ws:/workspace")), EXIT_USAGE);
-        assert_eq!(run(args(&format!("{}:relative", std::env::temp_dir().display()))), EXIT_USAGE);
-        assert_eq!(run(args("no-colon")), EXIT_USAGE);
+    fn run_needs_the_project_and_workspace() {
+        let dir = exec::TempDir::new().unwrap();
+        let test = TestProject::new(dir.path());
+        let ws = std::env::temp_dir();
+        assert_eq!(
+            run(universal_args(&test.universal(false, Some(&ws)), "dev")),
+            EXIT_FAILURE
+        );
+        assert_eq!(
+            run(universal_args(&test.universal(true, None), "dev")),
+            EXIT_FAILURE
+        );
+        // The workspace directory must exist.
+        assert_eq!(
+            run(universal_args(
+                &test.universal(true, Some(&dir.path().join("missing"))),
+                "dev"
+            )),
+            EXIT_FAILURE
+        );
     }
 
     #[test]
     fn run_rejects_bad_container_name() {
-        let path = std::env::temp_dir().join(format!("scoter-host-run-test-{}.yaml", std::process::id()));
-        std::fs::write(&path, "container:\n  command: [docker]\n").unwrap();
-        let ws = workspace_arg();
-        let args = |name: &str| {
-            vec![OsString::from("--config"), path.clone().into(), "--workspace".into(), ws.clone().into(), name.into()]
-        };
-        let code = run(args("--privileged=x"));
-        let code2 = run(args("bad name"));
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(code, EXIT_USAGE);
-        assert_eq!(code2, EXIT_FAILURE);
+        let dir = exec::TempDir::new().unwrap();
+        let test = TestProject::new(dir.path());
+        let universal = test.universal(true, Some(&std::env::temp_dir()));
+        assert_eq!(
+            run(universal_args(&universal, "--privileged=x")),
+            EXIT_USAGE
+        );
+        assert_eq!(run(universal_args(&universal, "bad name")), EXIT_FAILURE);
+    }
+
+    #[test]
+    fn run_reports_a_bad_universal_file() {
+        let dir = exec::TempDir::new().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{\"resolved\": {}}").unwrap();
+        assert_eq!(run(universal_args(&bad, "dev")), EXIT_FAILURE);
     }
 
     // ---- ChannelReader ----
@@ -496,10 +641,13 @@ mod tests {
         let outbox = Outbox { proc: 7, tx };
         outbox.send_frame(b"frame".to_vec()).unwrap();
         outbox.close(3);
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![
-            broker_host::Command::Message((7, b"frame".to_vec())),
-            broker_host::Command::Terminated((7, 3)),
-        ]);
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                broker_host::Command::Message((7, b"frame".to_vec())),
+                broker_host::Command::Terminated((7, 3)),
+            ]
+        );
     }
 
     #[test]
@@ -514,16 +662,25 @@ mod tests {
 
     /// Allows `echo` with one or two arguments.
     fn test_settings() -> Settings {
-        let commands = config::parse(concat!(
-            "container:\n  command: [docker]\n",
-            "commands:\n",
-            "  - {command: echo, args: [{any: {}}]}\n",
-            "  - {command: echo, args: [{any: {}}, {any: {}}]}\n",
-        ))
+        let commands = config::project::parse(
+            concat!(
+                "container:\n  dev-container: dev-env\n",
+                "commands:\n",
+                "  - {command: echo, args: [{any: {}}]}\n",
+                "  - {command: echo, args: [{any: {}}, {any: {}}]}\n",
+            ),
+            std::path::Path::new("/project/scoter.yaml"),
+        )
         .unwrap()
         .commands;
-        let workspace = Workspace { host: std::env::temp_dir(), container: "/workspace".to_string() };
-        Settings { commands, workspace }
+        let workspace = Workspace {
+            host: std::env::temp_dir(),
+            container: "/workspace".to_string(),
+        };
+        Settings {
+            commands,
+            workspace,
+        }
     }
 
     fn invocation(args: &[&str]) -> Invocation {
@@ -562,23 +719,43 @@ mod tests {
     #[test]
     fn handle_denied_request() {
         let (tx, rx) = mpsc::channel();
-        let code = handle_process(0, Cursor::new(request_bytes(&["docker", "ps"])), &Outbox { proc: 0, tx }, &test_settings());
+        let code = handle_process(
+            0,
+            Cursor::new(request_bytes(&["docker", "ps"])),
+            &Outbox { proc: 0, tx },
+            &test_settings(),
+        );
         assert_eq!(code, exec::EXIT_DENIED);
-        assert_eq!(client_commands(&rx), vec![
-            Command::Stderr(b"scoter-host: 'docker' is not allowed to run on the host\n".to_vec()),
-            Command::ExitCode(exec::EXIT_DENIED),
-        ]);
+        assert_eq!(
+            client_commands(&rx),
+            vec![
+                Command::Stderr(
+                    b"scoter-host: 'docker' is not allowed to run on the host\n".to_vec()
+                ),
+                Command::ExitCode(exec::EXIT_DENIED),
+            ]
+        );
     }
 
     #[test]
     fn handle_denied_arguments() {
         let (tx, rx) = mpsc::channel();
-        let code = handle_process(0, Cursor::new(request_bytes(&["echo", "a", "b", "c"])), &Outbox { proc: 0, tx }, &test_settings());
+        let code = handle_process(
+            0,
+            Cursor::new(request_bytes(&["echo", "a", "b", "c"])),
+            &Outbox { proc: 0, tx },
+            &test_settings(),
+        );
         assert_eq!(code, exec::EXIT_DENIED);
-        assert_eq!(client_commands(&rx), vec![
-            Command::Stderr(b"scoter-host: 'echo' is not allowed with these arguments\n".to_vec()),
-            Command::ExitCode(exec::EXIT_DENIED),
-        ]);
+        assert_eq!(
+            client_commands(&rx),
+            vec![
+                Command::Stderr(
+                    b"scoter-host: 'echo' is not allowed with these arguments\n".to_vec()
+                ),
+                Command::ExitCode(exec::EXIT_DENIED),
+            ]
+        );
     }
 
     #[test]
@@ -586,7 +763,15 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut partial = request_bytes(&["echo"]);
         partial.truncate(3);
-        assert_eq!(handle_process(0, Cursor::new(partial), &Outbox { proc: 0, tx }, &test_settings()), EXIT_FAILURE);
+        assert_eq!(
+            handle_process(
+                0,
+                Cursor::new(partial),
+                &Outbox { proc: 0, tx },
+                &test_settings()
+            ),
+            EXIT_FAILURE
+        );
         assert!(client_commands(&rx).is_empty());
     }
 
@@ -595,9 +780,19 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         // A cwd that isn't UTF-8.
         let bytes = vec![0, 0, 0, 1, 0xff];
-        assert_eq!(handle_process(0, Cursor::new(bytes), &Outbox { proc: 0, tx }, &test_settings()), EXIT_FAILURE);
+        assert_eq!(
+            handle_process(
+                0,
+                Cursor::new(bytes),
+                &Outbox { proc: 0, tx },
+                &test_settings()
+            ),
+            EXIT_FAILURE
+        );
         let cmds = client_commands(&rx);
-        assert!(matches!(&cmds[0], Command::Stderr(m) if m.starts_with(b"scoter-host: malformed request")));
+        assert!(
+            matches!(&cmds[0], Command::Stderr(m) if m.starts_with(b"scoter-host: malformed request"))
+        );
         assert_eq!(cmds[1], Command::ExitCode(EXIT_FAILURE));
     }
 
@@ -608,14 +803,19 @@ mod tests {
         // The client's input stays open while it waits for the exit code;
         // closing it would mean the client left, which kills the process.
         let (input, mut client) = io::pipe().unwrap();
-        client.write_all(&request_bytes(&["/usr/local/bin/echo", "hi", "there"])).unwrap();
+        client
+            .write_all(&request_bytes(&["/usr/local/bin/echo", "hi", "there"]))
+            .unwrap();
         let code = handle_process(0, input, &Outbox { proc: 0, tx }, &test_settings());
         drop(client);
         assert_eq!(code, 0);
-        assert_eq!(client_commands(&rx), vec![
-            Command::Stdout(b"hi there\n".to_vec()),
-            Command::ExitCode(0),
-        ]);
+        assert_eq!(
+            client_commands(&rx),
+            vec![
+                Command::Stdout(b"hi there\n".to_vec()),
+                Command::ExitCode(0),
+            ]
+        );
     }
 
     // ---- serve ----
@@ -631,8 +831,13 @@ mod tests {
         fn start() -> Self {
             let (host_in, to_host) = io::pipe().unwrap();
             let (from_host, host_out) = io::pipe().unwrap();
-            let serving = thread::spawn(move || serve(host_in, host_out, Arc::new(test_settings())));
-            FakeBroker { to_host: Some(to_host), from_host, serving }
+            let serving =
+                thread::spawn(move || serve(host_in, host_out, Arc::new(test_settings())));
+            FakeBroker {
+                to_host: Some(to_host),
+                from_host,
+                serving,
+            }
         }
 
         fn send(&mut self, cmd: broker_host::Command) {
@@ -695,7 +900,13 @@ mod tests {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Started(0));
         broker.send_bytes_split(0, &request_bytes(&["echo", "a", "b"]));
-        assert_eq!(broker.finish(0), (vec![Command::Stdout(b"a b\n".to_vec()), Command::ExitCode(0)], 0));
+        assert_eq!(
+            broker.finish(0),
+            (
+                vec![Command::Stdout(b"a b\n".to_vec()), Command::ExitCode(0)],
+                0
+            )
+        );
         broker.close().unwrap();
     }
 
@@ -703,7 +914,10 @@ mod tests {
     fn serve_denies_request() {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Started(4));
-        broker.send(broker_host::Command::Message((4, request_bytes(&["rm", "-rf", "/"]))));
+        broker.send(broker_host::Command::Message((
+            4,
+            request_bytes(&["rm", "-rf", "/"]),
+        )));
         let (cmds, code) = broker.finish(4);
         assert_eq!(code, exec::EXIT_DENIED);
         assert_eq!(cmds.last(), Some(&Command::ExitCode(exec::EXIT_DENIED)));
@@ -730,8 +944,12 @@ mod tests {
         let mut per_proc: HashMap<ProcessId, (Vec<u8>, Option<i32>)> = HashMap::new();
         while per_proc.values().filter(|(_, code)| code.is_some()).count() < 2 {
             match broker_host::Command::recv(&mut broker.from_host).unwrap() {
-                broker_host::Command::Message((p, data)) => per_proc.entry(p).or_default().0.extend(data),
-                broker_host::Command::Terminated((p, code)) => per_proc.entry(p).or_default().1 = Some(code),
+                broker_host::Command::Message((p, data)) => {
+                    per_proc.entry(p).or_default().0.extend(data)
+                }
+                broker_host::Command::Terminated((p, code)) => {
+                    per_proc.entry(p).or_default().1 = Some(code)
+                }
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -770,7 +988,10 @@ mod tests {
         // Closing finishes the waiting session before serve returns.
         let (result, rest) = broker.close_with_rest();
         result.unwrap();
-        assert_eq!(rest, vec![broker_host::Command::Terminated((0, EXIT_FAILURE))]);
+        assert_eq!(
+            rest,
+            vec![broker_host::Command::Terminated((0, EXIT_FAILURE))]
+        );
     }
 
     #[test]
@@ -784,7 +1005,12 @@ mod tests {
     #[test]
     fn serve_rejects_truncated_broker_stream() {
         let mut broker = FakeBroker::start();
-        broker.to_host.as_mut().unwrap().write_all(&[0, 0, 0]).unwrap();
+        broker
+            .to_host
+            .as_mut()
+            .unwrap()
+            .write_all(&[0, 0, 0])
+            .unwrap();
         let err = broker.close().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
     }

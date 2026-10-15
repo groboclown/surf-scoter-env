@@ -690,10 +690,7 @@ mod tests {
     fn host_close_while_client_still_sending() {
         let (data, rx, mut client, handle) = start_client();
         client.write_all(b"early").unwrap();
-        assert_eq!(
-            recv_timeout(&rx),
-            Command::Message((0, b"early".to_vec()))
-        );
+        assert_eq!(recv_timeout(&rx), Command::Message((0, b"early".to_vec())));
         lock(&data).host_closed(0);
         assert!(read_to_end(&client).is_empty());
         handle.join().unwrap();
@@ -706,10 +703,7 @@ mod tests {
     fn client_vanishes_without_reading() {
         let (data, rx, client, handle) = start_client();
         drop(client);
-        assert_eq!(
-            recv_timeout(&rx),
-            Command::Terminated((0, CLIENT_CLOSED))
-        );
+        assert_eq!(recv_timeout(&rx), Command::Terminated((0, CLIENT_CLOSED)));
         handle.join().unwrap();
         // Late host messages for the process are ignored.
         lock(&data).host_message(0, b"x".to_vec());

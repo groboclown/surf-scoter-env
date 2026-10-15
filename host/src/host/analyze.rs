@@ -16,8 +16,10 @@
 //! For an entry with a `cwd` rule, the process runs in the resolved host
 //! directory matching the client's working directory.  Otherwise it runs in a
 //! temporary directory.  `path` arguments are passed as resolved host paths
-//! (or temporary files).  The client's environment is not used: the process
-//! gets the host's environment (see `exec`).
+//! (or temporary files).  The process's environment comes from the matching
+//! entry's `env_plan`: only the container variables it allows come through,
+//! and a container variable matching one of its `error` patterns refuses the
+//! request (see `config::environment`).
 
 use std::cell::OnceCell;
 use std::fs;
@@ -26,9 +28,10 @@ use std::path::{Component, Path, PathBuf};
 
 use surf_scoter_env_launcher::comm::client_host::Invocation;
 
-use super::config::{Commands, MatchOptions, PathOptions, Token, Within, Workspace};
-use super::exec::{Arg, ExecRequest};
+use scoter_host::config::project::{Commands, MatchOptions, PathOptions, Token, Within};
 
+use super::exec::{Arg, ExecRequest};
+use super::workspace::Workspace;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
@@ -38,13 +41,21 @@ pub(crate) enum Decision {
 }
 
 /// `workspace` is how container paths map to host paths.
-pub(crate) fn analyze(invocation: &Invocation, commands: &Commands, workspace: &Workspace) -> Decision {
+pub(crate) fn analyze(
+    invocation: &Invocation,
+    commands: &Commands,
+    workspace: &Workspace,
+) -> Decision {
     let Some(arg0) = invocation.args.first() else {
         return Decision::Deny("no command given".to_string());
     };
     let name = command_name(arg0);
     let args = &invocation.args[1..];
-    let request = Request { cwd: &invocation.cwd, workspace, client_dir: OnceCell::new() };
+    let request = Request {
+        cwd: &invocation.cwd,
+        workspace,
+        client_dir: OnceCell::new(),
+    };
     let mut known = false;
     let mut args_matched = false;
     for rule in commands.iter().filter(|rule| rule.command == name) {
@@ -56,14 +67,33 @@ pub(crate) fn analyze(invocation: &Invocation, commands: &Commands, workspace: &
         let cwd = match &rule.cwd {
             None => None,
             Some(cwd_rule) => match request.client_dir() {
-                Some(dir) if cwd_rule.allowed_workspace_dirs.iter().any(|pattern| pattern.matches(&dir.names())) => {
+                Some(dir)
+                    if cwd_rule
+                        .allowed_workspace_dirs
+                        .iter()
+                        .any(|pattern| pattern.matches(&dir.names())) =>
+                {
                     Some(dir.path.clone())
                 }
                 _ => continue,
             },
         };
+        if rule.unavailable {
+            return Decision::Deny(format!(
+                "'{name}' is not available: its program wasn't found on the host when the configuration was made"
+            ));
+        }
+        let envs = match rule.env_plan.apply(&invocation.envs) {
+            Ok(envs) => envs,
+            Err(reason) => return Decision::Deny(reason),
+        };
         let program = rule.program.clone().unwrap_or_else(|| name.to_string());
-        return Decision::Allow(ExecRequest { program, args, cwd });
+        return Decision::Allow(ExecRequest {
+            program,
+            args,
+            cwd,
+            envs,
+        });
     }
     if args_matched {
         Decision::Deny(format!("'{name}' is not allowed to run in this directory"))
@@ -86,7 +116,9 @@ struct Request<'a> {
 impl Request<'_> {
     /// The client's working directory on the host; `None` when it isn't in the workspace.
     fn client_dir(&self) -> Option<&HostPath> {
-        self.client_dir.get_or_init(|| resolve_dir(self.cwd, self.workspace)).as_ref()
+        self.client_dir
+            .get_or_init(|| resolve_dir(self.cwd, self.workspace))
+            .as_ref()
     }
 }
 
@@ -140,7 +172,10 @@ fn resolve(container_path: &str, workspace: &Workspace, may_be_missing: bool) ->
             // Only the last name may be missing, and it must be a plain name.
             let name = names.last()?;
             let mut parts = Path::new(name).components();
-            if !matches!((parts.next(), parts.next()), (Some(Component::Normal(_)), None)) {
+            if !matches!(
+                (parts.next(), parts.next()),
+                (Some(Component::Normal(_)), None)
+            ) {
                 return None;
             }
             let parent = fs::canonicalize(host.parent()?).ok()?;
@@ -161,7 +196,10 @@ fn resolve(container_path: &str, workspace: &Workspace, may_be_missing: bool) ->
         .components()
         .map(|c| c.as_os_str().to_str().map(str::to_string))
         .collect::<Option<Vec<_>>>()?;
-    Some(HostPath { path, below_workspace })
+    Some(HostPath {
+        path,
+        below_workspace,
+    })
 }
 
 /// The command a client asked for: the file name of its argv[0].  The client
@@ -175,7 +213,11 @@ fn match_args(pattern: &[Token], args: &[String], request: &Request) -> Option<V
     if pattern.len() != args.len() {
         return None;
     }
-    pattern.iter().zip(args).map(|(token, arg)| match_token(token, arg, request)).collect()
+    pattern
+        .iter()
+        .zip(args)
+        .map(|(token, arg)| match_token(token, arg, request))
+        .collect()
 }
 
 fn match_token(token: &Token, value: &str, request: &Request) -> Option<Arg> {
@@ -208,7 +250,11 @@ fn match_path(options: &PathOptions, value: &str, request: &Request) -> Option<A
         return None;
     }
     if options.within == Within::Temp {
-        let name = if options.keep_name { Some(temp_file_name(value)?.to_string()) } else { None };
+        let name = if options.keep_name {
+            Some(temp_file_name(value)?.to_string())
+        } else {
+            None
+        };
         return Some(Arg::TempFile { name });
     }
     let container_path = if value.starts_with('/') {
@@ -222,7 +268,10 @@ fn match_path(options: &PathOptions, value: &str, request: &Request) -> Option<A
     let allowed = match options.within {
         // At or below: `starts_with` compares whole names.
         Within::Cwd => resolved.path.starts_with(&request.client_dir()?.path),
-        Within::Workspace => options.allowed.iter().any(|pattern| pattern.matches(&resolved.names())),
+        Within::Workspace => options
+            .allowed
+            .iter()
+            .any(|pattern| pattern.matches(&resolved.names())),
         Within::Temp => false,
     };
     allowed.then_some(Arg::HostPath(resolved.path))
@@ -235,7 +284,10 @@ fn temp_file_name(value: &str) -> Option<&str> {
         return None;
     }
     // Characters Windows refuses in names (including both separators), and control characters.
-    if name.chars().any(|c| c.is_control() || matches!(c, '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')) {
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
         return None;
     }
     // Windows drops these, so `nul.` or `con ` would name a device.
@@ -243,7 +295,12 @@ fn temp_file_name(value: &str) -> Option<&str> {
         return None;
     }
     // Windows device names, with or without an extension.
-    let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))
             && stem.len() == 4
@@ -254,12 +311,14 @@ fn temp_file_name(value: &str) -> Option<&str> {
     Some(name)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::config;
     use crate::host::exec::TempDir;
+    use scoter_host::config::environment::EnvPlan;
+    use scoter_host::config::project;
+    use std::collections::BTreeMap;
+    use std::path::Path;
 
     /// The rules from the configuration example, plus a few for edge cases.
     fn commands() -> Commands {
@@ -278,12 +337,20 @@ mod tests {
     }
 
     fn workspace() -> Workspace {
-        Workspace { host: std::path::PathBuf::from("/home/me/ws"), container: "/workspace".to_string() }
+        Workspace {
+            host: std::path::PathBuf::from("/home/me/ws"),
+            container: "/workspace".to_string(),
+        }
     }
 
     /// Parse the entries under `commands:`.
     fn parse_commands(entries: &str) -> Commands {
-        config::parse(&format!("container:\n  command: [docker]\ncommands:\n{entries}")).unwrap().commands
+        project::parse(
+            &format!("container:\n  dev-container: dev-env\ncommands:\n{entries}"),
+            Path::new("/project/scoter.yaml"),
+        )
+        .unwrap()
+        .commands
     }
 
     fn invocation(args: &[&str]) -> Invocation {
@@ -292,6 +359,55 @@ mod tests {
             args: args.iter().map(|s| s.to_string()).collect(),
             envs: vec![("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string())],
         }
+    }
+
+    #[test]
+    fn environment_from_the_plan() {
+        let mut commands = parse_commands("  - command: aws\n    args: [s3, ls]\n");
+        commands[0].env_plan = EnvPlan {
+            allow: vec!["AWS_*".to_string()],
+            drop: vec!["AWS_SESSION_TOKEN".to_string()],
+            error: vec!["AWS_SECRET_*".to_string()],
+            set: BTreeMap::from([("HOME".to_string(), "/home/me".to_string())]),
+            ..EnvPlan::default()
+        };
+        let mut inv = invocation(&["aws", "s3", "ls"]);
+        inv.envs.extend([
+            ("AWS_PROFILE".to_string(), "dev".to_string()),
+            ("AWS_SESSION_TOKEN".to_string(), "t".to_string()),
+        ]);
+        match analyze(&inv, &commands, &workspace()) {
+            Decision::Allow(req) => assert_eq!(
+                req.envs,
+                BTreeMap::from([
+                    ("AWS_PROFILE".to_string(), "dev".to_string()),
+                    ("HOME".to_string(), "/home/me".to_string()),
+                ])
+            ),
+            other => panic!("expected allow, got {other:?}"),
+        }
+        inv.envs
+            .push(("AWS_SECRET_ACCESS_KEY".to_string(), "s".to_string()));
+        assert_eq!(
+            analyze(&inv, &commands, &workspace()),
+            Decision::Deny(
+                "the container may not set the environment variable AWS_SECRET_ACCESS_KEY (it matches 'AWS_SECRET_*')"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn unavailable_program_is_refused() {
+        let mut commands = parse_commands("  - command: aws\n    args: [s3, ls]\n");
+        commands[0].unavailable = true;
+        assert_eq!(
+            analyze(&invocation(&["aws", "s3", "ls"]), &commands, &workspace()),
+            Decision::Deny(
+                "'aws' is not available: its program wasn't found on the host when the configuration was made"
+                    .to_string()
+            )
+        );
     }
 
     /// Decide in a fresh workspace, with the client at the workspace root.
@@ -312,7 +428,10 @@ mod tests {
     }
 
     fn assert_denied(args: &[&str]) {
-        assert!(matches!(decide(args), Decision::Deny(_)), "{args:?} should be denied");
+        assert!(
+            matches!(decide(args), Decision::Deny(_)),
+            "{args:?} should be denied"
+        );
     }
 
     fn plain(s: &str) -> Arg {
@@ -329,18 +448,39 @@ mod tests {
     fn s3_copy_from_bucket_to_container() {
         let ws = TestWorkspace::new();
         let decide = |args: &[&str]| analyze(&invocation(args), &commands(), &ws.workspace);
-        assert_eq!(decide(&["aws", "s3", "cp", "s3://some-name/dir/file.txt", "/workspace/file.txt"]), Decision::Allow(ExecRequest {
-            program: "aws".to_string(),
-            args: vec![plain("s3"), plain("cp"), plain("s3://some-name/dir/file.txt"), host_path(ws.host("file.txt"))],
-            cwd: None,
-        }));
+        assert_eq!(
+            decide(&[
+                "aws",
+                "s3",
+                "cp",
+                "s3://some-name/dir/file.txt",
+                "/workspace/file.txt"
+            ]),
+            Decision::Allow(ExecRequest {
+                program: "aws".to_string(),
+                args: vec![
+                    plain("s3"),
+                    plain("cp"),
+                    plain("s3://some-name/dir/file.txt"),
+                    host_path(ws.host("file.txt"))
+                ],
+                cwd: None,
+                envs: BTreeMap::new(),
+            })
+        );
         // Relative targets are resolved from the client's directory.
         let target = |args: &[&str]| match decide(args) {
             Decision::Allow(req) => req.args[3].clone(),
             other => panic!("{other:?}"),
         };
-        assert_eq!(target(&["aws", "s3", "cp", "s3://some-name/k", "out"]), host_path(ws.host("out")));
-        assert_eq!(target(&["aws", "s3", "cp", "s3://some-name/k", "services"]), host_path(ws.host("services")));
+        assert_eq!(
+            target(&["aws", "s3", "cp", "s3://some-name/k", "out"]),
+            host_path(ws.host("out"))
+        );
+        assert_eq!(
+            target(&["aws", "s3", "cp", "s3://some-name/k", "services"]),
+            host_path(ws.host("services"))
+        );
         // Any key, including odd ones; S3 keys are opaque.
         target(&["aws", "s3", "cp", "s3://some-name/../x", "out"]);
         target(&["aws", "s3", "cp", "s3://some-name/-k", "out"]);
@@ -362,7 +502,15 @@ mod tests {
         assert_denied(&["aws", "s3", "cp", "s3://some-name/k", ""]);
         // Extra or missing arguments.
         assert_denied(&["aws", "s3", "cp", "s3://some-name/k", "out", "--recursive"]);
-        assert_denied(&["aws", "--profile", "x", "s3", "cp", "s3://some-name/k", "out"]);
+        assert_denied(&[
+            "aws",
+            "--profile",
+            "x",
+            "s3",
+            "cp",
+            "s3://some-name/k",
+            "out",
+        ]);
         assert_denied(&["aws", "s3", "cp", "s3://some-name/k"]);
         // Other subcommands.
         assert_denied(&["aws", "s3", "rm", "s3://some-name/k", "out"]);
@@ -371,20 +519,48 @@ mod tests {
 
     #[test]
     fn codebuild_start_build() {
-        assert_eq!(allowed(&["aws", "codebuild", "start-build", "--project-name", "my-project"]), vec![
-            plain("codebuild"),
-            plain("start-build"),
-            plain("--project-name"),
-            plain("my-project"),
-        ]);
+        assert_eq!(
+            allowed(&[
+                "aws",
+                "codebuild",
+                "start-build",
+                "--project-name",
+                "my-project"
+            ]),
+            vec![
+                plain("codebuild"),
+                plain("start-build"),
+                plain("--project-name"),
+                plain("my-project"),
+            ]
+        );
     }
 
     #[test]
     fn codebuild_denied_forms() {
-        assert_denied(&["aws", "codebuild", "start-build", "--project-name", "--debug"]);
+        assert_denied(&[
+            "aws",
+            "codebuild",
+            "start-build",
+            "--project-name",
+            "--debug",
+        ]);
         assert_denied(&["aws", "codebuild", "start-build", "--project-name", ""]);
-        assert_denied(&["aws", "codebuild", "start-build", "--project-name=my-project"]);
-        assert_denied(&["aws", "codebuild", "start-build", "--project-name", "p", "--source-version", "x"]);
+        assert_denied(&[
+            "aws",
+            "codebuild",
+            "start-build",
+            "--project-name=my-project",
+        ]);
+        assert_denied(&[
+            "aws",
+            "codebuild",
+            "start-build",
+            "--project-name",
+            "p",
+            "--source-version",
+            "x",
+        ]);
         assert_denied(&["aws", "codebuild", "stop-build", "--project-name", "p"]);
         assert_denied(&["aws", "codebuild", "start-build", "--projectname", "p"]);
         assert_denied(&["aws"]);
@@ -394,14 +570,20 @@ mod tests {
 
     #[test]
     fn leading_dash_is_opt_in() {
-        assert_eq!(allowed(&["tool", "dash", "--verbose"]), vec![plain("dash"), plain("--verbose")]);
+        assert_eq!(
+            allowed(&["tool", "dash", "--verbose"]),
+            vec![plain("dash"), plain("--verbose")]
+        );
         allowed(&["tool", "dash", "-"]);
         assert_denied(&["tool", "dash", ""]);
     }
 
     #[test]
     fn empty_is_opt_in() {
-        assert_eq!(allowed(&["tool", "empty", ""]), vec![plain("empty"), plain("")]);
+        assert_eq!(
+            allowed(&["tool", "empty", ""]),
+            vec![plain("empty"), plain("")]
+        );
         assert_denied(&["tool", "empty", "-x"]);
         assert_eq!(allowed(&["tool", "prefix-empty", "id="])[1], plain("id="));
         allowed(&["tool", "prefix-empty", "id=7"]);
@@ -433,20 +615,40 @@ mod tests {
 
     #[test]
     fn denies_unlisted_commands() {
-        assert_eq!(decide(&["docker", "ps"]), Decision::Deny("'docker' is not allowed to run on the host".to_string()));
-        assert_eq!(decide(&["scoter-client"]), Decision::Deny("'scoter-client' is not allowed to run on the host".to_string()));
+        assert_eq!(
+            decide(&["docker", "ps"]),
+            Decision::Deny("'docker' is not allowed to run on the host".to_string())
+        );
+        assert_eq!(
+            decide(&["scoter-client"]),
+            Decision::Deny("'scoter-client' is not allowed to run on the host".to_string())
+        );
         // Nothing is allowed without configuration.
-        assert!(matches!(analyze(&invocation(&["aws"]), &Commands::new(), &workspace()), Decision::Deny(_)));
+        assert!(matches!(
+            analyze(&invocation(&["aws"]), &Commands::new(), &workspace()),
+            Decision::Deny(_)
+        ));
     }
 
     #[test]
     fn mismatch_reason() {
-        assert_eq!(decide(&["aws", "s3", "ls"]), Decision::Deny("'aws' is not allowed with these arguments".to_string()));
+        assert_eq!(
+            decide(&["aws", "s3", "ls"]),
+            Decision::Deny("'aws' is not allowed with these arguments".to_string())
+        );
     }
 
     #[test]
     fn denies_lookalike_command_names() {
-        for arg0 in ["AWS", "aws.exe", "aws ", "/usr/bin/aws/", "", "xaws", "aws/x"] {
+        for arg0 in [
+            "AWS",
+            "aws.exe",
+            "aws ",
+            "/usr/bin/aws/",
+            "",
+            "xaws",
+            "aws/x",
+        ] {
             assert_denied(&[arg0, "codebuild", "start-build", "--project-name", "p"]);
         }
     }
@@ -470,11 +672,15 @@ mod tests {
             "  - {command: cp, program: /bin/first, args: [{any: {}}]}\n",
             "  - {command: cp, program: /bin/second, args: [{path: {within: cwd}}]}\n",
         ));
-        assert_eq!(analyze(&invocation(&["cp", "x"]), &commands, &workspace()), Decision::Allow(ExecRequest {
-            program: "/bin/first".to_string(),
-            args: vec![plain("x")],
-            cwd: None,
-        }));
+        assert_eq!(
+            analyze(&invocation(&["cp", "x"]), &commands, &workspace()),
+            Decision::Allow(ExecRequest {
+                program: "/bin/first".to_string(),
+                args: vec![plain("x")],
+                cwd: None,
+                envs: BTreeMap::new(),
+            })
+        );
     }
 
     #[test]
@@ -519,8 +725,14 @@ mod tests {
                 fs::create_dir_all(dir.path().join(sub)).unwrap();
             }
             fs::write(dir.path().join("notes.txt"), b"").unwrap();
-            let workspace = Workspace { host: dir.path().canonicalize().unwrap(), container: "/workspace".to_string() };
-            TestWorkspace { _dir: dir, workspace }
+            let workspace = Workspace {
+                host: dir.path().canonicalize().unwrap(),
+                container: "/workspace".to_string(),
+            };
+            TestWorkspace {
+                _dir: dir,
+                workspace,
+            }
         }
 
         fn host(&self, sub: &str) -> PathBuf {
@@ -563,22 +775,41 @@ mod tests {
     fn cwd_allowed_runs_in_host_directory() {
         let ws = TestWorkspace::new();
         let commands = compose_commands();
-        assert_eq!(ws.decide(&commands, "/workspace/services/api"), Decision::Allow(ExecRequest {
-            program: "docker".to_string(),
-            args: vec![plain("compose"), plain("up")],
-            cwd: Some(ws.host("services/api")),
-        }));
-        assert_eq!(ws.cwd_of(&commands, "/workspace/infra"), Some(ws.host("infra")));
-        assert_eq!(ws.cwd_of(&commands, "/workspace/infra/a/b"), Some(ws.host("infra/a/b")));
+        assert_eq!(
+            ws.decide(&commands, "/workspace/services/api"),
+            Decision::Allow(ExecRequest {
+                program: "docker".to_string(),
+                args: vec![plain("compose"), plain("up")],
+                cwd: Some(ws.host("services/api")),
+                envs: BTreeMap::new(),
+            })
+        );
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/infra"),
+            Some(ws.host("infra"))
+        );
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/infra/a/b"),
+            Some(ws.host("infra/a/b"))
+        );
     }
 
     #[test]
     fn cwd_client_path_is_normalized() {
         let ws = TestWorkspace::new();
         let commands = compose_commands();
-        assert_eq!(ws.cwd_of(&commands, "/workspace/services/./api/"), Some(ws.host("services/api")));
-        assert_eq!(ws.cwd_of(&commands, "/workspace//services//web"), Some(ws.host("services/web")));
-        assert_eq!(ws.cwd_of(&commands, "/workspace/infra/a/../a"), Some(ws.host("infra/a")));
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/services/./api/"),
+            Some(ws.host("services/api"))
+        );
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace//services//web"),
+            Some(ws.host("services/web"))
+        );
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/infra/a/../a"),
+            Some(ws.host("infra/a"))
+        );
     }
 
     #[test]
@@ -620,7 +851,10 @@ mod tests {
             "  - {command: docker, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
             "  - {command: docker, args: [compose, up]}\n",
         ));
-        assert_eq!(ws.cwd_of(&commands, "/workspace/services/api"), Some(ws.host("services/api")));
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/services/api"),
+            Some(ws.host("services/api"))
+        );
         // Falls through to the entry without `cwd`: a temporary directory.
         assert_eq!(ws.cwd_of(&commands, "/workspace"), None);
         assert_eq!(ws.cwd_of(&commands, "/elsewhere"), None);
@@ -665,12 +899,18 @@ mod tests {
     fn workspace_mount_with_trailing_name_overlap() {
         // The mount itself may be nested, e.g. /home/dev/ws.
         let ws = TestWorkspace::new();
-        let workspace = Workspace { host: ws.workspace.host.clone(), container: "/home/dev/ws".to_string() };
+        let workspace = Workspace {
+            host: ws.workspace.host.clone(),
+            container: "/home/dev/ws".to_string(),
+        };
         assert_eq!(
             resolve_dir("/home/dev/ws/services/api", &workspace).map(|d| d.path),
             Some(ws.host("services/api")),
         );
-        assert_eq!(resolve_dir("/home/dev/ws", &workspace).map(|d| d.below_workspace), Some(vec![]));
+        assert_eq!(
+            resolve_dir("/home/dev/ws", &workspace).map(|d| d.below_workspace),
+            Some(vec![])
+        );
         assert_eq!(resolve_dir("/home/dev/wsx", &workspace), None);
         assert_eq!(resolve_dir("/home/dev", &workspace), None);
     }
@@ -698,7 +938,10 @@ mod tests {
         // services/link -> infra/a: the name matches `services/*`, but the
         // target is what's checked (and it matches `infra/**`).
         std::os::unix::fs::symlink(ws.host("infra/a"), ws.host("services/link")).unwrap();
-        assert_eq!(ws.cwd_of(&commands, "/workspace/services/link"), Some(ws.host("infra/a")));
+        assert_eq!(
+            ws.cwd_of(&commands, "/workspace/services/link"),
+            Some(ws.host("infra/a"))
+        );
         // infra/up -> the workspace root, which no pattern allows.
         std::os::unix::fs::symlink(&ws.workspace.host, ws.host("infra/up")).unwrap();
         ws.assert_denied_in(&commands, "/workspace/infra/up");
@@ -748,10 +991,22 @@ mod tests {
         // At or below the client's directory, existing or not.
         assert_eq!(ws.path_arg(cwd, "cwd", "."), ws.host_arg("services"));
         assert_eq!(ws.path_arg(cwd, "cwd", "api"), ws.host_arg("services/api"));
-        assert_eq!(ws.path_arg(cwd, "cwd", "./api/"), ws.host_arg("services/api"));
-        assert_eq!(ws.path_arg(cwd, "cwd", "api/new.txt"), ws.host_arg("services/api/new.txt"));
-        assert_eq!(ws.path_arg(cwd, "cwd", "/workspace/services/web"), ws.host_arg("services/web"));
-        assert_eq!(ws.path_arg(cwd, "cwd", "api/../web"), ws.host_arg("services/web"));
+        assert_eq!(
+            ws.path_arg(cwd, "cwd", "./api/"),
+            ws.host_arg("services/api")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "cwd", "api/new.txt"),
+            ws.host_arg("services/api/new.txt")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "cwd", "/workspace/services/web"),
+            ws.host_arg("services/web")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "cwd", "api/../web"),
+            ws.host_arg("services/web")
+        );
         // Above or beside it.
         assert_eq!(ws.path_arg(cwd, "cwd", ".."), None);
         assert_eq!(ws.path_arg(cwd, "cwd", "../notes.txt"), None);
@@ -766,10 +1021,16 @@ mod tests {
     fn path_within_cwd_needs_client_in_workspace() {
         let ws = TestWorkspace::new();
         assert_eq!(ws.path_arg("/", "cwd", "workspace/notes.txt"), None);
-        assert_eq!(ws.path_arg("/home/dev", "cwd", "/workspace/notes.txt"), None);
+        assert_eq!(
+            ws.path_arg("/home/dev", "cwd", "/workspace/notes.txt"),
+            None
+        );
         assert_eq!(ws.path_arg("relative", "cwd", "notes.txt"), None);
         // The workspace root itself is fine.
-        assert_eq!(ws.path_arg("/workspace", "cwd", "notes.txt"), ws.host_arg("notes.txt"));
+        assert_eq!(
+            ws.path_arg("/workspace", "cwd", "notes.txt"),
+            ws.host_arg("notes.txt")
+        );
     }
 
     #[test]
@@ -777,16 +1038,28 @@ mod tests {
         let ws = TestWorkspace::new();
         let cwd = "/workspace/services";
         assert_eq!(ws.path_arg(cwd, "ws", "../infra"), ws.host_arg("infra"));
-        assert_eq!(ws.path_arg(cwd, "ws", "/workspace/infra/a/b/out.log"), ws.host_arg("infra/a/b/out.log"));
-        assert_eq!(ws.path_arg(cwd, "ws", "api/config.json"), ws.host_arg("services/api/config.json"));
-        assert_eq!(ws.path_arg(cwd, "ws", "../notes.txt"), ws.host_arg("notes.txt"));
+        assert_eq!(
+            ws.path_arg(cwd, "ws", "/workspace/infra/a/b/out.log"),
+            ws.host_arg("infra/a/b/out.log")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "ws", "api/config.json"),
+            ws.host_arg("services/api/config.json")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "ws", "../notes.txt"),
+            ws.host_arg("notes.txt")
+        );
         // Not matching any pattern.
         assert_eq!(ws.path_arg(cwd, "ws", "api"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "api/config.yaml"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "/workspace"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "/etc/hosts"), None);
         // Works wherever the client is, as long as the path is in the workspace.
-        assert_eq!(ws.path_arg("/home/dev", "ws", "/workspace/notes.txt"), ws.host_arg("notes.txt"));
+        assert_eq!(
+            ws.path_arg("/home/dev", "ws", "/workspace/notes.txt"),
+            ws.host_arg("notes.txt")
+        );
     }
 
     #[test]
@@ -805,15 +1078,24 @@ mod tests {
         assert_eq!(ws.path_arg("/workspace", "cwd", ""), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "-"), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "--out"), None);
-        assert_eq!(ws.path_arg("/workspace", "cwd-dash", "-out"), ws.host_arg("-out"));
+        assert_eq!(
+            ws.path_arg("/workspace", "cwd-dash", "-out"),
+            ws.host_arg("-out")
+        );
         assert_eq!(ws.path_arg("/workspace", "temp", "-x"), None);
     }
 
     #[test]
     fn path_container_mount_lookalike() {
         let ws = TestWorkspace::new();
-        assert_eq!(ws.path_arg("/workspace", "cwd", "/workspacex/notes.txt"), None);
-        assert_eq!(ws.path_arg("/workspace", "cwd", "/workspace/../workspace/notes.txt"), None);
+        assert_eq!(
+            ws.path_arg("/workspace", "cwd", "/workspacex/notes.txt"),
+            None
+        );
+        assert_eq!(
+            ws.path_arg("/workspace", "cwd", "/workspace/../workspace/notes.txt"),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -824,7 +1106,11 @@ mod tests {
         let outside = TempDir::new().unwrap();
         fs::write(outside.path().join("secret"), b"").unwrap();
         symlink(outside.path(), ws.host("services/api/escape")).unwrap();
-        symlink(outside.path().join("secret"), ws.host("services/api/secret-link")).unwrap();
+        symlink(
+            outside.path().join("secret"),
+            ws.host("services/api/secret-link"),
+        )
+        .unwrap();
         symlink(ws.host("infra"), ws.host("services/api/to-infra")).unwrap();
         let cwd = "/workspace/services/api";
         // Links that leave the workspace, including new files under them.
@@ -835,7 +1121,10 @@ mod tests {
         // A link to elsewhere in the workspace is judged by its target.
         assert_eq!(ws.path_arg(cwd, "cwd", "to-infra"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "to-infra"), ws.host_arg("infra"));
-        assert_eq!(ws.path_arg(cwd, "ws", "to-infra/a/new.log"), ws.host_arg("infra/a/new.log"));
+        assert_eq!(
+            ws.path_arg(cwd, "ws", "to-infra/a/new.log"),
+            ws.host_arg("infra/a/new.log")
+        );
     }
 
     #[cfg(unix)]
@@ -844,7 +1133,8 @@ mod tests {
         let ws = TestWorkspace::new();
         let outside = TempDir::new().unwrap();
         // Writing to `out.txt` would create the file outside the workspace.
-        std::os::unix::fs::symlink(outside.path().join("created"), ws.host("services/out.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("created"), ws.host("services/out.txt"))
+            .unwrap();
         assert_eq!(ws.path_arg("/workspace/services", "cwd", "out.txt"), None);
         std::os::unix::fs::symlink("/nonexistent/x", ws.host("infra/out.log")).unwrap();
         assert_eq!(ws.path_arg("/workspace", "ws", "infra/out.log"), None);
@@ -863,23 +1153,70 @@ mod tests {
     #[test]
     fn path_within_temp_keeps_name() {
         let ws = TestWorkspace::new();
-        let kept = |name: &str| Some(Arg::TempFile { name: Some(name.to_string()) });
-        assert_eq!(ws.path_arg("/workspace", "temp-name", "out.json"), kept("out.json"));
+        let kept = |name: &str| {
+            Some(Arg::TempFile {
+                name: Some(name.to_string()),
+            })
+        };
+        assert_eq!(
+            ws.path_arg("/workspace", "temp-name", "out.json"),
+            kept("out.json")
+        );
         // Only the file name is used.
-        assert_eq!(ws.path_arg("/workspace", "temp-name", "/etc/ssl/out.pem"), kept("out.pem"));
-        assert_eq!(ws.path_arg("/workspace", "temp-name", "../x/.hidden"), kept(".hidden"));
+        assert_eq!(
+            ws.path_arg("/workspace", "temp-name", "/etc/ssl/out.pem"),
+            kept("out.pem")
+        );
+        assert_eq!(
+            ws.path_arg("/workspace", "temp-name", "../x/.hidden"),
+            kept(".hidden")
+        );
         assert_eq!(ws.path_arg("/workspace", "temp-name", "dir/"), None);
     }
 
     #[test]
     fn temp_file_names() {
-        for good in ["out.txt", "a", ".env", "file.tar.gz", "console", "nul-device", "com10", "lpt", "ünïcødé"] {
+        for good in [
+            "out.txt",
+            "a",
+            ".env",
+            "file.tar.gz",
+            "console",
+            "nul-device",
+            "com10",
+            "lpt",
+            "ünïcødé",
+        ] {
             assert_eq!(temp_file_name(good), Some(good), "{good}");
         }
         for bad in [
-            "", ".", "..", "a\\b", "a:b", "a<b", "a>b", "a\"b", "a|b", "a?b", "a*b", "a\nb", "a\u{7f}b",
-            "trailing.", "trailing ", "NUL", "nul", "Nul.txt", "nul .txt", "CON", "con.json", "PRN", "AUX.x",
-            "COM1", "com9.log", "LPT1", "lpt9",
+            "",
+            ".",
+            "..",
+            "a\\b",
+            "a:b",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "a\nb",
+            "a\u{7f}b",
+            "trailing.",
+            "trailing ",
+            "NUL",
+            "nul",
+            "Nul.txt",
+            "nul .txt",
+            "CON",
+            "con.json",
+            "PRN",
+            "AUX.x",
+            "COM1",
+            "com9.log",
+            "LPT1",
+            "lpt9",
         ] {
             assert_eq!(temp_file_name(bad), None, "{bad:?}");
         }

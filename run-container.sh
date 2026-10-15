@@ -105,8 +105,11 @@ echo "WORKSPACE=$workdir" >> "$env_file"
 echo "CONTAINER_NAME=$container_name" >> "$env_file"
 # A project per environment keeps their containers and networks apart.
 "$docker_cmd" compose --project-name "$container_name" --env-file "$env_file" up -d || exit 1
-cargo run --manifest-path "$here/host/Cargo.toml" -- \
-  --config .scoter-config.yaml --workspace $workdir:/workspace $container_name
+universal=$( mktemp ) || exit 1
+cargo run --manifest-path "$here/host/Cargo.toml" --bin gen-scoter-uc -- \
+  --config .scoter-config.yaml --dev-container-workspace-dir "$workdir" --output "$universal" || exit 1
+cargo run --manifest-path "$here/host/Cargo.toml" --bin scoter-host -- \
+  --universal "$universal" "$container_name"
 
 # FIXME the user should use `git fetch $workdir/$repo_name` to get the files + review them.
 #       Running 'git push' from the workdir allows potential malware to run .git/config hooks in the host.

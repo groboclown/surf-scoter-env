@@ -46,5 +46,9 @@ nft delete table inet egress 2>/dev/null || true
 nft -D "isolated_if=\"$isolated_if\"" -D "dns_servers={ $dns_servers }" -f /usr/local/etc/egress.nft
 nft list table inet egress
 
-# Keep the container alive to keep the network forwarding active.
-exec sleep infinity
+# Keep the container alive to keep the network forwarding active.  The shell
+# stays PID 1 so the trap handles SIGTERM; PID 1 has no default signal
+# handling, so an exec'd `sleep` would ignore it.
+trap 'exit 0' TERM INT
+sleep infinity &
+wait $!

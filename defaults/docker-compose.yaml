@@ -1,6 +1,11 @@
+# This relies on a generated .env file to fill in the parameters.
+# It's hard-coded to work with the default firewall and gateway
+# containers.
+
 services:
   firewall:
-    build: ./containers/firewall-router
+    image: ${FIREWALL_ROUTER}
+    container_name: ${FIREWALL_ROUTER_NAME}
     cap_drop: [ALL]
     cap_add: [NET_ADMIN]
     security_opt:
@@ -20,7 +25,8 @@ services:
 
   gateway:
     # The local developer places their allowed-domains.txt file in this directory.
-    build: ./containers/network-gateway
+    image: ${NETWORK_GATEWAY}
+    container_name: ${NETWORK_GATEWAY_NAME}
     network_mode: "service:firewall"
     depends_on:
       firewall:
@@ -35,38 +41,50 @@ services:
         max-size: 10m   # the access log goes to stdout
     restart: unless-stopped
     volumes:
-      - ${WORKSPACE}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
+      - ${SETTINGS_HOST}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
 
   dev:
     # The local developer places their Dockerfile in this directory.
     # It should have the `containers/dev-env/Dockerfile` built image
     # as its parent.
-    build: .
+    image: ${DEV_ENV}
     # Set by run-container.sh: the name you connect to with `ssh`, and that the
     # host connects to with `docker exec`.
     container_name: ${CONTAINER_NAME}
     networks: [isolated]
+
+    # Rootless podman maps the host user to container root by default, so bind
+    # mounts show up as owned by root.  keep-id maps the host user to the
+    # container's rootless user (1000) instead.
+    # This is a generalization, where most containers map the rootless user
+    # to uid 1000.
+    # The 'keep-id' is podman-only.  Remove if you're using docker.
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
     environment:
-      HTTP_PROXY: http://gateway:3128
-      HTTPS_PROXY: http://gateway:3128
-      http_proxy: http://gateway:3128
-      https_proxy: http://gateway:3128
-      NO_PROXY: ""
-      no_proxy: ""
+      # Because this performs variable substitution on the names, this needs list mode.
+      - HTTP_PROXY=http://gateway:3128
+      - HTTPS_PROXY=http://gateway:3128
+      - http_proxy=http://gateway:3128
+      - https_proxy=http://gateway:3128
+      - "NO_PROXY="
+      - "no_proxy="
+      - "${SSHD_PORT_ENV}=${SSHD_PORT}"
     depends_on:
       - gateway
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    pids_limit: 4096    # stops fork bombs
-    mem_limit: 8g       # mem + cpu limit: set to taste.
-    cpus: 4             
-    memswap_limit: 8g   # same as mem_limit, so no extra swap on top of it.
+    pids_limit: ${PIDS_LIMIT}     # stops fork bombs
+    mem_limit: ${MEM_LIMIT}       # mem + cpu limit: set to taste.
+    cpus: ${CPUS}             
+    memswap_limit: ${MEM_LIMIT}   # same as mem_limit, so no extra swap on top of it.
     logging:
       options:
-        max-size: 10m   # container logs otherwise grow without bound.
+        max-size: ${LOGGING_MAX_SIZE}  # container logs otherwise grow without bound.
     volumes:
-      - ${WORKSPACE}:/workspace
+      - ${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}
+      - ${SETTINGS_HOST}:${SETTINGS_CONTAINER}:ro
     # Should also put some file size limits on things like tmpfs.
 networks:
   isolated:

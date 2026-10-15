@@ -1,0 +1,6 @@
+# Used by contributors of this project, to run the
+# dev-container to develop this project.
+
+dev-env:
+    paths:
+      allowed-domains: ${scoter:project-dir}/examples/surf-scoter/allowed-domains.txt
