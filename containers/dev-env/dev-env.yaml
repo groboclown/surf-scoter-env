@@ -9,5 +9,13 @@ mounts:
     setup: /opt/surf-scoter-setup
 # The broker that scoter-host connects to.
 broker-bin: /usr/local/bin/scoter-container
-# The port sshd listens on (see sshd_config).
-sshd-port: 22022
+
+# The port sshd listens on (see sshd_config).  May be null when
+# sshd-port-env is set, for a port the container picks as it starts.
+sshd-port: null
+sshd-port-env: SCOTER_SSHD_PORT
+
+# Optional: the images this one builds on; see the docs.
+# parents:
+#     - dir: ../base-env
+#       tag: my-base:latest

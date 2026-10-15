@@ -1,0 +1,11 @@
+# Crate access
+.crates.io
+
+# Python access, for script tooling.
+.pypi.org
+.pythonhosted.org
+
+# VS Code may want to download
+.marketplace.visualstudio.com
+.gallerycdn.vsassets.io
+.vscode-cdn.net

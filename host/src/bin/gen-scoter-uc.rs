@@ -4,9 +4,14 @@
 //!
 //! Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR]
 //!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
-//!                      [--user-setup SETUP.yaml] [--distribution-dir DIR]
+//!                      [--user-setup SETUP.yaml]... [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
 //!                      [--output FILE]
+//!
+//! `--user-setup` may be given more than once, say to add a project's own
+//! setup to the user's; a later one wins.  Setup files are only read from a
+//! project when given this way: they can run any program, so the tools never
+//! look for them there.
 //!
 //! Without `--output`, the JSON goes to stdout.  Problems in the
 //! configuration go to stderr, all of them, and nothing is written.
@@ -33,7 +38,7 @@ const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
 const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] \
-                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml] \
+                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml]... \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
                      [--output FILE]";
 
@@ -57,7 +62,7 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
                 "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
             );
             println!(
-                "--user-setup gives a system setup file to read first; --distribution-dir, where Surf Scoter is installed."
+                "--user-setup gives a system setup file to read first, and may be repeated (a later one wins); --distribution-dir, where Surf Scoter is installed."
             );
             println!(
                 "--universal starts from a universal configuration file made earlier, without reading its setup files again."
@@ -125,7 +130,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut project_dir: Option<OsString> = None;
     let mut dev_container_workspace_dir: Option<OsString> = None;
     let mut dev_container_settings_dir: Option<OsString> = None;
-    let mut user_setup: Option<OsString> = None;
+    let mut user_setup: Vec<PathBuf> = Vec::new();
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
     let mut no_setup_search = false;
@@ -149,12 +154,22 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             Some((name, value)) => (name, Some(OsString::from(value))),
             None => (s, None),
         };
+        if name == "--user-setup" {
+            let value = match inline {
+                Some(value) => value,
+                None => args.next().ok_or_else(|| format!("{name} needs a value"))?,
+            };
+            if value.is_empty() {
+                return Err(format!("{name} needs a value"));
+            }
+            user_setup.push(PathBuf::from(value));
+            continue;
+        }
         let slot = match name {
             "--config" => &mut config,
             "--project-dir" => &mut project_dir,
             "--dev-container-workspace-dir" => &mut dev_container_workspace_dir,
             "--dev-container-settings-dir" => &mut dev_container_settings_dir,
-            "--user-setup" => &mut user_setup,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
             "--output" => &mut output,
@@ -178,7 +193,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             project_dir: project_dir.map(PathBuf::from),
             dev_container_workspace_dir: dev_container_workspace_dir.map(PathBuf::from),
             dev_container_settings_dir: dev_container_settings_dir.map(PathBuf::from),
-            user_setup: user_setup.map(PathBuf::from),
+            user_setup,
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
             no_setup_search,
@@ -222,6 +237,8 @@ mod tests {
             "/ws",
             "--dev-container-settings-dir=settings",
             "--user-setup=s.yaml",
+            "--user-setup",
+            "project-setup.yaml",
             "--distribution-dir",
             "/opt/scoter",
             "--universal=first.json",
@@ -236,7 +253,7 @@ mod tests {
                     project_dir: Some(PathBuf::from("proj")),
                     dev_container_workspace_dir: Some(PathBuf::from("/ws")),
                     dev_container_settings_dir: Some(PathBuf::from("settings")),
-                    user_setup: Some(PathBuf::from("s.yaml")),
+                    user_setup: vec![PathBuf::from("s.yaml"), PathBuf::from("project-setup.yaml")],
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
@@ -268,6 +285,8 @@ mod tests {
             "--no-setup-search given more than once"
         );
         assert_eq!(err(&["--universal"]), "--universal needs a value");
+        assert_eq!(err(&["--user-setup"]), "--user-setup needs a value");
+        assert_eq!(err(&["--user-setup="]), "--user-setup needs a value");
     }
 
     #[test]
@@ -311,6 +330,15 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         let json: serde_json::Value = serde_json::from_str(&written.unwrap()).unwrap();
         assert_eq!(json["dev-container"]["broker-bin"], "/b");
+        // The resolved form has every key, `parent-builds` and all.
+        assert_eq!(
+            json["dev-container"]["sshd-port-env"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["dev-container"]["parent-builds"],
+            serde_json::json!([])
+        );
         assert_eq!(
             json["setup"]["files"][0]["file"],
             path(&dir.join("setup.yaml"))

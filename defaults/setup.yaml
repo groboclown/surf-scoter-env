@@ -11,11 +11,14 @@ ssh:
         keygen: ssh-keygen
     runs:
         mk-key: ${keygen} -t ed25519 -N "" -f ${key-file}
+        mk-host-key: ${keygen} -t ed25519 -N "" -f {x:host-key-file}
+        remove-known-host: ${keygen} -R {x:host} -f ${known-hosts}
         proxy-command: ${docker:exec} exec -i %h socat STDIO TCP:127.0.0.1:{x:port}
     paths:
         home: ~/.ssh
         key-file: ${home}/scoter-dev-container
         config-file: ${home}/config
+        known-hosts: ${home}/known_hosts
     values:
         host-prefix: scoter-
 
@@ -26,6 +29,7 @@ docker:
         # How scoter-host starts the broker inside the dev container.
         # Note: adding a `-t` (terminal) will corrupt the binary wire protocol.
         broker: ${exec} exec -i {x:container} {x:broker}
+        build: ${exec} build -t {x:tag} {x:dir}
         compose-up: ${exec} compose --env-file {x:env-file} -f {x:compose-file} up -d
         compose-service-stats: >
             ${exec} compose --env-file {x:env-file}
@@ -33,15 +37,17 @@ docker:
             --no-stream --format json
         compose-down: ${exec} compose --env-file {x:env-file} -f {x:compose-file} down --volumes
         inspect-image: ${exec} image inspect {x:name} --format json
-        inspect-container: ${exec} inspect --format json
+        inspect-container: ${exec} inspect --format json {x:name}
+        image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
 
 # Information for the workspace clone.
 workspace:
     paths:
-        setup-dir: ${scoter:project-dir}/.dev-env/setup
-        resources-dir: ${scoter:project-dir}/.dev-env/resources
-        workspace-dir: ${scoter:project-dir}/.dev-env/workspace
+        workspace-parent-dir: ${scoter:project-dir}/.dev-env
+        setup-dir: ${workspace-parent-dir}/setup
+        resources-dir: ${workspace-parent-dir}/resources
+        workspace-dir: ${workspace-parent-dir}/workspace
 
 
 # The 'git' VCS tool.
@@ -52,8 +58,9 @@ git-vcs:
     programs:
         exec: git
     runs:
-        local-clone: ${exec} clone ${scoter:project-dir} ${workspace-dir}
-        fetch-changes: ${exec} fetch ${workspace-dir} {x:branch}
+        local-clone: ${exec} clone ${scoter:project-dir} {x:workspace-dir}
+        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
+        fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
 
         # Requires the user to review the changes and does not commit them.
@@ -64,24 +71,51 @@ git-vcs:
         ignore-file: .gitignore
 
 
+# Default for no vcs - stored as simple files.
+# TODO create a "file vcs" python script in the install directory to handle these mechanisms.
+#      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
+#      support easier.
+file-vcs:
+    programs:
+        cp: cp
+        diff: diff
+        noop: echo
+    runs:
+        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
+        fetch-changes: ${noop}
+        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
+        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+    values:
+        ignore-file: ""
+
+
 # Information for dealing with developer environments.
 dev-env:
     paths:
         # Stores the running docker-compose configurations, so that
         # parallel runs can understand how to deal with resource contention.
-        running-env-config: ${user-dir}/running-env.json
-    values:
-        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
-        firewall-router-image: local-surf-scoter/firewall-router
+        running-env-config: ${scoter:user-dir}/running-env.json
+        running-env-config-lock: ${scoter:user-dir}/running-env.json.lock
 
+        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway
+
+        docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
+
+        allowed-domains: ${scoter:project-dir}/.surf-scoter/allowed-domains.txt
+    values:
+        firewall-router-image: local-surf-scoter/firewall-router
         network-gateway-image: local-surf-scoter/network-gateway
+        dev-env-image-prefix: local-surf-scoter/
 
         # Limits for the docker-compose file.
         mem-limit: 8g
         cpus: 4
         pids-limit: 4096
         logging-max-size: 10m
+
+        # For auto-assigned sshd port, start at this number.
+        start-sshd-port: 20000
 
 
 # The configuration loader will alter the "scoter" section to match the
@@ -104,14 +138,12 @@ scoter:
         project-file-search:
             - ${scoter:cwd}/.surf-scoter.yaml
             - ${scoter:cwd}/.surf-scoter.yml
-            - ${scoter:cwd}/.surf-scoter/setup.yaml
-            - ${scoter:cwd}/.surf-scoter/setup.yml
+            - ${scoter:cwd}/.surf-scoter/container.yaml
+            - ${scoter:cwd}/.surf-scoter/container.yml
             - ${scoter:project-dir}/.surf-scoter.yaml
             - ${scoter:project-dir}/.surf-scoter.yml
-
-            # Careful with these!
-            - ${scoter:project-dir}/setup.yaml
-            - ${scoter:project-dir}/setup.yml
+            - ${scoter:project-dir}/.surf-scoter/container.yaml
+            - ${scoter:project-dir}/.surf-scoter/container.yml
 
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         dev-containers-search:
@@ -120,6 +152,6 @@ scoter:
             - ${scoter:project-dir}/.surf-scoter
             - ${scoter:project-dir}/.surf-scoter/containers
             - ${scoter:distribution-dir}/containers
-    
+
     values:
         backup-file-extension: .backup

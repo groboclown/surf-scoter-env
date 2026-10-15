@@ -28,6 +28,7 @@ RUN set -x \
         socat \
         ca-certificates \
         procps \
+        gettext-base \
         # Basic developer tools.
         git \
         mercurial \
@@ -48,7 +49,7 @@ RUN set -x \
         /home/ubuntu/.config/sshd
 
 COPY --chown=ubuntu:ubuntu \
-    sshd_config /home/ubuntu/.config/sshd/sshd_config
+    sshd_config /home/ubuntu/.config/sshd/sshd_config.template
 COPY --chmod=0555 entrypoint.sh /entrypoint.sh
 
 USER ubuntu

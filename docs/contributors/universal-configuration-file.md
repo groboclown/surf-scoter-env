@@ -8,14 +8,14 @@ The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, wi
 
 ```
 gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] [--dev-container-workspace-dir DIR]
-              [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml] [--distribution-dir DIR]
+              [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml]... [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search] [--output FILE]
 ```
 
 * `--config`: the project configuration file.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir` and `dev-container-path`, `project`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings one along.
 * `--project-dir`: the project directory, where the setup files' `./` locations start, in place of the project configuration file's directory.  It must exist.  It doesn't change where the project configuration file's own relative paths (such as `dev-container-path`) start.
 * `--dev-container-workspace-dir` and `--dev-container-settings-dir`: the directories mounted in the launched dev container: the project workspace (writable), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.
-* `--user-setup` and `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  `--distribution-dir` wins over a `scoter: paths: distribution-dir` in the setup files.
+* `--user-setup` and `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  `--user-setup` may be given more than once; a later one wins.  It's the only way a setup file is read from a project: the tool never looks for one there.  `--distribution-dir` wins over a `scoter: paths: distribution-dir` in the setup files.
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others; a `--config` without `--project-dir` uses that file's directory.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  Files named with `--user-setup` or `--distribution-dir` are still read.
 * `--output`: the file to write; without it, the JSON goes to stdout.
@@ -74,7 +74,7 @@ The general layout:
         // The project configuration file, the project directory (--project-dir, or the
         // project file's directory) and the project's dev container.
         "project-config": "/home/user/my-project/.scoter/settings.yml",
-        "project-dir": "/home/user/my-project/.scoter",
+        "project-dir": "/home/user/my-project",
         "dev-container-path": "/home/user/my-project/.scoter/dev-env",
         // The host directories mounted in the dev container:
         //   --dev-container-workspace-dir - the cloned project workspace
@@ -183,9 +183,19 @@ The general layout:
         ]
     },
 
-    // Information straight from the 'dev-env.yaml' file.
-    // If no such file exists, this section is instead 'null'.
+    // The 'dev-env.yaml' file, with its parents merged in.  If no such file
+    // exists, this section is instead 'null'.
     "dev-container": {
+        "user": "ubuntu",
+        "mounts": {"workspace": "/workspace", "setup": "/opt/surf-scoter-setup"},
+        "broker-bin": "/usr/local/bin/scoter-container",
+        // 'null' when the container picks the port; then 'sshd-port-env' is set.
+        "sshd-port": 22022,
+        "sshd-port-env": null,
+        // In place of 'parents': the local parent images to build, lowest first.
+        "parent-builds": [
+            {"dir": "/home/user/my-project/.scoter/base-env", "tag": "my-base:latest"}
+        ]
     },
 
     // The system setup files' settings, as written (nothing expanded), so a later
@@ -245,4 +255,4 @@ Notes on the values:
 * `paths` and `path-lists` entries have `~` and `./` already resolved, and are given whether or not they exist.
 * `values` keep their types: text, numbers, `true`/`false` and `null`.  Only text has its `${...}` references expanded.
 * Each `runs` command is a list of arguments, the first being the program.  The quotes from the setup file are already removed, and the `{x:name}` placeholders are left in place: fill them in within each argument, so a value with spaces stays a single argument.
-* `project`, `host-brokered` and `dev-container` keep their keys as written, though not necessarily in the same order.
+* `project`, `host-brokered` and `dev-container` keep their keys as written, though not necessarily in the same order.  `dev-container` is the merge of the `dev-env.yaml` and its parents, so always has `sshd-port`, `sshd-port-env` and `parent-builds` (possibly `null` or empty), and never `parents`.

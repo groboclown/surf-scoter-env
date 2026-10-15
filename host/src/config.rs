@@ -51,8 +51,10 @@ pub struct LoadOptions {
     /// and the settings directory (`--dev-container-settings-dir`).
     pub dev_container_workspace_dir: Option<PathBuf>,
     pub dev_container_settings_dir: Option<PathBuf>,
-    /// An extra system setup file, with the highest priority (`--user-setup`).
-    pub user_setup: Option<PathBuf>,
+    /// Extra system setup files, with the highest priority (`--user-setup`),
+    /// in the order given: a later one wins.  Only these are read from a
+    /// project; the tools never look for them there.
+    pub user_setup: Vec<PathBuf>,
     /// Where a distribution installed Surf Scoter, if it did.
     pub distribution_dir: Option<PathBuf>,
     /// A universal configuration file to start from.
@@ -316,7 +318,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         &a.dev_container_settings_dir
     });
     let setup = SetupOptions {
-        user_setup: options.user_setup.as_deref(),
+        user_setup: &options.user_setup,
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
         project_config: project_path.as_deref(),
@@ -593,7 +595,10 @@ mod tests {
     fn options(dir: &TempDir, project: Option<&str>, setup: Option<&str>) -> LoadOptions {
         LoadOptions {
             project: project.map(|p| dir.write("project/scoter.yaml", p)),
-            user_setup: setup.map(|s| dir.write("setup.yaml", s)),
+            user_setup: setup
+                .map(|s| dir.write("setup.yaml", s))
+                .into_iter()
+                .collect(),
             ..LoadOptions::default()
         }
     }
@@ -735,7 +740,7 @@ mod tests {
             "a:\n  paths:\n    local: ./here\n  values:\n    project-file: ./scoter.yaml\n",
         );
         let first = LoadOptions {
-            user_setup: Some(setup),
+            user_setup: vec![setup],
             ..LoadOptions::default()
         };
         let first = load_all_with_env(&first, Env::default()).unwrap();
@@ -1037,7 +1042,7 @@ mod tests {
                     "commands:\n  - {command: one, args: [x]}\n",
                 ),
             )),
-            user_setup: Some(dir.write("setup.yaml", "a:\n  paths:\n    local: ./here\n")),
+            user_setup: vec![dir.write("setup.yaml", "a:\n  paths:\n    local: ./here\n")],
             no_setup_search: true,
             ..LoadOptions::default()
         };

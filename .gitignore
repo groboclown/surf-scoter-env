@@ -28,7 +28,9 @@ rustc-ice-*.txt
 /allowed-domains.txt
 .env
 /bin/
+/user-setup.yaml
 /setup.yaml
+/.dev-env/
 
 
 # Python local files.

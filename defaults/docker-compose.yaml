@@ -41,7 +41,7 @@ services:
         max-size: 10m   # the access log goes to stdout
     restart: unless-stopped
     volumes:
-      - ${WORKSPACE}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
+      - ${SETTINGS_HOST}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
 
   dev:
     # The local developer places their Dockerfile in this directory.
@@ -52,13 +52,24 @@ services:
     # host connects to with `docker exec`.
     container_name: ${CONTAINER_NAME}
     networks: [isolated]
+
+    # Rootless podman maps the host user to container root by default, so bind
+    # mounts show up as owned by root.  keep-id maps the host user to the
+    # container's rootless user (1000) instead.
+    # This is a generalization, where most containers map the rootless user
+    # to uid 1000.
+    # The 'keep-id' is podman-only.  Remove if you're using docker.
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
     environment:
-      HTTP_PROXY: http://gateway:3128
-      HTTPS_PROXY: http://gateway:3128
-      http_proxy: http://gateway:3128
-      https_proxy: http://gateway:3128
-      NO_PROXY: ""
-      no_proxy: ""
+      # Because this performs variable substitution on the names, this needs list mode.
+      - HTTP_PROXY=http://gateway:3128
+      - HTTPS_PROXY=http://gateway:3128
+      - http_proxy=http://gateway:3128
+      - https_proxy=http://gateway:3128
+      - "NO_PROXY="
+      - "no_proxy="
+      - "${SSHD_PORT_ENV}=${SSHD_PORT}"
     depends_on:
       - gateway
     cap_drop: [ALL]
@@ -73,7 +84,7 @@ services:
         max-size: ${LOGGING_MAX_SIZE}  # container logs otherwise grow without bound.
     volumes:
       - ${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}
-      - ${SETUP_HOST}:${SETUP_CONTAINER}:ro
+      - ${SETTINGS_HOST}:${SETTINGS_CONTAINER}:ro
     # Should also put some file size limits on things like tmpfs.
 networks:
   isolated:

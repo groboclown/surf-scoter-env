@@ -2,13 +2,19 @@
 //! `docs/system-config-file.md`.
 //!
 //! These files are read, highest priority first:
-//!   1. the `--user-setup` file;
+//!   1. the `--user-setup` files, the last given first;
 //!   2. the user's setup file, the first found of
 //!      `$SURF_SCOTER_HOME/setup.{yaml,yml}`,
 //!      `~/.config/surf-scoter.setup.{yaml,yml}` and
 //!      `~/.config/surf-scoter.d/setup.{yaml,yml}`;
 //!   3. `${scoter:distribution-dir}/setup.{yaml,yml}`, using the settings so
 //!      far: `--distribution-dir`, or else what the files above set.
+//!
+//! No setup file is ever found in the project: a setup file can run any
+//! program, and a project can come from anyone.  So a `distribution-dir`
+//! from the setup files must be absolute, outside the project's
+//! directories, and not refer to `${scoter:cwd}`.  Per-project setup files are only read when given, with
+//! `--user-setup`.
 //!
 //! Each top-level key is a section, holding its keys grouped by the kind of
 //! value they have:
@@ -238,7 +244,7 @@ impl Entry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Source {
-    /// The `--user-setup` file.
+    /// A `--user-setup` file.
     UserSetup,
     /// The user's setup file.
     User,
@@ -347,8 +353,8 @@ pub struct SectionRecord {
 /// Where to find the system setup.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SetupOptions<'a> {
-    /// The `--user-setup` file.
-    pub user_setup: Option<&'a Path>,
+    /// The `--user-setup` files, in the order given: a later one wins.
+    pub user_setup: &'a [PathBuf],
     pub distribution_dir: Option<&'a Path>,
     /// Where `./` paths start: `scoter:project-dir`.
     pub project_dir: Option<&'a Path>,
@@ -446,8 +452,9 @@ pub fn load(
     project_dir: Option<&Path>,
     env: Env,
 ) -> Result<SystemConfig, Vec<ConfigError>> {
+    let user_setup: Vec<PathBuf> = user_setup.map(Path::to_path_buf).into_iter().collect();
     let options = SetupOptions {
-        user_setup,
+        user_setup: &user_setup,
         distribution_dir,
         project_dir,
         ..SetupOptions::default()
@@ -485,7 +492,8 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     }
 
     let mut found: Vec<(PathBuf, Source)> = Vec::new();
-    if let Some(path) = options.user_setup {
+    // Highest priority first: the last given.
+    for path in options.user_setup.iter().rev() {
         if path.is_file() {
             found.push((path.to_path_buf(), Source::UserSetup));
         } else {
@@ -546,13 +554,44 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         SystemConfig::merge(files, &tool_values, env.clone(), options.project_dir)
     };
     let mut config = merge(&files);
+    // A `distribution-dir` from the setup files can't depend on where the
+    // tool runs, which is likely the project: worked out again with another
+    // `cwd`, it must be the same.  That finds `${scoter:cwd}` however it's
+    // referred to.
+    let given = inputs.distribution_dir.is_some();
+    let uses_cwd = !given && {
+        let elsewhere: Vec<(&str, String)> = tool_values
+            .iter()
+            .filter(|(key, _)| *key != CWD)
+            .cloned()
+            .chain([(CWD, "/surf-scoter-not-the-cwd".to_string())])
+            .collect();
+        SystemConfig::merge(&files, &elsewhere, env.clone(), options.project_dir)
+            .get(SCOTER_SECTION, DISTRIBUTION_DIR)
+            != config.get(SCOTER_SECTION, DISTRIBUTION_DIR)
+    };
+    if uses_cwd {
+        errors.push(ConfigError::new(
+            None,
+            "",
+            format!(
+                "`{SCOTER_SECTION}:{DISTRIBUTION_DIR}` can't refer to `${{{SCOTER_SECTION}:{CWD}}}`: setup files aren't read from wherever the tool runs; give `--distribution-dir` instead"
+            ),
+        ));
+    }
     // The distribution directory's file comes last, as the files so far say
     // where it is.  A base's is already among its files, and a file already
     // read isn't read again.  Errors in `distribution-dir` itself are
     // reported with the rest, below.
-    if options.distribution_dir.is_some() || !options.no_search {
+    if !uses_cwd && (options.distribution_dir.is_some() || !options.no_search) {
         let distribution_dir = config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR);
-        if let Some(dir) = distribution_dir {
+        let problem = distribution_dir
+            .as_deref()
+            .filter(|_| !given)
+            .and_then(|dir| untrusted_setup_dir(dir, options));
+        if let Some(problem) = problem {
+            errors.push(ConfigError::new(None, "", problem));
+        } else if let Some(dir) = distribution_dir {
             match find_setup(&dir, SETUP) {
                 Ok(Some(path)) if !tried.iter().any(|t| same_file(t, &path)) => {
                     match load_file(&path, Source::Distribution) {
@@ -566,6 +605,16 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
                 }
                 Ok(_) => {}
                 Err(e) => errors.push(e),
+            }
+        }
+    }
+
+    // A base's distribution file was found before the project was known.
+    if inputs.distribution_dir.is_none() {
+        for file in files.iter().filter(|f| f.source == Source::Distribution) {
+            let dir = file.path.parent().unwrap_or(Path::new(""));
+            if let Some(problem) = untrusted_setup_dir(dir, options) {
+                errors.push(ConfigError::new(Some(&file.path), "", problem));
             }
         }
     }
@@ -589,6 +638,41 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     } else {
         Err(errors)
     }
+}
+
+/// Why the tools can't read a setup file they found by themselves in `dir`,
+/// a `distribution-dir` that came from the setup files, if they can't: it's
+/// relative (to the directory the tool runs in, likely the project), or in
+/// the project.  A setup file can run any program, so it's never taken from
+/// the project unless given with `--user-setup`.
+fn untrusted_setup_dir(dir: &Path, options: &SetupOptions) -> Option<String> {
+    let setting = format!("`{SCOTER_SECTION}:{DISTRIBUTION_DIR}` {}", dir.display());
+    if !dir.is_absolute() {
+        return Some(format!(
+            "{setting} must be absolute to find a setup file in it; give `--distribution-dir` instead"
+        ));
+    }
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let dir = canonical(dir);
+    let project = [
+        (PROJECT_DIR, options.project_dir),
+        (
+            PROJECT_CONFIG,
+            options.project_config.and_then(Path::parent),
+        ),
+        (
+            DEV_CONTAINER_WORKSPACE_DIR,
+            options.dev_container_workspace_dir,
+        ),
+    ];
+    project
+        .into_iter()
+        .find_map(|(name, root)| root.filter(|root| dir.starts_with(canonical(root))).map(|_| name))
+        .map(|name| {
+            format!(
+                "{setting} is in the project (`{SCOTER_SECTION}:{name}`); setup files aren't read from a project unless given with `--user-setup`"
+            )
+        })
 }
 
 /// The user's setup file, and the user directory it's in (when it's in one).
@@ -1979,6 +2063,94 @@ mod tests {
     }
 
     #[test]
+    fn several_user_setup_files() {
+        let dir = TempDir::new();
+        let user = dir.write("user.yaml", "a:\n  values:\n    k: user\n    u: 1\n");
+        let project = dir.write("project.yaml", "a:\n  values:\n    k: project\n");
+        let given = [user.clone(), project.clone()];
+        let options = SetupOptions {
+            user_setup: &given,
+            no_search: true,
+            ..SetupOptions::default()
+        };
+        let config = load_with(&options, Env::default()).unwrap();
+        // The last given wins.
+        assert_eq!(config.files(), [project, user]);
+        let a = config.section("a", &SectionDefaults::default()).unwrap();
+        assert_eq!(a.values["k"], ScalarValue::String("project".to_string()));
+        assert_eq!(a.values["u"], ScalarValue::Int(1));
+        assert!(
+            config
+                .setup_record()
+                .files
+                .iter()
+                .all(|f| f.source == Source::UserSetup)
+        );
+    }
+
+    #[test]
+    fn no_setup_file_found_in_the_project() {
+        let dir = TempDir::new();
+        dir.write("proj/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
+        let project_dir = dir.path().join("proj");
+        let project_config = project_dir.join("scoter.yaml");
+        let workspace = dir.path().join("ws");
+        dir.write("ws/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
+        let errors = |setting: &str, project: bool| {
+            let setup = [dir.write(
+                "setup.yaml",
+                &format!("scoter:\n  paths:\n    distribution-dir: {setting}\n"),
+            )];
+            let options = SetupOptions {
+                user_setup: &setup,
+                project_dir: project.then_some(project_dir.as_path()),
+                project_config: project.then_some(project_config.as_path()),
+                dev_container_workspace_dir: project.then_some(workspace.as_path()),
+                ..SetupOptions::default()
+            };
+            let env = Env {
+                cwd: Some(project_dir.clone()),
+                ..Env::default()
+            };
+            load_with(&options, env).map_err(messages).unwrap_err()
+        };
+        let one = |setting: &str, project: bool| {
+            let errors = errors(setting, project);
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            errors.into_iter().next().unwrap()
+        };
+        assert!(one("./dist", true).contains("is in the project (`scoter:project-dir`)"));
+        assert!(one("${scoter:project-dir}/dist", true).contains("is in the project"));
+        assert!(
+            one(&format!("{}/dist", workspace.display()), true)
+                .contains("(`scoter:dev-container-workspace-dir`)")
+        );
+        // Without a project, `./` would be wherever the tool runs.
+        assert!(one("./dist", false).contains("must be absolute"));
+        // Nor can it say so, directly or not; the file isn't looked for.
+        for setting in [
+            "${scoter:cwd}/dist",
+            "${scoter:here}/dist\n    here: ${scoter:cwd}",
+        ] {
+            for project in [true, false] {
+                assert!(
+                    one(setting, project).contains("can't refer to `${scoter:cwd}`"),
+                    "{setting}"
+                );
+            }
+        }
+
+        // Given, it's the caller's choice.
+        let given = load(
+            None,
+            Some(&project_dir.join("dist")),
+            Some(&project_dir),
+            Env::default(),
+        );
+        assert!(given.is_ok());
+    }
+
+    #[test]
     fn distribution_dir_given() {
         let dir = TempDir::new();
         let dist = dir.write("dist/setup.yaml", "a:\n  paths:\n    k: v\n");
@@ -2024,7 +2196,7 @@ mod tests {
 
         // Without the search, only a given one's file is read.
         let options = SetupOptions {
-            user_setup: Some(&cli),
+            user_setup: std::slice::from_ref(&cli),
             no_search: true,
             ..SetupOptions::default()
         };
@@ -2056,7 +2228,7 @@ mod tests {
             "a:\n  paths:\n    p: ${scoter:project-dir}/p\n    c: ${scoter:project-config}\n    w: ${scoter:cwd}/w\n",
         );
         let options = SetupOptions {
-            user_setup: Some(&setup),
+            user_setup: std::slice::from_ref(&setup),
             project_dir: Some(Path::new("/proj")),
             project_config: Some(Path::new("/proj/.scoter/scoter.yaml")),
             ..SetupOptions::default()
@@ -2137,7 +2309,7 @@ mod tests {
         assert_eq!(config.get("a", "x"), None);
 
         let options = SetupOptions {
-            user_setup: Some(&setup),
+            user_setup: std::slice::from_ref(&setup),
             dev_container: true,
             ..SetupOptions::default()
         };
