@@ -2,6 +2,8 @@
 
 Secure environment for local development.
 
+![logo](docs/logo.svg)
+
 Developers need a way to run all their tooling, use their IDE of choice, and help prevent them from common security mistakes.  Due to pressure from malware and agents, the development environment increasingly needs to be treated like production from a cybersecurity perspective.  Additionally, with increasingly strict regulations and compliance requirements, we need ways to make sure we aren't putting ourselves in hot water.
 
 Surf Scoter has you run your environment inside a container, using another container like a VPN to control network connectivity, and a small access module to enable limited external access to your host.
@@ -43,63 +45,90 @@ Surf Scoter is still in early development stages.  At the moment, you'll need to
 
 To run Surf Scoter, you need to make some configuration settings to allow for an easier connection between your development container environment and your desktop.
 
-You can perform the changes easily with the [`user-setup.sh`](user-setup.sh) script.  This will:
+You can perform the changes easily with the [`scoter`](scoter.py) script:
 
-- Create a new SSH private + public key in your `~/.ssh` directory.
-- Alter your `~/.ssh/config` file to add a `Host scoter-*` entry, which covers every environment you run.  It causes the ssh connection to route through `docker` to connect to the underlying sshd server.  This allows the container to receive SSHD connections without opening a port to your host computer.
+```shell
+scoter user-setup
+```
 
-The script won't do anything unless you pass in the `--force` argument.  Messing with your SSH configuration is nerve-wracking, so the script holds your hand.  Running the script without the `--force` argument shows you what it would do, but doesn't do it.
+This will perform examine your environment, and ask you questions about how you want to proceed with updates.  At the moment, it:
 
-You only need to do this once.  Each environment you start gets a name (`run-container.sh -n=NAME`, `dev` by default), and you connect to it as `scoter-NAME`.  To run several environments at the same time, give each its own name; each gets its own containers and network.  You can reuse your environments, so you may find yourself coming up with fun names for each one.
+- examines your user configuration files to see if they're valid.
+- inspects your SSH directory (pulled from your settings) to see if files exist and whether they have the right permissions.
 
-### Container Environment Setup
+You only need to do this once.
 
-To start up your development environment, you'll need to do several things:
+### Starting a Developer Environment for a Project
 
-1. Create a `Dockerfile` that describes your environment.  Don't know how to do that?  That's fine.  You can use a blank template and fill it in later.  This just makes the initial setup automated.
-2. Create a [`allowed-domains.txt`](containers/network-gateway/allowed-domains.txt) file.  This tells the environment what DNS sites it can make outbound HTTPS connections to.
-3. Build the [`dev-env`](containers/dev-env/Dockerfile) parent container.  Your `Dockerfile` should use that in its `FROM` line.  This does the SSH setup and other lock down.
-4. Create your [`.scoter-config.yaml`](docs/configuration-file.md) file.
+If you're working with an established Surf Scoter project, and you've run through the above user setup, you should **first ensure it's safe to run.**  A project can declare [host-to-environment pass-through commands](#running-commands-on-the-host), which can lead to security issues.
 
-With this, you're ready to run the [`run-container.sh`](run-container.sh) script to get Scotering!
+Only then should you start the project environment by running:
+
+```shell
+scoter run
+```
+
+This will process the project files and start up containers.  It will report the launched process hostname, which you use to [connect to it with a shell or IDE](#connecting-to-a-developer-environment).
+
+If you want to set up your project to define a Surf Scoter development environment, then [the fine documentation can help](docs/new-project-setup.md).
+
+## Connecting to a Developer Environment
+
+The following commands assume you use `podman`.  If you use `docker`, then switch the command execution to instead be `docker`.
+
+When you launch the environment, scoter will tell you the container's hostname.  You use this as the connection ID.
+
+### Direct connect to the container
+
+Connecting to the container is direct:
+
+```shell
+podman exec -it HOSTNAME /bin/bash
+```
+
+### Connect through SSH
+
+Part of the `scoter` setup configures your user SSH so that you can just run.
+
+Means you can run:
+
+```shell
+ssh HOSTNAME
+```
+
+without opening a port into the container.
+
+This SSH capability allows you to take advantage of newer IDE features that allow for remote environments.
 
 ### Connecting through VS Code
 
-VS Code connects to the container over SSH, using the `Host` entry that [`user-setup.sh`](user-setup.sh) adds to your `~/.ssh/config`.  The connection runs through `docker exec`, so the container doesn't open any ports on your computer.
+With VS Code, you need to install Microsoft's [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) extension.  This allows the IDE to connect to the environment through SSH.
 
-1. Install Microsoft's [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) extension.
-2. Add these to your VS Code user settings (`settings.json`):
+In order to make the IDE then perform its work in the sandbox, rather than continuing to run things on your host, make these changes in your user settings (`settings.json`):
 
-   ```jsonc
-   {
-       // Don't automatically expose services running in the container on your computer.
-       "remote.autoForwardPorts": false,
-       // Download the VS Code server on your computer and copy it into the container,
-       // since the container can't reach Microsoft's download servers.
-       "remote.SSH.localServerDownload": "always",
-       // Download extensions on your computer and copy them into the container, for the same reason.
-       "remote.downloadExtensionsLocally": true,
-       // Skip the prompt asking what operating system the container runs.
-       // Add a line for each environment name you use.
-       "remote.SSH.remotePlatform": {
-           "scoter-dev": "linux"
-       }
-   }
-   ```
+- *Remote.SSH: Local Server Download*: set to "always" (`"remote.SSH.localServerDownload": "always"`)
+    - Download the VS Code server on your computer and copy it into the container, since the container can't reach Microsoft's download servers.
+- *Remote: Download Extensions Locally*: enable (`"remote.downloadExtensionsLocally": true`)
+    - Download extensions on your computer and copy them into the container, for the same reason as above.
+- *Remote: Auto Forward Ports*: disable (`"remote.autoForwardPorts": false`)
+    - Don't automatically expose services running in the container on your computer.
+    - To try out a server you're developing, use **Forward a Port** in the Ports view.  A forwarded port lets anything in the container serve content to your computer's `localhost`, so close it when you're done.
 
-3. Start the environment with [`run-container.sh`](run-container.sh).
-4. Run **Remote-SSH: Connect to Host...** from the Command Palette, and enter `scoter-NAME` for your environment (`scoter-dev` unless you chose another name).
-5. Open the `/workspace` folder.
+Once you have the developer environment running, you can then:
+
+1. Run the pallette command `Remote-SSH: Add new SSH Host...`.  This should read your `~/.ssh/config` file to show you the hosts (see bug #12).
+2. Run the pallette command `Remote-SSH: Connect to Host...`.  This will present a drop-down containing the newly added host.
 
 Some things to keep in mind:
 
-- **Forward ports by hand, and only while you need them.**  To try out a server you're developing, use **Forward a Port** in the Ports view.  A forwarded port lets anything in the container serve content to your computer's `localhost`, so close it when you're done.
 - **Be careful with recommended extensions.**  The workspace can list extensions for VS Code to recommend (`.vscode/extensions.json`), and anything in the container can edit that list.  Some extensions run on your computer rather than in the container, so only install ones you'd install anyway.
 - **Tasks and terminals run in the container.**  That's what keeps them contained, so don't work around it by opening the workspace folder on your computer (see [Security Notes](#security-notes)).
 
 ### Connecting through JetBrains
 
-### Running commands on the host
+***TBD***
+
+## Running commands on the host
 
 Some actions need privileges the container deliberately doesn't have, such as cloud credentials or access to the Docker daemon.  For these, the container can ask the host to run a command for it.  The host only runs the exact command forms you list in its configuration file, and refuses everything else.
 

@@ -22,3 +22,10 @@ make dev-prep
 ```
 
 This will create the images and executables, and put them in the right places.
+
+## Releasing
+
+New releases must pass these gates:
+
+* ***NO OPEN SECURITY ISSUES.*** Because of the sensitivity of this project, releases must not have open security issues.
+* **All builds pass.** All builds pass.
