@@ -79,6 +79,10 @@ pub struct ActiveConfigLocations {
     /// The distribution directory.
     #[serde(default)]
     pub distribution_dir: Option<String>,
+    /// The distribution's programs: `${distribution-dir}/bin`, unless
+    /// another program changed it.
+    #[serde(default)]
+    pub distribution_bin_dir: Option<String>,
     /// The directory the tool ran in.
     #[serde(default)]
     pub cwd: Option<String>,
@@ -193,6 +197,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             user_setup_file: location(system::USER_SETUP_FILE),
             user_dir: location(system::USER_DIR),
             distribution_dir: location(system::DISTRIBUTION_DIR),
+            distribution_bin_dir: location(system::DISTRIBUTION_BIN_DIR),
             cwd: location(system::CWD),
         },
         resolved,
@@ -427,6 +432,7 @@ mod tests {
                         ..section(
                             &[
                                 ("dev-container-path", Some(p(&dir.path().join("proj/env")))),
+                                ("distribution-bin-dir", Some("/opt/scoter/bin".to_string())),
                                 ("distribution-dir", Some("/opt/scoter".to_string())),
                                 ("note", Some(ssh_config.clone())),
                                 (
@@ -462,7 +468,7 @@ mod tests {
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
         // The locations are also the `scoter` section's paths.
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 9);
+        assert_eq!(active.len(), 10);
         for (key, value) in active {
             let path = &json["resolved"]["scoter"]["paths"][key];
             if value.is_null() {

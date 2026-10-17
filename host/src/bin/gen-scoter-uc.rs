@@ -347,6 +347,54 @@ mod tests {
     }
 
     #[test]
+    fn run_distribution_bin_dir() {
+        let dir = temp_dir("bin-dir");
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let path = |p: &Path| p.display().to_string();
+        let first = dir.join("first.json");
+        let second = dir.join("second.json");
+        let code = run(os_args(&[
+            "--distribution-dir",
+            &path(&dist),
+            "--no-setup-search",
+            "--output",
+            &path(&first),
+        ]));
+        assert_eq!(code, EXIT_OK);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap();
+        let bin = path(&dist.join("bin"));
+        assert_eq!(json["active-config-locations"]["distribution-bin-dir"], bin);
+        assert_eq!(
+            json["resolved"]["scoter"]["paths"]["distribution-bin-dir"],
+            bin
+        );
+        // Another program's change carries over.
+        json["active-config-locations"]["distribution-bin-dir"] = "/other/bin".into();
+        fs::write(&first, json.to_string()).unwrap();
+        let code = run(os_args(&[
+            "--universal",
+            &path(&first),
+            "--no-setup-search",
+            "--output",
+            &path(&second),
+        ]));
+        let written = fs::read_to_string(&second);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(code, EXIT_OK);
+        let json: serde_json::Value = serde_json::from_str(&written.unwrap()).unwrap();
+        assert_eq!(
+            json["active-config-locations"]["distribution-bin-dir"],
+            "/other/bin"
+        );
+        assert_eq!(
+            json["resolved"]["scoter"]["paths"]["distribution-bin-dir"],
+            "/other/bin"
+        );
+    }
+
+    #[test]
     fn run_cannot_write() {
         let dir = temp_dir("unwritable");
         fs::write(dir.join("setup.yaml"), "").unwrap();
