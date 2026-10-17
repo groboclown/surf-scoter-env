@@ -11,6 +11,8 @@ __all__ = [
     "ssh_config",
     "user_config",
     "gen_parser",
+    "BAD_EXECUTION_ARGS_CODE",
+    "UserConfig",
 ]
 
 from . import active_env
@@ -22,4 +24,5 @@ from . import log
 from . import ssh_config
 from . import user_config
 
-from .argutil import gen_parser
+from .argutil import gen_parser, BAD_EXECUTION_ARGS_CODE
+from .user_config import UserConfig

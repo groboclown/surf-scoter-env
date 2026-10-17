@@ -1,19 +1,34 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: kill"""
+from collections.abc import Sequence
+import sys
+
+from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
 
 
-# ---------------------------------------------------------------------
-# Stop a dev environment.
+def run_kill(
+    config: UserConfig,
+    *,
+    host: str | None,
+    fetch_branch: str | None,
+    force_clean: bool,
+) -> int:
+    """Run the kill operation"""
+    log.error("Not implemented")
+    return 1
 
-def stop_env_parser(parser: argparse.ArgumentParser) -> None:
-    """Configure the CLI arguments."""
-    parser.description = (
+
+def main(argv: Sequence[str]) -> int:
+    """CLI entrypoint."""
+    config, argv, parser = gen_parser(argv, (
         "Stop the project dev container.  The 'run' should stop the configurations"
         "when it terminates, but unexpected issues can leave dangling resources.  "
         "Use this to stop run-away configurations."
-    )
-    parser.set_defaults(func=stop_env_runner)
-    _add_project_args(parser)
+    ))
+    if not config:
+        return BAD_EXECUTION_ARGS_CODE
+
+    # Add arguments to the parser
     parser.add_argument(
         "--host",
         action="store",
@@ -40,21 +55,13 @@ def stop_env_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
+    args = parser.parse_args(argv)
+    return run_kill(
+        config,
+        host=args.host,
+        fetch_branch=args.fetch_branch,
+        force_clean=args.force_clean,
+    )
 
-SUB_COMMAND_ARGUMENTS["stop"] = stop_env_parser
-
-
-def stop_env_runner(args: argparse.Namespace) -> int:
-    """Stop the dev environment."""
-    host = args.host
-    if host:
-        config = UserConfig.load_settings_from_args(args)
-    else:
-        config = UserConfig.load_project_from_args(args)
-        # FIXME find the host by reviewing the active environment list.
-
-    # FIXME
-    assert config is not None
-
-    return 0
-
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

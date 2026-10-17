@@ -1,15 +1,25 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: parse-config"""
+from collections.abc import Sequence
+import sys
+
+from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
 
 
-# ---------------------------------------------------------------------
-# Configuration debugging.
+def run_config_examine(config: UserConfig) -> int:
+    """Handle the configuration examination."""
+    log.warning(config.dumps())
+    return 0
 
-def configuration_debug_parser(parser: argparse.ArgumentParser) -> None:
-    """Configure the CLI arguments."""
-    parser.description = "Output the Surf Scoter universal configuration file."
-    parser.set_defaults(func=configuration_debug_runner)
-    _add_project_args(parser)
+
+def main(argv: Sequence[str]) -> int:
+    """CLI entrypoint."""
+    config, argv, parser = gen_parser(argv, (
+        "Fetch changes committed by the dev container to its local workspace."
+    ))
+    if not config:
+        return BAD_EXECUTION_ARGS_CODE
+
     parser.add_argument(
         "-n",
         "--no-project",
@@ -19,14 +29,18 @@ def configuration_debug_parser(parser: argparse.ArgumentParser) -> None:
         help="Do not try to lookup the project files.",
     )
 
-SUB_COMMAND_ARGUMENTS["parse-config"] = configuration_debug_parser
+    args = parser.parse_args(argv)
 
+    if not args.use_project:
+        # This requires re-running the generator, and explicitly
+        # turning off the project information.
+        log.error(
+            "Examining the configuration without trying to find the project "
+            "isn't currently implemented.  Instead, try running this outside "
+            "a project directory."
+        )
 
-def configuration_debug_runner(args: argparse.Namespace) -> int:
-    """Output the SUC to stdout."""
-    if args.use_project:
-        config = UserConfig.load_project_from_args(args)
-    else:
-        config = UserConfig.load_settings_from_args(args)
-    print(config.dumps())
-    return 0
+    return run_config_examine(config)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

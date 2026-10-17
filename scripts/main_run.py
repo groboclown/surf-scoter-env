@@ -12,12 +12,10 @@ import subprocess
 import sys
 import time
 
+from surf_scoter_lib import defaults, jdata, fileutil
+from surf_scoter_lib import gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib import defaults
 from surf_scoter_lib.err import ConfigErr
-from surf_scoter_lib import gen_parser
-from surf_scoter_lib import jdata
-from surf_scoter_lib import fileutil
 from surf_scoter_lib.ssh_config import SshConfig
 from surf_scoter_lib.user_config import UserConfig
 
@@ -624,7 +622,7 @@ def main(argv: Sequence[str]) -> int:
         ),
     )
     if not config:
-        return 124
+        return BAD_EXECUTION_ARGS_CODE
     parser.add_argument(
         "--clean-workspace",
         action="store_true",

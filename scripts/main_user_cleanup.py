@@ -1,27 +1,28 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: user-cleanup"""
+from collections.abc import Sequence
+import sys
+
+from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
 
 
-# ---------------------------------------------------------------------
-# Clean up what Surf Scoter added to the user files.
+def run_cleanup_user(config: UserConfig) -> int:
+    """Clean up the surf scoter install in the user's environment."""
+    log.error("Not implemented")
+    return 1
 
-def cleanup_user_parser(parser: argparse.ArgumentParser) -> None:
-    """Configure the CLI arguments."""
-    parser.description = (
+
+def main(argv: Sequence[str]) -> int:
+    """CLI entrypoint."""
+    config, argv, parser = gen_parser(argv, (
         "Cleanup the files that this added or modified for the dev "
         "environments from your user directories."
-    )
-    parser.set_defaults(func=cleanup_user_runner)
+    ))
+    if not config:
+        return BAD_EXECUTION_ARGS_CODE
 
+    args = parser.parse_args(argv)
+    return run_cleanup_user(config)
 
-SUB_COMMAND_ARGUMENTS["user-cleanup"] = cleanup_user_parser
-
-
-def cleanup_user_runner(args: argparse.Namespace) -> int:
-    """Stop the dev environment."""
-    config = UserConfig.load_settings_from_args(args)
-
-    # FIXME
-    assert config is not None
-
-    return 0
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

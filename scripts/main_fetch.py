@@ -1,15 +1,25 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: fetch"""
+from collections.abc import Sequence
+import sys
+
+from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
 
 
-# ---------------------------------------------------------------------
-# Fetch changes from a dev environment.
+def run_fetch(config: UserConfig, *, branch: bool | None) -> int:
+    """Run the fetch operation"""
+    log.error("Not implemented")
+    return 1
 
-def fetch_changes_parser(parser: argparse.ArgumentParser) -> None:
-    """Configure the CLI arguments."""
-    parser.description = "Fetch changes committed by the dev container to its local workspace."
-    parser.set_defaults(func=fetch_changes_runner)
-    _add_project_args(parser)
+
+def main(argv: Sequence[str]) -> int:
+    """CLI entrypoint."""
+    config, argv, parser = gen_parser(argv, (
+        "Fetch changes committed by the dev container to its local workspace."
+    ))
+    if not config:
+        return BAD_EXECUTION_ARGS_CODE
+
     parser.add_argument(
         "-b",
         "--branch",
@@ -21,16 +31,8 @@ def fetch_changes_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
-# TODO additional commands to use with this:
-#      review, merge.
-SUB_COMMAND_ARGUMENTS["fetch"] = fetch_changes_parser
+    args = parser.parse_args(argv)
+    return run_fetch(config, branch=args.branch)
 
-
-def fetch_changes_runner(args: argparse.Namespace) -> int:
-    """Fetch in changes from the dev environment."""
-    config = UserConfig.load_project_from_args(args)
-
-    # FIXME
-    assert config is not None
-
-    return 0
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

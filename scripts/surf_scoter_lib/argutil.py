@@ -9,6 +9,8 @@ from typing import Any
 from . import log
 from .user_config import UserConfig
 
+BAD_EXECUTION_ARGS_CODE = 124
+
 
 def gen_parser(
     argv: Sequence[str],
@@ -21,12 +23,12 @@ def gen_parser(
     ```
     from collections.abc import Sequence
     import sys
-    from surf_scoter_lib import gen_parser
+    from surf_scoter_lib import gen_parser, BAD_EXECUTION_ARGS_CODE
 
     def main(argv: Sequence[str]) -> int:
         config, argv, parser = gen_parser(argv, "Example of a command structure.")
         if not config:
-            return 124
+            return BAD_EXECUTION_ARGS_CODE
         # Add arguments to the parser
         args = parser.parse_args(argv)
         # Do something with the arguments

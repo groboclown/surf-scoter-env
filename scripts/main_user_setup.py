@@ -6,9 +6,8 @@ import os
 from pathlib import Path
 import sys
 
-from surf_scoter_lib import defaults
-from surf_scoter_lib import gen_parser
-from surf_scoter_lib import fileutil
+from surf_scoter_lib import gen_parser, BAD_EXECUTION_ARGS_CODE
+from surf_scoter_lib import defaults, fileutil
 from surf_scoter_lib.user_config import UserConfig
 
 
@@ -209,7 +208,7 @@ def main(argv: Sequence[str]) -> int:
         "Configure your home directory for use with Surf Scoter.",
     )
     if not config:
-        return 124
+        return BAD_EXECUTION_ARGS_CODE
     parser.add_argument(
         "--non-interactive",
         action="store_false",
