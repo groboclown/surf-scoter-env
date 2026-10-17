@@ -89,6 +89,7 @@ The `scoter` section is special, in that the tool fills in the `paths` that say 
 * `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  This is the file the tool found by looking, not the `--user-setup` file.  If the tool didn't find a user setup file, this isn't set.
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
 * `distribution-dir` - the Surf Scoter distribution directory, as described [above](#where-to-find-the-system-configuration-files): `--distribution-dir`, or else the highest priority setup file's `distribution-dir`.  Not set without either.
+* `distribution-bin-dir` - the distribution's programs: `${scoter:distribution-dir}/bin`.  A program working with the universal configuration file may change it there, and a later `gen-scoter-uc --universal` keeps the change while the distribution directory stays the same.  Not set without a distribution directory.
 * `cwd` - the directory the tool was run in.
 
 All of them are absolute paths.

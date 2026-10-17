@@ -91,6 +91,7 @@ impl UniversalInput {
             user_setup_file: active.user_setup_file.clone(),
             user_dir: active.user_dir.clone(),
             distribution_dir: active.distribution_dir.clone(),
+            distribution_bin_dir: active.distribution_bin_dir.clone(),
         }
     }
 }

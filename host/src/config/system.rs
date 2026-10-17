@@ -65,8 +65,11 @@
 //! The tool sets the `scoter` section's `paths` that say where the
 //! configuration came from: `project-config`, `project-dir`,
 //! `dev-container-path`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`,
-//! `user-dir`, `distribution-dir` and `cwd`.  Setup files can set `distribution-dir` (the tool's value, when
-//! it has one, wins), but none of the others.
+//! `user-dir`, `distribution-dir`, `distribution-bin-dir` and `cwd`.  Setup files can set
+//! `distribution-dir` (the tool's value, when it has one, wins), but none of the others.
+//! `distribution-bin-dir` is `${distribution-dir}/bin`, unless an earlier run's
+//! (which another program may have changed) goes with the same distribution
+//! directory.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -92,9 +95,12 @@ pub const USER_SETUP_FILE: &str = "user-setup-file";
 pub const USER_DIR: &str = "user-dir";
 /// The one a setup file can also set.
 pub const DISTRIBUTION_DIR: &str = "distribution-dir";
+/// The distribution's programs: `${distribution-dir}/bin`, unless another
+/// program changed it.
+pub const DISTRIBUTION_BIN_DIR: &str = "distribution-bin-dir";
 pub const CWD: &str = "cwd";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 8] = [
+const TOOL_ONLY_KEYS: [&str; 9] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
     DEV_CONTAINER_PATH,
@@ -102,6 +108,7 @@ const TOOL_ONLY_KEYS: [&str; 8] = [
     DEV_CONTAINER_SETTINGS_DIR,
     USER_SETUP_FILE,
     USER_DIR,
+    DISTRIBUTION_BIN_DIR,
     CWD,
 ];
 /// The `programs` key conventionally naming a section's main program.
@@ -305,13 +312,15 @@ impl LoadedFrom {
 }
 
 /// The tool's own inputs to the setup that were in effect: the user's setup
-/// file and directory found, and the distribution directory given (which
-/// wins over the setup files').
+/// file and directory found, the distribution directory given (which
+/// wins over the setup files'), and its `bin` directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SetupInputs {
     pub user_setup_file: Option<String>,
     pub user_dir: Option<String>,
     pub distribution_dir: Option<String>,
+    /// Kept while the distribution directory stays the same.
+    pub distribution_bin_dir: Option<String>,
 }
 
 /// Setup already worked out: its record, its history, and the inputs that
@@ -482,6 +491,8 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         history = base.loaded_from.clone();
         inputs = base.inputs.clone();
     }
+    // The distribution directory `inputs.distribution_bin_dir` goes with.
+    let base_distribution_dir = inputs.distribution_dir.clone();
     let distribution_dir = options.distribution_dir.map(super::absolute);
     if let Some(dir) = &distribution_dir {
         inputs.distribution_dir = Some(path_text(dir));
@@ -607,6 +618,18 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
                 Err(e) => errors.push(e),
             }
         }
+    }
+
+    // Set last, as the distribution directory can come from any of the files.
+    let distribution_dir = config.get(SCOTER_SECTION, DISTRIBUTION_DIR);
+    inputs.distribution_bin_dir =
+        if inputs.distribution_bin_dir.is_some() && base_distribution_dir == distribution_dir {
+            inputs.distribution_bin_dir.take()
+        } else {
+            distribution_dir.map(|dir| path_text(&Path::new(&dir).join("bin")))
+        };
+    if let Some(dir) = &inputs.distribution_bin_dir {
+        config.set_location(DISTRIBUTION_BIN_DIR, dir.clone());
     }
 
     // A base's distribution file was found before the project was known.
@@ -1166,13 +1189,18 @@ impl SystemConfig {
 
     /// Set `scoter:dev-container-path`, once the dev container is found.
     pub fn set_dev_container_path(&mut self, dir: &Path) {
+        self.set_location(DEV_CONTAINER_PATH, path_text(dir));
+    }
+
+    /// Set one of the `scoter` `paths` the tool sets.
+    fn set_location(&mut self, key: &str, value: String) {
         self.sections
             .entry(SCOTER_SECTION.to_string())
             .or_default()
             .insert(
-                DEV_CONTAINER_PATH.to_string(),
+                key.to_string(),
                 Setting {
-                    value: Entry::Path(path_text(dir)),
+                    value: Entry::Path(value),
                     file: None,
                 },
             );
@@ -3349,6 +3377,7 @@ mod tests {
         user_setup_file: None,
         user_dir: None,
         distribution_dir: None,
+        distribution_bin_dir: None,
     };
 
     const NO_HISTORY: &LoadedFrom = &LoadedFrom {
@@ -3453,6 +3482,8 @@ mod tests {
             user_setup_file: Some("/home/me/.config/surf-scoter.d/setup.yaml".to_string()),
             user_dir: Some("/home/me/.config/surf-scoter.d".to_string()),
             distribution_dir: Some("/opt/scoter".to_string()),
+            // As another program changed it.
+            distribution_bin_dir: Some("/opt/other-bin".to_string()),
         };
         let options = SetupOptions {
             no_search: true,
@@ -3475,9 +3506,53 @@ mod tests {
             config.get(SCOTER_SECTION, DISTRIBUTION_DIR).as_deref(),
             Some("/opt/scoter")
         );
+        assert_eq!(
+            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR).as_deref(),
+            Some("/opt/other-bin")
+        );
         assert_eq!(config.setup_inputs(), &inputs);
         // Only a record: the history isn't changed by them.
         assert!(config.loaded_from().user_setup_file.is_empty());
+
+        // Another distribution directory has its own `bin`.
+        let options = SetupOptions {
+            distribution_dir: Some(Path::new("/opt/new")),
+            ..options
+        };
+        let config = load_with(&options, Env::default()).unwrap();
+        assert_eq!(
+            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR).as_deref(),
+            Some("/opt/new/bin")
+        );
+    }
+
+    #[test]
+    fn distribution_bin_dir() {
+        // Without a distribution directory, it isn't set.
+        let config = load_with(&SetupOptions::default(), Env::default()).unwrap();
+        assert_eq!(config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR), None);
+
+        let options = SetupOptions {
+            distribution_dir: Some(Path::new("/opt/scoter")),
+            no_search: true,
+            ..SetupOptions::default()
+        };
+        let config = load_with(&options, Env::default()).unwrap();
+        assert_eq!(
+            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR).as_deref(),
+            Some("/opt/scoter/bin")
+        );
+        assert_eq!(
+            config.setup_inputs().distribution_bin_dir.as_deref(),
+            Some("/opt/scoter/bin")
+        );
+
+        // From a setup file's distribution directory, too, and usable there.
+        let config = load_one(
+            "scoter:\n  paths:\n    distribution-dir: /dist\na:\n  paths:\n    x: ${scoter:distribution-bin-dir}/x\n",
+        )
+        .unwrap();
+        assert_eq!(config.get("a", "x").as_deref(), Some("/dist/bin/x"));
     }
 
     #[test]

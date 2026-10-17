@@ -198,8 +198,9 @@ network-gateway-clean:
 
 ## script-tests              Run the script unit tests.
 .PHONY: script-tests
+test: script-tests
 script-tests:
-	python3 -m unittest discover -t tests -s tests
+	python3 -m unittest discover -t . -s scripts/tests
 
 # ---------------------------------------------------------------------
 # Installation tasks
