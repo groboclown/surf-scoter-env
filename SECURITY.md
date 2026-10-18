@@ -23,3 +23,7 @@ While normal security practice has this start a timer for public disclosure, ple
 ## Reporting a Vulnerability for In Development Work
 
 If you **know** for a fact this vulnerability only affects work **in development** and **does not** affect released versions, then open the security issue like any other bug.  You shouldn't start a private conversation.
+
+## Analysis
+
+We welcome contributions to the analysis of the security features provided by Surf Scoter.  We maintain documentation around this in the [security documentation tree](docs/security/README.md).

@@ -6,14 +6,20 @@ As this tool has a primary mission to provide a secure development environment, 
 
 What they are and how Surf Scoter aims to isolate or protect them.
 
-* [Container network](network.md)
+* [Runtime network](network.md)
+* [The development container](dev-container.md)
 * [File access](files.md)
 * [The Host Bridge](host-bridge.md)
+* [User and default settings](settings.md)
 
 ## Security Analysis
 
 Investigations into what the systems do and where potential weak points exist.
 
 * [Attack vector analysis](attack-vectors.md)
+    * [Runtime network](network-attack-vectors.md)
+    * [The development container](dev-container-attack-vectors.md)
+    * [File access](files-attack-vectors.md)
+    * [The Host Bridge](host-bridge-attack-vectors.md)
 * [Red Team Events](red-team.md)
 * [Configuration weaknesses](configuration-weaknesses.md)
