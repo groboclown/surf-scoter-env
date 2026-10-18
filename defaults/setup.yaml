@@ -58,7 +58,13 @@ git-vcs:
     programs:
         exec: git
     runs:
-        local-clone: ${exec} clone ${scoter:project-dir} {x:workspace-dir}
+        # SECURITY: keep `--no-local`.  Without it, git clones a local path by
+        # hard-linking the object files, so the project and the workspace share
+        # them.  The container owns those files (through the user namespace
+        # mapping), and could rewrite objects in your real repository behind
+        # already-reviewed hashes.  See FILE-2 in
+        # docs/security/files-attack-vectors.md.
+        local-clone: ${exec} clone --no-local ${scoter:project-dir} {x:workspace-dir}
         fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
         fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD

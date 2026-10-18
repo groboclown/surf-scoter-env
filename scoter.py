@@ -450,10 +450,13 @@ def main(argv: Sequence[str]) -> int:
 
     sub_cmd = args.cmd
     sub_cmd_args = args.cmd_args
-    if not sub_cmd_args or sub_cmd_args[0] == "help":
+    if not sub_cmd or sub_cmd == "help":
         print("All supported sub-commands:")
         for sub in list_sub_commands(config, args.sub_cmd_dir):
             print(f"  {sub}")
+        return 0
+    if sub_cmd == "show-suc":
+        json.dump(config, sys.stdout)
         return 0
 
     return run_sub_command(config, [sub_cmd, *sub_cmd_args], args.sub_cmd_dir)
