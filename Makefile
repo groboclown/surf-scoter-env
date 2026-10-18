@@ -53,6 +53,10 @@ lint:
 .PHONY: dev-prep
 dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug
 	test -f setup.yaml || cp defaults/setup.yaml .
+	mkdir -p bin
+	cd bin && ln -s ../build-scripts/cargo-gen-scoter-uc.sh gen-scoter-uc
+	cd bin && ln -s ../build-scripts/cargo-scoter-host.sh scoter-host
+	cd bin && ln -s ../scripts/*.py ../scripts/surf_scoter_lib/ .
 
 # ---------------------------------------------------------------------
 # Rust-related tasks.
@@ -198,8 +202,9 @@ network-gateway-clean:
 
 ## script-tests              Run the script unit tests.
 .PHONY: script-tests
+test: script-tests
 script-tests:
-	python3 -m unittest discover -t tests -s tests
+	python3 -m unittest discover -t . -s scripts/tests
 
 # ---------------------------------------------------------------------
 # Installation tasks
@@ -216,17 +221,7 @@ mk-installer:
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 mk-installer: mk-installer-x86_64-unknown-linux-gnu
 mk-installer-x86_64-unknown-linux-gnu: host-build-release-x86_64-unknown-linux-gnu
-	mkdir -p target/work/x86_64-unknown-linux-gnu
-	mkdir -p target/work/x86_64-unknown-linux-gnu/bin
-	cp host/target/x86_64-unknown-linux-gnu/release/scoter-host target/work/x86_64-unknown-linux-gnu/bin/.
-	cp host/target/x86_64-unknown-linux-gnu/release/gen-scoter-uc target/work/x86_64-unknown-linux-gnu/bin/.
-	cp -R templates containers docs target/work/x86_64-unknown-linux-gnu/.
-	rm -r target/work/x86_64-unknown-linux-gnu/docs/contributors
-	rm -r target/work/x86_64-unknown-linux-gnu/containers/dev-env/target
-	cp scoter.py target/work/x86_64-unknown-linux-gnu/scoter
-	cp LICENSE target/work/x86_64-unknown-linux-gnu/.
-	-rm scoter-x86_64-unknown-linux-gnu.zip
-	cd target/work/x86_64-unknown-linux-gnu && $(ZIP) -9r ../../scoter-x86_64-unknown-linux-gnu.zip *
+	build-scripts/mk-install.sh x86_64-unknown-linux-gnu
 
 ## installer-clean           Clean the installation build generated files.
 .PHONY: installer-clean

@@ -6,3 +6,4 @@
 * [Future Ideas](future-ideas.md)
 * [Towards V1](towards-v1.md)
 * [The universal configuration file](universal-configuration-file.md)
+* [Creating and maintaining sub-commands](sub-commands.md)

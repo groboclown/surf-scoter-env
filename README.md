@@ -13,9 +13,17 @@ Surf Scoter has your back, but it can never prevent social engineering.  In the 
 
 ## Security Notes
 
-### Review the project configuration file
+These are the things you need to do to keep Surf Scoter's protections working.  The [security documentation](docs/security/README.md) explains the reasons behind each one.
 
-If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the project configuration file.  This file defines how the container can communicate outside its sandbox, which means it can do things you're not ready for.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md).
+### Review a project before you run it
+
+If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the files that decide what its container can do.  They define how the container can communicate outside its sandbox, which means it can do things you're not ready for.
+
+- **The project configuration file** (`.surf-scoter.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
+- **The allowed domain list** (`.surf-scoter/allowed-domains.txt`) says where the container may connect.
+- **The dev container's `Dockerfile` and `dev-env.yaml`** build and run the container.  Look for multi-line values in `dev-env.yaml`, a final `USER` other than an unprivileged user, and downloads in `RUN` steps.
+
+Review changes to these files whenever they come back from the workspace, too.  They change what the *next* environment may do.
 
 ### Don't run git or your IDE on the workspace from your host
 
@@ -36,6 +44,22 @@ For strongest safety, treat the workspace as untrusted from the host side:
 
   Fetching reads the workspace repository's objects without running its hooks or configured commands.
 - Review what you bring back as untrusted code, especially build scripts, before you build or run it on your host.
+- Never run programs from the workspace on your host.
+- If anything looks suspicious, start over from a fresh clone with `scoter run --clean-workspace`.
+- Keep secrets out of the repository and out of the dev container's build context.  Use `vcs: git`, so your untracked files stay behind.
+
+### Keep the network tight
+
+- Keep the allowed domain list as short as the work permits.  Prefer exact hosts (`registry.npmjs.org`) to wildcards (`.npmjs.org`).
+- Keep your IDE's automatic port forwarding off (see [Connecting through VS Code](#connecting-through-vs-code)).
+- Check the gateway log now and then (`podman logs HOSTNAME-ng`).  Denied requests show what the code in the container *tried* to reach.
+- If you change the network settings, recheck every [required network property](docs/security/network.md#required-properties).  The [settings documentation](docs/security/settings.md) has a checklist.
+
+### Protect your own computer
+
+- Prefer a rootless container runtime.
+- On a shared computer, keep your home directory at mode `0700` or `0750`.
+- Treat everything inside the container, including your own IDE session there, as visible to the code it runs.
 
 ## Using Surf Scoter
 
@@ -137,7 +161,10 @@ Because these commands run on your host with your privileges, every file they're
 Some suggestions for what to allow running on the host:
 
 - **Only list commands that truly need the host's privileges.**  If a command works inside the container, run it there.  If it's something you can run on your host yourself, do that instead.  Every command you add is a way for whatever runs in the container, such as an agent or malware, to act on your host.
-- **Put hard limits on files.** If you allow, say `docker compose up` with a file that the dev container can control, then you've opened yourself up to a root escape.  It's much safer to require the files to be ones the container can't edit.  This goes for commands like `make`, `npm run`, `terraform`, `docker build`, `bash`, and other ones that allow the caller to bypass your controls.
+- **Put hard limits on files.** If you allow, say `docker compose up` with a file that the dev container can control, then you've opened yourself up to a root escape.  It's much safer to require the files to be ones the container can't edit.  This goes for commands like `make`, `npm run`, `terraform`, `docker build`, `bash`, and other ones that allow the caller to bypass your controls.  Never allow a command that reads code or configuration from a place the container can write.
+- **Pin every argument you can.**  Write arguments as plain strings where possible.  Use `prefix` on `any` placeholders, and `allowed` patterns on `path` placeholders.
+- **Pass the fewest environment variables you can.**  List credential names under `error`, so a request carrying them is refused.
+- **Watch what host commands print.**  Their output lands in the container, so a command that prints a token hands it to the code you were keeping it from.
 
 
 ## "Surf Scoter"?
