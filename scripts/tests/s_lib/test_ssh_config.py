@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Test the ssh_config parsing of the scoter.py script."""
 import unittest
+
 from ...surf_scoter_lib import ssh_config
 
 

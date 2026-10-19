@@ -1,7 +1,7 @@
 #SPDX:MIT
 """Common output handling routines."""
-from typing import Literal
 import sys
+from typing import Literal
 
 LogLevel = Literal[0, 1, 2, 3, 4, 5, 6, 7]
 

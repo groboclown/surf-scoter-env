@@ -1,14 +1,13 @@
 #SPDX:MIT
 """The Surf Scoter Universal Configuration file handler."""
-from collections.abc import Callable, Sequence
 import json
 import os
+import subprocess  # nosec: B404  # We know the potential issues with subprocess.
+from collections.abc import Callable, Sequence
 from pathlib import Path
-import subprocess
 
 from . import jdata
 from .err import ConfigErr
-
 
 # The few hard-coded items.
 VCS_SECTION_SUFFIX = "-vcs"
@@ -133,12 +132,13 @@ class UserConfig:
         cmd = self.require_run(section, run, template)
         print(f"Running {cmd[0]}")
         print(f"DEBUG {cmd}")
-        return subprocess.run(
+        return subprocess.run(  # nosec: B603  # Input validated on the call.
             cmd,
             stdout=subprocess.PIPE if capture_stdout else None,
             stderr=subprocess.PIPE if capture_stderr else None,
             check=check,
             cwd=cwd,
+            shell=False,
         )
 
     def dev_container_sshd_port_env(self) -> str | None:
@@ -154,8 +154,7 @@ class UserConfig:
         current = self.dev_container_sshd_port()
         if current is not None:
             raise RuntimeError("tried to set the ssh-port when it's already set")
-        dev_con = self._config["dev-container"]
-        assert isinstance(dev_con, dict)
+        dev_con = jdata.req_dict(self._config, "dev-container")
         dev_con["sshd-port"] = int(value)
 
     def dev_container_str(self, key: str) -> str:

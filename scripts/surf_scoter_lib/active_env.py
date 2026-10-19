@@ -7,13 +7,12 @@ know about parallel executions, so they don't step on each other.
 It also provides sufficient information for the user to debug and understand
 what's running on their system.
 """
-from dataclasses import dataclass
 import datetime
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import jdata
-from . import fileutil
+from . import fileutil, jdata
 from .err import ActiveEnvErr
 
 MAX_FILE_SIZE = 1024 * 1024 * 10  # 10 MB

@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Test the jdata module."""
 import unittest
+
 from ...surf_scoter_lib import jdata
 
 

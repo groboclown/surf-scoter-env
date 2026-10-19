@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Helpers for argument handling to the sub-commands."""
 import argparse
-from collections.abc import Sequence
 import json
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from . import log

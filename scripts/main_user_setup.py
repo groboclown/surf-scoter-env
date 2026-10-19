@@ -1,15 +1,18 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: user-setup"""
 import argparse
-from collections.abc import Sequence
 import os
-from pathlib import Path
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 
-from surf_scoter_lib import gen_parser, BAD_EXECUTION_ARGS_CODE
-from surf_scoter_lib import defaults, fileutil
-from surf_scoter_lib.user_config import UserConfig
-
+from surf_scoter_lib import (
+    BAD_EXECUTION_ARGS_CODE,
+    UserConfig,
+    defaults,
+    fileutil,
+    gen_parser,
+)
 
 # ---------------------------------------------------------------------
 # User-space setup.

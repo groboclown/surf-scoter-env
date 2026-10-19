@@ -5,6 +5,7 @@ CARGO ?= cargo
 ZIP ?= zip
 DOCKER ?= docker
 CARGO_BIN ?= ~/.cargo/bin
+PYTHON ?= python3
 
 LOCAL_CONTAINER_TAG_PREFIX ?= local-surf-scoter-env/
 DEV_ENV_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)dev-env:build
@@ -43,13 +44,18 @@ test:
 fmt:
 
 
-## lint:                     Check the files for conformance issues.
+## lint                      Check the files for conformance issues.
 .PHONY: lint
 lint:
 
 
+## dev-install               Install development dependencies (non-OS distribution files)
+.PHONY: dev-install
+dev-install:
+
 # ---------------------------------------------------------------------
 ## dev-prep                  Prepare this directory for running the scoter tool from here.
+##                           Set the --distribution-dir= argument to this current directory.
 .PHONY: dev-prep
 dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug
 	test -f setup.yaml || cp defaults/setup.yaml .
@@ -150,6 +156,7 @@ host-build-release-x86_64-pc-windows-gnu: dependencies-cross
 	cd host && $(CARGO_BIN)/cross build --target x86_64-pc-windows-gnu --release
 
 .PHONY: dependencies-cross
+dev-install: dependencies-cross
 dependencies-cross:
 	# cargo install cross --git https://github.com/cross-rs/cross
 	cargo install cross
@@ -201,10 +208,31 @@ network-gateway-clean:
 # Script tasks
 
 ## script-tests              Run the script unit tests.
+#  This just runs tests, which doesn't use any dev requirements.
 .PHONY: script-tests
 test: script-tests
 script-tests:
-	python3 -m unittest discover -t . -s scripts/tests
+	$(PYTHON) -m unittest discover -t . -s scripts/tests
+
+
+.PHONY: python-venv
+dev-install: python-venv
+python-venv:
+	test -d .venv || $(PYTHON) -m venv .venv
+	.venv/bin/pip install -r dev-requirements.txt
+
+
+.PHONY: python-ruff
+lint: python-ruff
+python-ruff:
+	.venv/bin/python -m ruff check scoter.py scripts/
+
+
+.PHONY: python-bandit
+lint: python-bandit
+python-bandit:
+	.venv/bin/python -m bandit -r scoter.py scripts/
+
 
 # ---------------------------------------------------------------------
 # Installation tasks
