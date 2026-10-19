@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: user-cleanup"""
-from collections.abc import Sequence
 import sys
+from collections.abc import Sequence
 
-from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
+from surf_scoter_lib import BAD_EXECUTION_ARGS_CODE, UserConfig, gen_parser, log
 
 
 def run_cleanup_user(config: UserConfig) -> int:
@@ -21,7 +21,7 @@ def main(argv: Sequence[str]) -> int:
     if not config:
         return BAD_EXECUTION_ARGS_CODE
 
-    args = parser.parse_args(argv)
+    _args = parser.parse_args(argv)
     return run_cleanup_user(config)
 
 if __name__ == "__main__":

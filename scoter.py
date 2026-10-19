@@ -7,15 +7,15 @@ distribution script for processing.
 """
 # Compatibility: Python 3.12+
 import argparse
-from collections.abc import Sequence
 import json
 import os
-from pathlib import Path
 import platform
 import shutil
-import subprocess
+import subprocess  # nosec: B404  # we know the issues around subprocess.
 import sys
 import tempfile
+from collections.abc import Sequence
+from pathlib import Path
 
 JsonData = str | int | float | bool | None | list["JsonData"] | dict[str, "JsonData"]
 DictJsonData = dict[str, JsonData]
@@ -27,7 +27,6 @@ SCOTER_HOST_EXEC = "scoter-host"
 GEN_SCOTER_UC_EXEC = "gen-scoter-uc"
 SUB_CMD_PREFIX = "main_"
 SUB_CMD_SUFFIX = ".py"
-
 
 
 # ---------------------------------------------------------------------
@@ -207,7 +206,7 @@ def _dist_bin_dir(config: DictJsonData) -> Path:
     ret = _opt_lookup(config, "active-config-locations", "distribution-bin-dir")
     if not isinstance(ret, str):
         # The generator must set this.
-        raise RuntimeError(f"distribution-bin-dir not set ({ret})")
+        raise TypeError(f"distribution-bin-dir not set ({ret})")
     return Path(ret)
 
 
@@ -246,11 +245,12 @@ def generate_config(
         args.extend(("--universal", universal_file))
     if no_setup_search:
         args.append("--no-setup-search")
-    res = subprocess.run(
+    res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,
         # let stderr be passed directly to the user.
         check=False,
+        shell=False,
     )
     if res.returncode != 0:
         raise ConfigErr("Problem loading the configuration")
@@ -344,7 +344,7 @@ def run_sub_command(
     # Change execution over the sub-command.
     cmd_args = [py_exe, str(cmd_file), config_file, *argv]
     print(cmd_args)
-    os.execv(py_exe, cmd_args)
+    os.execv(py_exe, cmd_args)  # nosec: B606  # We vetted the command and arguments.
     print(f"Failed to start sub-command {argv[0]} at {cmd_file}.", file=sys.stderr)
     return 127
 

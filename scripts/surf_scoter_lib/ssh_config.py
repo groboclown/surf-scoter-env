@@ -6,7 +6,6 @@ from . import log
 from .err import SshConfigErr
 from .user_config import UserConfig
 
-
 # ---------------------------------------------------------------------
 # User SSH Setup Understanding.
 
@@ -58,7 +57,7 @@ class SshConfigLine:
                 return SshConfigLine(
                     line=line, line_no=line_no, valid=bool(value), host=host, key=key, value=value
                 )
-            idx += 1
+            idx += 1  # noqa: SIM113
         return SshConfigLine(
             line=line, line_no=line_no, valid=False, host=host, key=None, value=None
         )
@@ -186,7 +185,7 @@ class SshConfig:
         host: str | None = None
         line_no = 0
         for line in contents.splitlines(keepends=True):
-            line_no += 1
+            line_no += 1  # noqa: SIM113
             parsed = SshConfigLine.parse_line(host, line, line_no)
             host = parsed.host
             lines = ret.get(parsed.host)

@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: fetch"""
-from collections.abc import Sequence
 import sys
+from collections.abc import Sequence
 
-from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
+from surf_scoter_lib import BAD_EXECUTION_ARGS_CODE, UserConfig, gen_parser, log
 
 
 def run_fetch(config: UserConfig, *, branch: bool | None) -> int:

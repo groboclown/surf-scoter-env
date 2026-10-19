@@ -1,23 +1,28 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: run"""
 import argparse
-from collections.abc import Sequence
 import datetime
 import json
 import os
-from pathlib import Path
 import re
 import shlex
-import subprocess
+import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
 import time
+from collections.abc import Sequence
+from pathlib import Path
 
-from surf_scoter_lib import defaults, jdata, fileutil
-from surf_scoter_lib import gen_parser, BAD_EXECUTION_ARGS_CODE, UserConfig
+from surf_scoter_lib import (
+    BAD_EXECUTION_ARGS_CODE,
+    UserConfig,
+    defaults,
+    fileutil,
+    gen_parser,
+    jdata,
+)
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import ConfigErr
 from surf_scoter_lib.ssh_config import SshConfig
-from surf_scoter_lib.user_config import UserConfig
 
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
@@ -195,9 +200,10 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
                     Path(args.distribution_dir) / defaults.DISTRIBUTION_BIN_DIR / defaults.SCOTER_HOST_EXEC
                 )
             print([scoter_host, "--universal", str(universal_config_file), host])
-            res = subprocess.run(
+            res = subprocess.run(  # nosec: B603  # We checked the input above.
                 [scoter_host, "--universal", str(universal_config_file), host],
                 check=False,
+                shell=False,
             )
             if res.returncode != 0:
                 print("Failed running the host process.")
@@ -313,11 +319,10 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
 
         try:
             data: jdata.JsonData = json.loads(res.stdout)
-            if isinstance(data, list):
-                if len(data) > 0:
-                    data = data[0]
+            if isinstance(data, list) and data:
+                data = data[0]
             if not isinstance(data, dict):
-                raise RuntimeError(f"unexpected JSON result: {res.stdout.decode('utf-8')}")
+                raise TypeError(f"unexpected JSON result: {res.stdout.decode('utf-8')}")
             state = data.get("State")
             print(f"host image state: {state}")
             if not isinstance(state, dict):
@@ -436,7 +441,7 @@ def _configure_sshd_port(config: UserConfig, envs: ActiveEnvironmentSet) -> None
             r"-(.*?)-" +
             r"-(\d+)-\*$"
         )
-        for host in ssh_config.by_host.keys():
+        for host in ssh_config.by_host:
             if not host:
                 continue
             match = user_port_pattern.match(host)
@@ -455,7 +460,7 @@ def _configure_sshd_port(config: UserConfig, envs: ActiveEnvironmentSet) -> None
     ssh_port = ""
     if available_config_ports:
         # Reuse one.
-        ssh_port = tuple(available_config_ports)[0]
+        ssh_port = next(iter(available_config_ports))
     else:
         # get an available one
         start_sshd_port = config.require_value("dev-env", "start-sshd-port")

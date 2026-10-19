@@ -1,0 +1,4 @@
+# A pip requirements file for setting up your .venv directory.
+# Only needed for contributors to run Python validations.
+ruff==0.17.1
+bandit==1.9.4

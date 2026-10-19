@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Handlers for JSON-like data."""
+import json
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import NoReturn
-import json
 
 
 class Found(StrEnum):
@@ -266,7 +266,7 @@ def opt_dict_keys(data: JsonData, *path: JsonPathPart) -> Sequence[JsonPath]:
     if val is None:
         return []
     ret: list[JsonPath] = []
-    for key in val.keys():
+    for key in val:
         ret.append((*path, key))
     return ret
 
@@ -313,9 +313,18 @@ def opt_list_keys(data: JsonData, *path: JsonPathPart) -> Sequence[JsonPath]:
     if val is None:
         return []
     ret: list[JsonPath] = []
-    for idx in range(0, len(val)):
+    for idx in range(len(val)):
         ret.append((*path, idx))
     return ret
+
+
+def optional(data: JsonData, *path: JsonPathPart) -> JsonData:
+    """Require something at the data point.
+    
+    It can be None if the value there is null or doesn't exist.
+    """
+    val, ok, fp = get_at(data, *path)
+    return _as_optional(val, ok, fp, "value")
 
 
 def get_at(data: JsonData, *path: JsonPathPart) -> OptJsonPath:
@@ -354,7 +363,9 @@ def _key_err(path: JsonPath) -> KeyError:
     return KeyError(f"{path_expr_to_str(path)}: no value")
 
 
-def _as_optional(val: JsonData, ok: Found, fp: JsonPath, expected: str) -> None:
+def _as_optional[T: JsonData](val: T, ok: Found, fp: JsonPath, expected: str) -> T | None:
+    if ok == Found.OK:
+        return val
     if ok == Found.EMPTY:
         return None
     if ok == Found.WRONG_TYPE:

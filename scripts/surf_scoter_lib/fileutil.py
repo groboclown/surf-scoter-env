@@ -1,12 +1,12 @@
 #SPDX:MIT
 """File helper utilities."""
 import os
-from pathlib import Path
 import platform
 import shutil
+from pathlib import Path
 
-from .err import SurfScoterErr
 from . import log
+from .err import SurfScoterErr
 
 # ---------------------------------------------------------------------
 # Basic file operations
@@ -43,11 +43,10 @@ def restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
     from_file = Path(str(file) + backup_ext)
     if not from_file.exists():
         # There is no backup file.
-        if delete_allowed:
-            # Only delete the source file if the caller requests it.
-            if not rm(file):
-                # It still exists.  Can't restore from backup.
-                return False
+        # ... only delete the source file if the caller requests it.
+        if delete_allowed and not rm(file):  # noqa: SIM103
+            # It still exists.  Can't restore from backup.
+            return False
         return True
     try:
         # TODO ensure 'move' is Python 3.12 compatible.
@@ -101,7 +100,7 @@ def rm(file: Path) -> bool:
     except PermissionError:
         log.warning(f"Warning: permission issue deleting {file}")
         return not file.exists()
-    except IOError as err:
+    except OSError as err:
         log.warning(f"Warning: {err}")
         return not file.exists()
 

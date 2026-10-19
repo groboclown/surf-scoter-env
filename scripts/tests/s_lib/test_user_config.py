@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Test the suc module."""
-import unittest
 import os
-from pathlib import Path
 import tempfile
+import unittest
+from pathlib import Path
 
 from ...surf_scoter_lib import user_config
 
