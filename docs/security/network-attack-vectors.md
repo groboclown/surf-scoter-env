@@ -16,7 +16,7 @@ Code in the dev container wants to:
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Allowed domain list | The project (`.surf-scoter/allowed-domains.txt`) | [`main_run.py`](../../scripts/main_run.py) copies it; [`squid.conf`](../../containers/network-gateway/squid.conf) enforces it |
+| Egress rules | The project file's `egress`, as accepted | [`gateway_squid.py`](../../scripts/gateway_squid.py) turns them into the gateway's host list; [`squid.conf`](../../containers/network-gateway/squid.conf) enforces it |
 | `CONNECT` requests, hostnames | Code in the dev container | [`squid.conf`](../../containers/network-gateway/squid.conf) |
 | DNS answers for allowed domains | Whoever runs those domains' DNS | [`blocked-destinations.txt`](../../containers/network-gateway/blocked-destinations.txt), [`egress.nft`](../../containers/firewall-router/egress.nft) |
 | DNS queries from the dev container | Code in the dev container | The container runtime's resolver |
@@ -58,7 +58,7 @@ Once a domain is on the list, anything in the container can send it anything.  T
 ### NET-2: The project controls the allowlist
 
 **Severity:** High.  **Status:** Open; project authorization is planned (see [configuration weaknesses](configuration-weaknesses.md)).
-**Where:** `dev-env: paths: allowed-domains` in [`setup.yaml`](../../defaults/setup.yaml); the copy in `run_env_runner` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** the project file's `egress`; `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).  The review of the project's settings (steps 12 to 16 of [projects in v1](../contributors/projects-v1.md)) closes this; until then the rules come from the project file, with a warning.
 
 The list comes from the project, and nothing checks its contents.  A project can widen its own access, and changes made in the workspace take effect once someone brings them back into the project.
 

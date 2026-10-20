@@ -74,7 +74,7 @@ The `dev-env.yaml` file says how to run the container, including where the broke
 
 ## Egress
 
-`egress` lists the network destinations the development container needs.  The rules say what's needed, not how a gateway provides it; the gateway enforces what it can of each rule, and refuses to start with a rule it can't enforce.  Each rule has:
+`egress` lists the network destinations the development container needs.  The rules say what's needed, not how a gateway provides it; the gateway enforces what it can of each rule, and refuses to start with a rule it can't enforce.  The standard gateway (Squid) enforces `tls` rules on port 443; it refuses `http`, `https` and other ports for now.  Each rule has:
 
 * `host` (required): a host name, such as `registry.npmjs.org`, or `*.` and a host name for its subdomains (`*.pkg.dev` allows `us.pkg.dev`, not `pkg.dev` itself).  Lower-case letters, digits and `-`, in at least two parts.  No IP addresses.  Write a name with non-ASCII letters in its `xn--` form, so the file says exactly what the review shows (a Cyrillic `а` in `github.com` can't hide).  A bare `*` is refused, and so is `*.` on a top-level domain (`*.com`), or on a domain where anyone can have a name (`*.github.io`, `*.co.uk`; the system configuration's `scoter: value-lists: egress-refused-wildcards`).
 * `protocol` (required):

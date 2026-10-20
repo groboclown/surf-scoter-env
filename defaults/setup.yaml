@@ -273,6 +273,30 @@ host-bridge:
                 - ~/.volta/bin
                 - ~/.proto/shims
 
+# The network gateway: the only way out of the dev container (see
+# docs/security/network.md).  It enforces the project's egress rules, as far
+# as it can, and refuses to start with a rule it can't enforce.
+network-gateway:
+    values:
+        # The gateway's name.  Your acceptance of a project's egress rules is for
+        # this gateway: a different one asks for a new review.
+        name: squid
+        # Where the gateway container reads the configuration `write-config`
+        # makes (the docker-compose file mounts it there, read-only).
+        config-mount: /user-space/egress-hosts.txt
+    runs:
+        # Given the universal configuration file (`{x:universal}`) and where to
+        # write (`{x:output}`), writes the gateway's configuration from the egress
+        # rules, and prints JSON saying what it enforces and what it refuses.  It
+        # exits with 1, writing nothing, when it refuses any rule.
+        write-config:
+            - ${python:exec}
+            - -E
+            - -s
+            - ${scoter:distribution-bin-dir}/gateway_squid.py
+            - '{x:universal}'
+            - '{x:output}'
+
 # Finding your acceptance of a project's settings, in `scoter: paths: verified-dir`.
 verified:
     runs:
@@ -395,8 +419,6 @@ dev-env:
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway
 
         docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
-
-        allowed-domains: ${scoter:project-dir}/.surf-scoter/allowed-domains.txt
     values:
         firewall-router-image: local-surf-scoter/firewall-router
         network-gateway-image: local-surf-scoter/network-gateway

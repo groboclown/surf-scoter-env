@@ -381,8 +381,13 @@ def setup_values(
         "verified-dir": paths.get("verified-dir"),
         "vcs": vcs_section,
         "vcs-runs": vcs_runs,
-        # Step 9 sets it.
-        "gateway": None,
+        # What enforces the egress rules: a different gateway enforces them
+        # differently, so the rules need a new review.
+        "gateway": {
+            "name": (nullable_dict(suc, "resolved", "network-gateway", "values") or {}).get("name"),
+            "write-config":
+                (nullable_dict(suc, "resolved", "network-gateway", "runs") or {}).get("write-config"),
+        },
         "host-command-checks": checks.get("checks"),
         "hidden-host-commands": _hidden_checks(suc),
         "verified-containers": dict(sorted(verified_containers.items())),

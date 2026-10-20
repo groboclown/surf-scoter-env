@@ -39,6 +39,9 @@ use super::system::{SCOTER_SECTION, SystemConfig, VERIFIED_DIR};
 use super::{ConfigError, child_key, index_key};
 
 pub const SCHEMA: &str = "surf-scoter-accepted-settings-1";
+/// The setup section and `values` key naming the network gateway.
+pub const GATEWAY_SECTION: &str = "network-gateway";
+pub const GATEWAY_NAME: &str = "name";
 const KEYS: [&str; 7] = [
     "$schema",
     "project-dir",
@@ -206,6 +209,20 @@ impl AcceptedSettings {
                     "is {}, not this run's project ({}); the settings were accepted for another project",
                     self.project_dir.display(),
                     project_dir.map_or_else(|| "none".to_string(), |p| p.display().to_string())
+                ),
+            ));
+        }
+        // The egress rules were accepted for one gateway; another enforces
+        // them differently.
+        let setup_gateway = system.get(GATEWAY_SECTION, GATEWAY_NAME);
+        if let Some(accepted) = &self.gateway
+            && setup_gateway.as_deref() != Some(accepted.as_str())
+        {
+            errors.push(error(
+                "gateway",
+                format!(
+                    "the egress rules were accepted for the `{accepted}` gateway, but this setup's is `{}`; review the project again",
+                    setup_gateway.as_deref().unwrap_or("none")
                 ),
             ));
         }

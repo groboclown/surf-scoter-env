@@ -16,7 +16,7 @@ Whatever settings you run with, the network must keep these properties.  The [se
 | | Property | Meaning |
 | --- | --- | --- |
 | **N1** | Single exit | The dev container has no route anywhere except the gateway.  A program that ignores the proxy settings fails rather than connecting directly. |
-| **N2** | Named destinations | Outbound connections go only to hostnames on the allowed domain list, on TCP port 443. |
+| **N2** | Named destinations | Outbound connections go only to the hosts the project's egress rules allow, on TCP port 443. |
 | **N3** | No private reach | Nothing in the environment reaches private, loopback, link-local, multicast or reserved addresses: not your host, not your LAN, not cloud metadata services. |
 | **N4** | Defense in depth | Kernel firewall rules, not just the proxy, enforce the port and address limits of N2 and N3.  A subverted proxy can't widen them. |
 | **N5** | No listeners | Nothing outside the environment can open a connection into it.  No container publishes a port. |
@@ -43,7 +43,7 @@ Each environment runs three containers:
 
 * **`dev`**, the [development container](dev-container.md), is attached only to the `isolated` network, which the container runtime gives no route out (N1).
 * **`firewall`** owns a network namespace attached to both networks.  It is the only container allowed to change network rules, and it installs them at startup (N4, N6).
-* **`gateway`** runs a proxy inside the firewall's namespace without any privileges.  It checks each request against the allowed domain list (N2), and every connection it makes passes through the firewall's rules (N3, N4).
+* **`gateway`** runs a proxy inside the firewall's namespace without any privileges.  It checks each request against the host list made from the egress rules (N2), and every connection it makes passes through the firewall's rules (N3, N4).
 
 The [settings page](settings.md) describes each piece's configuration in detail.
 
@@ -56,7 +56,7 @@ Tools in the dev container find the gateway through the standard proxy environme
 
 The gateway accepts only `CONNECT` requests for an allowed hostname on port 443.  There's no TLS interception and no private certificate authority.  Once the tunnel opens, the traffic is an opaque TLS stream between the tool and the server, which keeps private certificates out of the container and means the gateway sees *where* data goes, not *what* it is.
 
-The allowed domain list comes from the project's `.surf-scoter/allowed-domains.txt`.  At launch, `scoter` copies it from your project directory into the read-only setup directory.  The copy in the workspace has no effect (see [file access](files.md)).
+The allowed hosts come from the project's egress rules (`egress` in its [project file](../project-configuration-file.md#egress)), as you accepted them (or, until a review can make an acceptance, as the project file gives them, with a warning).  At launch, `scoter` has the setup's `network-gateway: runs: write-config` turn them into the gateway's configuration, which the gateway mounts read-only from the resources directory; the dev container never sees it.  A rule the gateway can't enforce stops the launch: it's never dropped, or loosened into something broader.  The Squid gateway enforces `tls` rules on port 443; it refuses `http`, `https` and other ports, which need more than it has.  The project file in the workspace has no effect (see [file access](files.md)).
 
 ### Inbound: SSH through the runtime
 

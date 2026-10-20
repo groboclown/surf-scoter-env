@@ -1250,6 +1250,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn accepted_for_another_gateway() {
+        let dir = TempDir::new();
+        let aws = tool(&dir, "bin/aws");
+        let (options, env, accepted) =
+            accepted_project(&dir, &aws.display().to_string(), "2999-01-01T00:00:00Z");
+        let text = std::fs::read_to_string(&accepted).unwrap();
+        std::fs::write(
+            &accepted,
+            text.replace(r#""gateway": null"#, r#""gateway": "squid""#),
+        )
+        .unwrap();
+        // The setup names no gateway: not the one accepted.
+        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
+        assert_eq!(
+            errors,
+            [
+                "gateway: the egress rules were accepted for the `squid` gateway, but this setup's is `none`; review the project again"
+            ]
+        );
+        // The same gateway is fine.
+        let setup = std::fs::read_to_string(dir.path().join("home/setup.yaml")).unwrap();
+        dir.write(
+            "home/setup.yaml",
+            &format!("{setup}network-gateway:\n  values:\n    name: squid\n"),
+        );
+        assert!(load_all_with_env(&options, env).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scoter_host_start_checks() {
         use crate::config::accepted::{check_for_run, parse_time};
         use std::os::unix::fs::PermissionsExt;

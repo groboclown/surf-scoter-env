@@ -1,6 +1,0 @@
-.github.com
-.githubusercontent.com
-.npmjs.org
-.pypi.org
-.pythonhosted.org
-.repo1.maven.org

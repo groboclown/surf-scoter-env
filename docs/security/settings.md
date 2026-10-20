@@ -32,7 +32,8 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `ssh: paths: key-file`, `known-hosts`, `config-file` | Your client key and the files `scoter` edits | `scoter` rewrites the config and `known_hosts` files on each run. |
 | `workspace: paths: *` | Where the workspace, setup and resources directories live | Keep the setup and resources directories **outside** the workspace.  Inside it, the container could write them through its read-write workspace mount. |
 | `git-vcs: runs: *`, `file-vcs: runs: *` | How the workspace is created, refreshed and merged back | `fetch-changes` runs on your host with the workspace as its working directory (see [file access attack vectors](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace)). |
-| `dev-env: paths: allowed-domains` | Where the allowed domain list is read from | Pointing it into the workspace lets the container choose its own allowlist, breaking N2. |
+| `network-gateway: runs: write-config` | Turns the egress rules into the gateway's configuration | A command that writes a broader list than the rules say breaks N2. |
+| `network-gateway: values: name` | The gateway the egress rules are accepted for | Changing it asks for a new review; a gateway that enforces less than its name suggests weakens N2. |
 | `dev-env: paths: docker-compose`, `firewall-router`, `network-gateway` | Which compose file and network containers to use | Replacing these replaces the network.  Recheck every property. |
 | `dev-env: values: *-image` | Image names for the containers | An image from a registry rather than a local build means trusting whoever publishes it. |
 | `dev-env: values: mem-limit`, `cpus`, `pids-limit`, `logging-max-size` | Dev container resource limits | Removing them lets the container exhaust your host. |
@@ -52,7 +53,7 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `no-new-privileges` everywhere | Programs can't raise their own privileges |
 | Firewall health check, and `gateway` waits for `service_healthy` | N6: the proxy starts only once the rules are loaded |
 | No `ports:` on any service | N5 |
-| Setup directory and allowed domain list mounted read-only | N2: the container can't change its own allowlist |
+| Setup directory mounted read-only, gateway configuration not mounted in the dev container | N2: the container can't change its own allowed hosts |
 | No fixed subnet on `isolated` | N7: each environment gets its own subnet |
 | Process, memory, CPU and log limits | Contained resource use |
 
@@ -101,7 +102,7 @@ When changing it, keep these properties:
 
 1. Refuse anything that isn't `CONNECT`.
 2. Refuse any port but 443.
-3. Refuse any hostname not on the allowed domain list (`/user-space/allowed-domains.txt`, mounted read-only from the setup directory).  Entries starting with `.` match the domain and its subdomains, and `-n` stops Squid from making reverse DNS lookups to test the list.
+3. Refuse any hostname not on the allowed host list (`/user-space/egress-hosts.txt`, made from the egress rules and mounted read-only).  Each line is a regular expression (`dstdom_regex`): `^host$` for a host, `^.+\.domain$` for `*.domain` (its subdomains, not the domain itself).  `-i` ignores case, and `-n` stops Squid from making reverse DNS lookups to test the list.
 4. Refuse destinations that resolve into the [blocked destination list](../../containers/network-gateway/blocked-destinations.txt): private, loopback, link-local, carrier-grade NAT, multicast, documentation and reserved ranges, for IPv4 and IPv6.
 5. Allow what's left.
 
@@ -128,7 +129,7 @@ When changing it, keep these properties:
 
 **Squid is a large attack surface.**  If it's subverted, N4 still limits it to TCP 443 on public addresses, but not to the allowed domains.
 
-**The image's default list is unused.**  The gateway image copies a default `allowed-domains.txt` to `/etc/squid/`, but `squid.conf` reads only `/user-space/allowed-domains.txt`.  The shipped list has no effect, which is the safe outcome, but it may mislead someone reading the image.
+**The image's default list allows nothing.**  The gateway image has an empty `/user-space/egress-hosts.txt`, so its configuration parses; `scoter run` mounts the list it made over it.
 
 
 ## Checklist after a change

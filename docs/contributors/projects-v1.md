@@ -916,6 +916,17 @@ This will also need a method to read those settings and report on what it can an
 
 **Tests:** `methods` on a `tls` rule; a rule for port 22; a listed hostname that resolves to `169.254.169.254` or a private address; a gateway change after acceptance.
 
+Completed:
+
+* **The setup.**  [defaults/setup.yaml](../../defaults/setup.yaml) has a `network-gateway` section: `values: name` (`squid`), `values: config-mount` (where the gateway reads its file), and `runs: write-config`, given `{x:universal}` and `{x:output}`.  `dev-env: paths: allowed-domains` is gone, and so is `.surf-scoter/allowed-domains.txt` (this repository's list moved into its project file's `egress`, as exact hosts).
+* **The translation.**  [`gateway_squid.py`](../../scripts/gateway_squid.py), with [`gateway.py`](../../scripts/surf_scoter_lib/gateway.py): the rules come from the SUC's accepted `egress`, or, until step 15, the project file's (the file and `scoter run` say so).  Each is checked again (a host that isn't a host name, an unknown protocol or port, is refused outright).  The report (JSON on stdout) lists each rule enforced, and each refused with its reason; any refusal means nothing's written, exit 1.  For Squid, only `tls` on 443 is enforced: `https` needs a gateway that looks inside TLS, `http` needs port 80 through the firewall, and other ports need firewall changes (N4).
+* **Squid** reads one file, `/user-space/egress-hosts.txt`, with `dstdom_regex -n -i`: `^host$` for a host, `^.+\.domain$` for `*.domain`.  Squid's `dstdomain` can't say "subdomains but not the domain itself", which a `*.` rule means, so the regular expressions keep it from being broader.  The image's default list allows nothing.  Private, loopback, link-local and metadata destinations are still refused after resolution (`blocked-destinations.txt`, and the firewall), whatever the list says.
+* **`scoter run`** runs `write-config` into `resources/gateway-config` (mode `0644`, as the gateway's own user reads it), shows any refusals and stops, and the docker-compose file mounts it with `GATEWAY_CONFIG_HOST` and `GATEWAY_CONFIG_CONTAINER`.  The setup directory no longer carries it, so the dev container doesn't see it.
+* **The gateway in acceptances.**  `setup_values` records the gateway's name and `write-config`, so a different gateway asks for a new review.  The generator refuses accepted settings whose `gateway` isn't the setup's.
+* **Docs:** [network](../security/network.md), [settings](../security/settings.md), [files](../security/files.md), the attack vector lists, the [project file](../project-configuration-file.md#egress), the [system configuration](../system-config-file.md), the README and the new project guide.
+
+**Tests:** in `test_gateway.py`: the rules' source (accepted, then the project's), rules refused outright, Squid's enforced and refused rules (`https` with `methods`, `http` with `methods`, port 22), the patterns (no broader than the rule), and the script (writes, refuses with nothing written, bad input).  In `universal.rs`: settings accepted for another gateway.  Checked by hand against the real Squid image: the configuration parses (with a list, and the empty default), the patterns allow and refuse the right hosts in a running Squid (`x.registry.npmjs.org`, `pkg.dev` and `evilpkg.dev` refused; `us.pkg.dev` and `a.b.pkg.dev` allowed), and a listed host that resolves to loopback (`localtest.me`) is refused.  A test that runs the containers would make those repeatable.
+
 ## 10. Update `scoter-host` to run accepted executables
 
 The host bridge (Rust) needs to change to match:
@@ -1038,6 +1049,10 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - A blanket acceptance has no `accepted.json`; `scoter.py` treats a blanket match as no match until step 11's checks can work the settings out from the project's files.
   - `scoter kill` isn't implemented; when it is, it removes `${scoter:state-dir}/environments/HOST`, as `scoter run`'s teardown does.
   - The running environments file (`running-env.json`) keeps a copy of the whole SUC for teardown; it's in `state-dir` now, but not written private.
+- Step 9:
+  - The Squid gateway enforces only `tls` on 443.  `http` (with `methods`) needs port 80 in the firewall's rules and Squid's HTTP handling; other ports need firewall changes (N4); `https` needs a gateway that looks inside TLS.
+  - Accepted settings with `"gateway": null` are accepted by any gateway; step 13 always writes the gateway the review was made for.
+  - A test that runs the gateway containers, for the checks made by hand above.
 
 ## 19. Review the settings format
 
@@ -1099,3 +1114,7 @@ These should go into a similar "checks" structure as the host-bridge items.
 ## Remove the `--bin-dir` and `--sub-cmd-dir` arguments
 
 With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.
+
+# Compare the "egress-refused-wildcards" setting with Browser cookie domains
+
+The handling of the "egress-refused-wildcards" setting aligns closely with how a browser allows for registering cookie domains (default domain sharing rules).

@@ -131,8 +131,12 @@ echo "Installing into ${dest}"
 mkdir "${staging}"
 mkdir "${staging}/bin" "${staging}/bin/surf_scoter_lib"
 cp "${work}/target/release/scoter-host" "${work}/target/release/gen-scoter-uc" "${staging}/bin/"
-cp "${src}/scripts/"main_*.py "${src}/scripts/"vcs_root_*.py "${src}/scripts/"verified_*.py "${src}/scripts/__init__.py" "${staging}/bin/"
+cp "${src}/scripts/"*.py "${staging}/bin/"
 cp -R "${src}/scripts/surf_scoter_lib/." "${staging}/bin/surf_scoter_lib/"
+rm -r \
+    "${staging}/bin/surf_scoter_lib/__pycache__" \
+    "${staging}/bin/surf_scoter_lib/"*/__pycache__ \
+    2>/dev/null || true
 cp -R "${src}/containers" "${src}/defaults" "${src}/docs" "${staging}/"
 cp "${src}/scoter.py" "${src}/LICENSE" "${staging}/"
 # The distribution's own setup file.
