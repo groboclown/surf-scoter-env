@@ -713,6 +713,20 @@ mod tests {
         )
         .unwrap()
         .commands;
+        // As the universal configuration file gives them: the absolute program.
+        let echo = config::command::find_executable(
+            std::path::Path::new("echo"),
+            std::env::var_os("PATH").as_deref(),
+            None,
+        )
+        .map(|p| p.display().to_string());
+        let commands = commands
+            .into_iter()
+            .map(|rule| config::project::CommandRule {
+                program: echo.clone(),
+                ..rule
+            })
+            .collect();
         let workspace = Workspace {
             host: std::env::temp_dir(),
             container: "/workspace".to_string(),

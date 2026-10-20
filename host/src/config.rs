@@ -474,10 +474,11 @@ fn brokered_commands(
     for (i, (rule, entry)) in commands.iter_mut().zip(entries).enumerate() {
         match entry.get("program") {
             Some(serde_json::Value::Null) => rule.unavailable = true,
-            Some(_) => {}
-            None => errors.push(error(
+            // `scoter-host` runs it as it is, never looking it up.
+            Some(serde_json::Value::String(program)) if Path::new(program).is_absolute() => {}
+            _ => errors.push(error(
                 &index_key(KEY, i),
-                "needs `program`: the program found, or null".to_string(),
+                "needs `program`: the absolute path of the program found, or null".to_string(),
             )),
         }
         rule.env_plan = EnvPlan::as_written(&rule.env);
@@ -1532,7 +1533,15 @@ mod tests {
         );
         assert_eq!(
             errors,
-            ["host-brokered[0]: needs `program`: the program found, or null"]
+            ["host-brokered[0]: needs `program`: the absolute path of the program found, or null"]
+        );
+        // A relative program would be found wherever scoter-host runs.
+        let errors = messages(
+            load(&|j| j["host-brokered"][0]["program"] = serde_json::json!("bin/one")).unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            ["host-brokered[0]: needs `program`: the absolute path of the program found, or null"]
         );
         let errors = messages(
             load(&|j| j["host-brokered"][0]["shell"] = serde_json::json!(true)).unwrap_err(),

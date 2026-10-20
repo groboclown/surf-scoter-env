@@ -937,6 +937,14 @@ The host bridge (Rust) needs to change to match:
 
 **Tests:** a handshake name that isn't accepted; a relative `PATH` entry on the host; an executable removed after acceptance.
 
+Completed:
+
+* **Absolute programs only.**  `scoter-host` runs `host-brokered`'s `program` as it is: `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs) refuses one that isn't absolute, or isn't an executable file any more (removed or changed since acceptance), and never looks it up; `find_on_host` is gone.  Loading the universal file refuses a `program` that isn't absolute or `null`, too.  This closes [BRIDGE-11](../security/host-bridge-attack-vectors.md#bridge-11-the-hosts-path-lookup).
+* **No relative `PATH` entries.**  `find_executable` skips relative and empty `PATH` entries, so the generator (finding the setup's programs, the host command checks' programs, and, until step 15, the unreviewed commands') never resolves a program against the directory it runs in.
+* **Names.**  The handshake name (the client's `argv[0]`, its last path part) is matched exactly against the accepted `command` names, and nothing else (the existing `denies_lookalike_command_names` test covers `AWS` and `aws.exe` against `aws`).  On Windows too: names are case sensitive (step 4), and `PATHEXT` doesn't apply at run time, as the accepted program is an absolute path with its extension.
+
+**Tests:** in `exec.rs`: only absolute executables run (a bare name, a relative path, a missing program, one removed after acceptance, one not executable).  In `command.rs`: relative `PATH` entries are skipped, and a later absolute one still counts.  In `config.rs`: a relative `host-brokered` program is refused when the universal file loads.  The host's own tests now give their commands absolute programs, as the universal file does.
+
 ## 11. Add the verification checks library
 
 A Python library, used by the verify and run scripts, that runs the checks from the design using the lists from step 4:

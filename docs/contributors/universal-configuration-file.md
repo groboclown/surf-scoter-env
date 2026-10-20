@@ -273,7 +273,8 @@ The general layout:
     "host-brokered": [
         // This is the `commands` section from the project configuration file.
         // It's nearly verbatim, except for two fields, so each entry says exactly what it does:
-        //  * 'program' is filled with either the path to the executable, or 'null' if not
+        //  * 'program' is filled with either the absolute path of the executable (which
+        //    `scoter-host` runs as it is, never looking it up), or 'null' if not
         //    found.
         //  * 'env' is the command's whole environment: the project's top-level `env` with
         //    the command's own added, and its `${section:key}` references expanded.  All

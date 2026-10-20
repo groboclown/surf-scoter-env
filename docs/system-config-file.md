@@ -146,7 +146,7 @@ ssh:
 
 A program's value is expanded as a file location is (a leading `~` and `./`, and `${...}` references), and then:
 
-* a bare name, such as `ssh`, is searched for on the `PATH`;
+* a bare name, such as `ssh`, is searched for in the `PATH`'s absolute directories.  Relative and empty entries (such as `.`) are skipped: they'd be relative to wherever the tool runs, which is likely the project;
 * anything else, such as `~/bin/ssh-keygen` or `/usr/bin/ssh`, is used as is, as long as it's an executable file.
 
 References to a program, such as `${exec}`, get the program found.  If a program can't be found, it has no value, and neither does any value that refers to it (such as a `runs` command that uses it).  The rest of the section is still usable.  Like a file location, a program can't use `{x:...}` values.

@@ -39,7 +39,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | [BRIDGE-8](#bridge-8-a-hostile-broker) | A hostile broker | Medium | Mitigated |
 | [BRIDGE-9](#bridge-9-no-limit-on-host-processes) | No limit on host processes | Medium | Open |
 | [BRIDGE-10](#bridge-10-signals-delivered-to-host-processes) | Signals delivered to host processes | Low | By design |
-| [BRIDGE-11](#bridge-11-the-hosts-path-lookup) | The host's `PATH` lookup | Low | Open |
+| [BRIDGE-11](#bridge-11-the-hosts-path-lookup) | The host's `PATH` lookup | Low | Closed |
 | [BRIDGE-12](#bridge-12-windows-hosts) | Windows hosts | Medium | Unverified |
 
 
@@ -157,14 +157,16 @@ The container can send a fixed set of signals to the host processes it started. 
 
 ### BRIDGE-11: The host's `PATH` lookup
 
-**Severity:** Low.  **Status:** Open.
-**Where:** `find_on_host` in [`exec.rs`](../../host/src/host/exec.rs); `find_executable` in [`command.rs`](../../host/src/config/command.rs).
+**Severity:** Low.  **Status:** Closed.
+**Where:** `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs); `find_executable` in [`command.rs`](../../host/src/config/command.rs).
 
-Bare command names are found on `scoter-host`'s own `PATH`.  Relative entries such as `.` are resolved against `scoter-host`'s working directory, which is usually the project directory, whose contents may have come from the workspace.
+Bare command names used to be found on `scoter-host`'s own `PATH`, where relative entries such as `.` were resolved against its working directory, usually the project directory.
 
-**Red team:** with a relative `PATH` entry on the host, check whether a file in the project directory can shadow an allowed command.
+Now `scoter-host` runs exactly the absolute program the universal configuration file gives (the review resolved it, or, until reviews exist, the generator found it), refuses one that isn't absolute (when it loads the file, and again before running it), and never looks anything up on its `PATH`.  A program that's gone since is refused, not looked for elsewhere.  Where programs are found on a `PATH` (by the generator, for the setup's programs and the host command checks), relative and empty entries are skipped.
 
-**When changing this code:** consider ignoring relative `PATH` entries, and resolving programs to absolute paths when the configuration loads.
+**Red team:** with a relative `PATH` entry on the host, check that a file in the project directory can't shadow an allowed command; remove an accepted program, and check the request is refused.
+
+**When changing this code:** keep programs absolute from the configuration to the `exec`; don't add a fallback lookup.
 
 ### BRIDGE-12: Windows hosts
 
