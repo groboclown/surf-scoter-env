@@ -1,6 +1,10 @@
 # The Configuration File
 
-Surf Scoter stores its configuration in a YAML formatted file.  By convention, this resides in your project directory named `.scoter-config.yaml`.
+Surf Scoter stores its configuration in a YAML formatted file, `project.yaml`, in a `.surf-scoter.d` directory.  Everything Surf Scoter reads from your project lives in `.surf-scoter.d`: this file, and your development container directories.  The *project directory* is the one holding `.surf-scoter.d`; it's usually the root of your repository, but needn't be.  The directory's name comes from the [system configuration](system-config-file.md)'s `scoter` `values: project-files-dir`; `.surf-scoter.d` is the default, and the name these pages use.
+
+The `scoter` tool looks for `.surf-scoter.d/project.yaml` in the current directory, then in the project directory given with `--project-dir`.  You can also name the file with `--project-config`, but it must still be directly inside a directory with that name.
+
+For safety, the tools refuse to read the project file when it, or its `.surf-scoter.d` directory, is a symlink, or when the file isn't a regular file (a FIFO or device, say).
 
 This file tells the Scoter tools which development container the project uses.  It's meant to be shared by everyone working on the project, so settings for a particular computer (such as which executables to use) belong in the [system configuration files](system-config-file.md) instead.
 
@@ -15,8 +19,8 @@ You can also use this with the [scoter-host](../host/) executable to describe wa
 vcs: git
 container:
   # The development container: a directory with a Dockerfile and dev-env.yaml,
-  # relative to this file.
-  dev-container-path: ./.scoter/dev-env
+  # relative to this file, inside .surf-scoter.d.
+  dev-container-path: ./dev-env
   # Or, instead, the name of one found in the system configuration's `scoter` `path-lists: dev-containers-search`.
   # dev-container: dev-env
 # optional; the environment of every host command (see "Host command environment")
@@ -57,6 +61,8 @@ The `container` section sets exactly one of:
 
 * `dev-container-path`: a directory, relative to this file, holding the container's `Dockerfile` and its `dev-env.yaml` file (see [the developer environment Dockerfile](project-dockerfile.md)).
 * `dev-container`: the name of such a directory, found in one of the `scoter` section's `path-lists: dev-containers-search` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
+
+The container directory, and every parent its `dev-env.yaml` builds on, must be inside `.surf-scoter.d` or one of the `dev-containers-search` directories, once symlinks are resolved.  The directory is the container's build context, so keep files you don't want in the image, such as `.env` files and keys, out of it.
 
 The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 

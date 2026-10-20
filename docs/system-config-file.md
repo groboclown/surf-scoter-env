@@ -5,9 +5,8 @@ Scoter allows you to set specific configurations for your particular computer in
 
 ## Where to find the system configuration files
 
-The tool will look in *all* these places, in order, not just the first one found.  That means all of the files that exist will load into the configuration.  Earlier files take priority over later ones.
+The tool reads both of these, when they exist; the first takes priority over the second.
 
-* The `--user-setup` arguments.  There may be several, say to add a project's own setup to yours; a later one takes priority over an earlier one.
 * `${scoter:user-setup-file}` (using the internal setup to find the location; see below)
 * `${scoter:distribution-dir}/setup.{yaml,yml}`: the files Surf Scoter itself installs (see below).
 
@@ -27,7 +26,11 @@ scoter:
 
 then the tool reads `/my/install/dir/setup.{yaml,yml}`, with the lowest priority.  `--distribution-dir` wins over a `distribution-dir` in the setup files.  To use a different installation, give `--distribution-dir` yourself; the setting in a setup file only counts when the tools aren't given one.  Either way, only one distribution directory's file is read, and a file is only read once, even if it's found more than one way.
 
-The tools never look for setup files in a project.  A setup file can run any program on your computer, and change how the containers are put together, and a project can come from anyone.  A project's own setup file is only read when you give it with `--user-setup`.  For the same reason, a `distribution-dir` that comes from the setup files (rather than `--distribution-dir`) must be an absolute path outside the project directory, the project configuration file's directory and the dev container's workspace directory, and must not refer to `${scoter:cwd}` (directly or through another key), as the tools usually run in the project; otherwise the tools stop with an error.
+The tools never read a setup file from a project.  A setup file can run any program on your computer, decides what a project may do, and changes how the containers are put together, and a project can come from anyone.  So when there's a project, these must all be outside the project directory, the project files directory, the dev container's workspace directory, and the repository holding the project (the nearest directory above the project with a `.git` or `.hg`, not counting your home directory or above); otherwise the tools stop with an error, and make no configuration:
+
+* `$SURF_SCOTER_HOME`, whether or not it holds a setup file.  A project can set environment variables when you enter its directory (say, with a `.envrc`), so the tools check where it points.
+* The user's setup file, however it was found.
+* A `distribution-dir` that comes from the setup files (rather than `--distribution-dir`).  It must also be an absolute path, and must not refer to `${scoter:cwd}` (directly or through another key), as the tools usually run in the project.
 
 Note: it is an error (will cause the tools to bail out) if you have both a `setup.yaml` and a `setup.yml` (or `surf-scoter.setup.yaml` and `surf-scoter.setup.yml`) file in the same directory.
 
@@ -82,15 +85,15 @@ Referring to a key that isn't set anywhere is an error (except for the `scoter` 
 The `scoter` section is special, in that the tool fills in the `paths` that say where the configuration came from, so you can refer to them from other places.  These are the same values as the universal configuration file's `active-config-locations` (see [The Universal Configuration File](contributors/universal-configuration-file.md)):
 
 * `project-config` - the project configuration file.  Not set without one.
-* `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)).  This is the directory with the project configuration file in it, unless `gen-scoter-uc --project-dir` gives another.  Not set without either.
+* `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)).  This is the directory holding the project files directory (`values: project-files-dir`, below) the project configuration file is in, unless `gen-scoter-uc --project-dir` gives another.  Not set without either.
 * `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers-search` (see below), so that list can't refer to it.
 * `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
 * `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
-* `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  This is the file the tool found by looking, not the `--user-setup` file.  If the tool didn't find a user setup file, this isn't set.
+* `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  If the tool didn't find a user setup file, this isn't set.
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
 * `distribution-dir` - the Surf Scoter distribution directory, as described [above](#where-to-find-the-system-configuration-files): `--distribution-dir`, or else the highest priority setup file's `distribution-dir`.  Not set without either.
 * `distribution-bin-dir` - the distribution's programs: `${scoter:distribution-dir}/bin`.  A program working with the universal configuration file may change it there, and a later `gen-scoter-uc --universal` keeps the change while the distribution directory stays the same.  Not set without a distribution directory.
-* `cwd` - the directory the tool was run in.
+* `cwd` - the directory the tool was run in, or the project directory when `--project-dir` gives one.  The project configuration file search uses it, so `--project-dir` decides where to look, never the directory you happen to be in.
 
 All of them are absolute paths.
 
@@ -98,7 +101,7 @@ All of them are absolute paths.
 
 A run doesn't always have all of these: `project-dir` isn't set without a project, for example.  Referring to one that isn't set (say, `${scoter:user-dir}` when your setup file is `~/.config/surf-scoter.setup.yaml`) isn't an error, so one setup file can serve runs with and without a project:
 
-* A `path-lists` entry that needs it is left out, as a `./` entry is without a project.  So `dev-containers-search: ['${scoter:project-dir}/containers', '${scoter:distribution-dir}/containers']` is just the distribution's directory when there's no project.
+* A `path-lists` entry that needs it is left out, as a `./` entry is without a project.  So `dev-containers-search: ['${scoter:project-dir}/${scoter:project-files-dir}', '${scoter:distribution-dir}/containers']` is just the distribution's directory when there's no project.
 * Any other value that needs it has no value (`null`), like a value that needs a program that isn't there.  The tool using that value reports the problem, if it needs it.
 
 A misspelled location, such as `${scoter:project-dirr}`, is still an error.
@@ -164,7 +167,9 @@ The tools use these sections:
     * `paths: key-file`: the private key used to connect to the container.
 * `scoter`: the tool's own settings.
     * `paths`: where the configuration came from, set by the tool (except that you can set `distribution-dir`), as described in [The `scoter:` section](#the-scoter-section).
-    * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.
+    * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.  A dev container, and every parent it builds on, must be inside the project files directory or one of these directories, so don't list directories a project controls, such as `${scoter:project-dir}` itself.  The default is `${scoter:project-dir}/${scoter:project-files-dir}` and the distribution's `containers` directory.
+    * `values: project-files-dir`: the name of the project files directory, which holds the project configuration file and the project's dev containers.  The project configuration file must be directly inside a directory of this name, and the project directory is the one holding it.  It must be a single directory name; the default is `.surf-scoter.d`.
+    * `paths: verified-dir`: where your accepted (verified) project settings are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.
 

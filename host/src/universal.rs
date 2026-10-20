@@ -313,11 +313,12 @@ mod tests {
 
     fn load(dir: &TempDir, project: Option<&str>, setup: &str) -> FullConfig {
         let options = LoadOptions {
-            project: project.map(|p| dir.write("proj/scoter.yaml", p)),
-            user_setup: vec![dir.write("setup.yaml", setup)],
+            project: project.map(|p| dir.write("proj/.surf-scoter.d/project.yaml", p)),
             ..LoadOptions::default()
         };
+        dir.write("home/setup.yaml", setup);
         let env = Env {
+            scoter_home: Some(dir.path().join("home")),
             path: Some(dir.path().join("bin").into_os_string()),
             ..Env::default()
         };
@@ -330,8 +331,8 @@ mod tests {
         let dir = TempDir::new();
         let podman = tool(&dir, "bin/podman");
         let aws = tool(&dir, "bin/aws");
-        dir.write("proj/env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/env/dev-env.yaml", DEV_ENV);
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
         let config = load(
             &dir,
             Some(concat!(
@@ -351,23 +352,24 @@ mod tests {
                 "  values:\n    port: 22022\n    ratio: 0.5\n    debug: false\n    unset: null\n    note: '${config-file} {x:keep}'\n",
                 "scoter:\n  paths:\n    distribution-dir: /opt/scoter\n    note: ${ssh:config-file}\n",
                 "  path-lists:\n    compose: [./compose, /etc/compose]\n",
+                "  values:\n    project-files-dir: .surf-scoter.d\n",
             ),
         );
         let universal = build(&config).unwrap();
         let p = |path: &PathBuf| path.display().to_string();
         assert_eq!(
             universal.active_config_locations.project_config,
-            Some(p(&dir.path().join("proj/scoter.yaml")))
+            Some(p(&dir.path().join("proj/.surf-scoter.d/project.yaml")))
         );
         assert_eq!(universal.setup.files.len(), 1);
         assert_eq!(
             universal.setup.files[0].file,
-            p(&dir.path().join("setup.yaml"))
+            p(&dir.path().join("home/setup.yaml"))
         );
         // No `./`: the path is canonical.
         assert_eq!(
             universal.active_config_locations.dev_container_path,
-            Some(p(&dir.path().join("proj/env")))
+            Some(p(&dir.path().join("proj/.surf-scoter.d/env")))
         );
         let strings =
             |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
@@ -429,17 +431,29 @@ mod tests {
                                 "/etc/compose".to_string()
                             ]),
                         )]),
+                        values: BTreeMap::from([(
+                            "project-files-dir".to_string(),
+                            ScalarValue::String(".surf-scoter.d".to_string()),
+                        )]),
                         ..section(
                             &[
-                                ("dev-container-path", Some(p(&dir.path().join("proj/env")))),
+                                (
+                                    "dev-container-path",
+                                    Some(p(&dir.path().join("proj/.surf-scoter.d/env")))
+                                ),
                                 ("distribution-bin-dir", Some("/opt/scoter/bin".to_string())),
                                 ("distribution-dir", Some("/opt/scoter".to_string())),
                                 ("note", Some(ssh_config.clone())),
                                 (
                                     "project-config",
-                                    Some(p(&dir.path().join("proj/scoter.yaml")))
+                                    Some(p(&dir.path().join("proj/.surf-scoter.d/project.yaml")))
                                 ),
                                 ("project-dir", Some(p(&dir.path().join("proj")))),
+                                ("user-dir", Some(p(&dir.path().join("home")))),
+                                (
+                                    "user-setup-file",
+                                    Some(p(&dir.path().join("home/setup.yaml")))
+                                ),
                             ],
                             &[],
                         )
@@ -501,7 +515,7 @@ mod tests {
         // The history of the inputs is its own block.
         assert_eq!(
             json["loaded-from"]["project-config"],
-            serde_json::json!([p(&dir.path().join("proj/scoter.yaml"))])
+            serde_json::json!([p(&dir.path().join("proj/.surf-scoter.d/project.yaml"))])
         );
         assert_eq!(
             json["setup"].as_object().unwrap().len(),
@@ -571,9 +585,14 @@ mod tests {
         for group in ["programs", "runs", "path-lists", "values"] {
             assert_eq!(json["resolved"]["ssh"][group], Json::Object(Map::new()));
         }
+        // Only where the user's setup file was found.
+        let home = |p: &str| dir.path().join(p).display().to_string();
         assert_eq!(
             json["resolved"]["scoter"]["paths"],
-            Json::Object(Map::new())
+            serde_json::json!({
+                "user-dir": home("home"),
+                "user-setup-file": home("home/setup.yaml"),
+            })
         );
         assert_eq!(active["dev-container-path"], Json::Null);
         assert_eq!(json["dev-container"], Json::Null);

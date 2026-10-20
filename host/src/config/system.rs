@@ -2,19 +2,19 @@
 //! `docs/system-config-file.md`.
 //!
 //! These files are read, highest priority first:
-//!   1. the `--user-setup` files, the last given first;
-//!   2. the user's setup file, the first found of
+//!   1. the user's setup file, the first found of
 //!      `$SURF_SCOTER_HOME/setup.{yaml,yml}`,
 //!      `~/.config/surf-scoter.setup.{yaml,yml}` and
 //!      `~/.config/surf-scoter.d/setup.{yaml,yml}`;
-//!   3. `${scoter:distribution-dir}/setup.{yaml,yml}`, using the settings so
-//!      far: `--distribution-dir`, or else what the files above set.
+//!   2. `${scoter:distribution-dir}/setup.{yaml,yml}`, using the settings so
+//!      far: `--distribution-dir`, or else what the file above sets.
 //!
-//! No setup file is ever found in the project: a setup file can run any
-//! program, and a project can come from anyone.  So a `distribution-dir`
-//! from the setup files must be absolute, outside the project's
-//! directories, and not refer to `${scoter:cwd}`.  Per-project setup files are only read when given, with
-//! `--user-setup`.
+//! No setup file is ever read from the project: a setup file can run any
+//! program, and decides what the project may do, and a project can come
+//! from anyone.  So `SURF_SCOTER_HOME`, the user's setup file, and a
+//! `distribution-dir` from the setup files must all be outside the project's
+//! directories and the repository holding them; a `distribution-dir` from
+//! the setup files must also be absolute, and not refer to `${scoter:cwd}`.
 //!
 //! Each top-level key is a section, holding its keys grouped by the kind of
 //! value they have:
@@ -99,6 +99,10 @@ pub const DISTRIBUTION_DIR: &str = "distribution-dir";
 /// program changed it.
 pub const DISTRIBUTION_BIN_DIR: &str = "distribution-bin-dir";
 pub const CWD: &str = "cwd";
+/// Where the user's accepted (verified) project settings are kept.  Set by
+/// the setup files, not the tool; it decides what a project may do, so it
+/// must be absolute and outside the project.
+pub const VERIFIED_DIR: &str = "verified-dir";
 /// The `scoter` `paths` only the tool sets.
 const TOOL_ONLY_KEYS: [&str; 9] = [
     PROJECT_CONFIG,
@@ -251,8 +255,6 @@ impl Entry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Source {
-    /// A `--user-setup` file.
-    UserSetup,
     /// The user's setup file.
     User,
     /// The distribution directory's.
@@ -362,8 +364,6 @@ pub struct SectionRecord {
 /// Where to find the system setup.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SetupOptions<'a> {
-    /// The `--user-setup` files, in the order given: a later one wins.
-    pub user_setup: &'a [PathBuf],
     pub distribution_dir: Option<&'a Path>,
     /// Where `./` paths start: `scoter:project-dir`.
     pub project_dir: Option<&'a Path>,
@@ -456,14 +456,11 @@ fn is_project_relative(text: &str) -> bool {
 /// without it, `./` `path-lists` entries are left out, and `./` `paths`
 /// values are kept as written.
 pub fn load(
-    user_setup: Option<&Path>,
     distribution_dir: Option<&Path>,
     project_dir: Option<&Path>,
     env: Env,
 ) -> Result<SystemConfig, Vec<ConfigError>> {
-    let user_setup: Vec<PathBuf> = user_setup.map(Path::to_path_buf).into_iter().collect();
     let options = SetupOptions {
-        user_setup: &user_setup,
         distribution_dir,
         project_dir,
         ..SetupOptions::default()
@@ -502,19 +499,28 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         history.project_config.insert(0, path_text(project));
     }
 
+    // Setup files found in the project.  Where the project is depends on the
+    // project files directory being named right, which the setup files say;
+    // until that's checked, these are kept aside (see the end).
+    let mut location_errors = Vec::new();
+    // `SURF_SCOTER_HOME` can be set by the project itself (say, through a
+    // `.envrc` that runs when you enter its directory), so it's checked
+    // whenever the project is known, whether or not it's searched this time.
+    let home_in_project = if let Some(home) = env.scoter_home.as_deref().map(super::absolute)
+        && let Some(name) = in_project(&home, options, &env)
+    {
+        location_errors.push(ConfigError::new(
+            Some(&home),
+            "",
+            format!(
+                "`SURF_SCOTER_HOME` is in the project (`{name}`); the user's setup file is never read from a project"
+            ),
+        ));
+        true
+    } else {
+        false
+    };
     let mut found: Vec<(PathBuf, Source)> = Vec::new();
-    // Highest priority first: the last given.
-    for path in options.user_setup.iter().rev() {
-        if path.is_file() {
-            found.push((path.to_path_buf(), Source::UserSetup));
-        } else {
-            errors.push(ConfigError::new(
-                Some(path),
-                "",
-                "the --user-setup file doesn't exist",
-            ));
-        }
-    }
     if !options.no_search {
         match find_user_setup(&env) {
             Ok(Some((file, dir))) => {
@@ -599,9 +605,9 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         let problem = distribution_dir
             .as_deref()
             .filter(|_| !given)
-            .and_then(|dir| untrusted_setup_dir(dir, options));
+            .and_then(|dir| untrusted_setup_dir(dir, options, &env));
         if let Some(problem) = problem {
-            errors.push(ConfigError::new(None, "", problem));
+            location_errors.push(ConfigError::new(None, "", problem));
         } else if let Some(dir) = distribution_dir {
             match find_setup(&dir, SETUP) {
                 Ok(Some(path)) if !tried.iter().any(|t| same_file(t, &path)) => {
@@ -632,14 +638,60 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         config.set_location(DISTRIBUTION_BIN_DIR, dir.clone());
     }
 
+    // A base's user file was found before the project was known.
+    for file in files
+        .iter()
+        .filter(|f| f.source == Source::User && !home_in_project)
+    {
+        let dir = file.path.parent().unwrap_or(Path::new(""));
+        if let Some(name) = in_project(dir, options, &env) {
+            location_errors.push(ConfigError::new(
+                Some(&file.path),
+                "",
+                format!(
+                    "the user's setup file is in the project (`{name}`); it's never read from a project"
+                ),
+            ));
+        }
+    }
     // A base's distribution file was found before the project was known.
     if inputs.distribution_dir.is_none() {
         for file in files.iter().filter(|f| f.source == Source::Distribution) {
             let dir = file.path.parent().unwrap_or(Path::new(""));
-            if let Some(problem) = untrusted_setup_dir(dir, options) {
-                errors.push(ConfigError::new(Some(&file.path), "", problem));
+            if let Some(problem) = untrusted_setup_dir(dir, options, &env) {
+                location_errors.push(ConfigError::new(Some(&file.path), "", problem));
             }
         }
+    }
+    // The accepted project settings decide what a project may do, so they
+    // can't be kept where the project, or the container, could change them.
+    if let Some(dir) = config.get_path(SCOTER_SECTION, VERIFIED_DIR) {
+        let setting = format!("`{SCOTER_SECTION}:{VERIFIED_DIR}` {}", dir.display());
+        if !dir.is_absolute() {
+            errors.push(ConfigError::new(
+                None,
+                "",
+                format!("{setting} must be an absolute path"),
+            ));
+        } else if let Some(name) = in_project(&dir, options, &env) {
+            location_errors.push(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "{setting} is in the project (`{name}`); the accepted project settings are never kept in a project"
+                ),
+            ));
+        }
+    }
+    // With the project file in the wrong place, the project directory used
+    // above isn't the project's, so that's the only problem to report.  The
+    // load fails either way, so nothing from a file found there is used.
+    match options
+        .project_config
+        .map(|path| check_project_files_dir(&config, path))
+    {
+        Some(Err(e)) => errors.push(e),
+        _ => errors.extend(location_errors),
     }
 
     errors.extend(kind_changes(&files));
@@ -663,39 +715,177 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     }
 }
 
+/// The `scoter` section's `values` key naming the project files directory:
+/// the directory the project file must be in, which also holds the project's
+/// dev containers.
+pub const PROJECT_FILES_DIR: &str = "project-files-dir";
+
+/// Check that the project file at `path` is directly inside the directory the
+/// `scoter` `values: project-files-dir` names.
+fn check_project_files_dir(config: &SystemConfig, path: &Path) -> Result<(), ConfigError> {
+    let name = match config.value(SCOTER_SECTION, PROJECT_FILES_DIR) {
+        Some(ScalarValue::String(name)) => name,
+        Some(_) => {
+            return Err(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "the system configuration's `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}` must be text"
+                ),
+            ));
+        }
+        None => {
+            return Err(ConfigError::new(
+                Some(path),
+                "",
+                format!(
+                    "the system configuration sets no `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}`, the directory the project file must be in"
+                ),
+            ));
+        }
+    };
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err(ConfigError::new(
+            None,
+            "",
+            format!(
+                "the system configuration's `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}` ('{name}') must be a directory name, without '/' or '\\'"
+            ),
+        ));
+    }
+    if !super::project::in_files_dir(path, &name) {
+        return Err(ConfigError::new(
+            Some(path),
+            "",
+            format!("the project file must be in a `{name}` directory"),
+        ));
+    }
+    Ok(())
+}
+
 /// Why the tools can't read a setup file they found by themselves in `dir`,
 /// a `distribution-dir` that came from the setup files, if they can't: it's
 /// relative (to the directory the tool runs in, likely the project), or in
 /// the project.  A setup file can run any program, so it's never taken from
-/// the project unless given with `--user-setup`.
-fn untrusted_setup_dir(dir: &Path, options: &SetupOptions) -> Option<String> {
+/// the project.
+fn untrusted_setup_dir(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
     let setting = format!("`{SCOTER_SECTION}:{DISTRIBUTION_DIR}` {}", dir.display());
     if !dir.is_absolute() {
         return Some(format!(
             "{setting} must be absolute to find a setup file in it; give `--distribution-dir` instead"
         ));
     }
-    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    in_project(dir, options, env).map(|name| {
+        format!("{setting} is in the project (`{name}`); setup files are never read from a project")
+    })
+}
+
+/// The name of the project location `dir` is in, once symlinks are
+/// resolved, if it's in one: the project directory, the project files
+/// directory, the dev container's workspace, or the repository holding the
+/// project (see `repository_root`).
+fn in_project(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
+    let canonical = resolve_partly;
     let dir = canonical(dir);
-    let project = [
-        (PROJECT_DIR, options.project_dir),
+    let project_dir = options.project_dir.or_else(|| {
+        options
+            .project_config
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+    });
+    let repository = project_dir.and_then(|p| repository_root(p, env));
+    let locations = [
         (
-            PROJECT_CONFIG,
-            options.project_config.and_then(Path::parent),
+            format!("{SCOTER_SECTION}:{PROJECT_DIR}"),
+            project_dir.map(Path::to_path_buf),
         ),
         (
-            DEV_CONTAINER_WORKSPACE_DIR,
-            options.dev_container_workspace_dir,
+            format!("{SCOTER_SECTION}:{PROJECT_CONFIG}"),
+            options
+                .project_config
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
         ),
+        (
+            format!("{SCOTER_SECTION}:{DEV_CONTAINER_WORKSPACE_DIR}"),
+            options.dev_container_workspace_dir.map(Path::to_path_buf),
+        ),
+        ("the repository".to_string(), repository),
     ];
-    project
-        .into_iter()
-        .find_map(|(name, root)| root.filter(|root| dir.starts_with(canonical(root))).map(|_| name))
-        .map(|name| {
-            format!(
-                "{setting} is in the project (`{SCOTER_SECTION}:{name}`); setup files aren't read from a project unless given with `--user-setup`"
-            )
-        })
+    locations.into_iter().find_map(|(name, root)| {
+        root.filter(|root| dir.starts_with(canonical(root)))
+            .map(|_| name)
+    })
+}
+
+/// `path` with symlinks resolved, as far as it exists: the longest part that
+/// exists is made canonical, and the rest (which can't hold a symlink) is
+/// added with `.` and `..` worked out.  A path that doesn't exist yet can then
+/// still be compared with others: written as `a/../b`, it's where `b` is.
+fn resolve_partly(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut rest = Vec::new();
+    let mut base = path;
+    let mut resolved = loop {
+        if let Ok(found) = base.canonicalize() {
+            break found;
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(_)) => {
+                rest.push(base.components().next_back());
+                base = parent;
+            }
+            // Nothing of it exists, or it ends in `..`: work it out as written.
+            _ => {
+                rest.clear();
+                break PathBuf::new();
+            }
+        }
+    };
+    if resolved.as_os_str().is_empty() {
+        for part in path.components() {
+            match part {
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        return resolved;
+    }
+    for part in rest.into_iter().rev().flatten() {
+        match part {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    resolved
+}
+
+/// The repository holding `project_dir`: the nearest directory, at or above
+/// it, with a `.git` (a directory, or a file in a worktree or submodule) or
+/// `.hg`.  The home directory and those above it don't count, so a home
+/// directory kept in a repository doesn't make every user file "in the
+/// project".
+// TODO: replace with the VCS root detection (docs/contributors/projects-v1.md, step 3).
+fn repository_root(project_dir: &Path, env: &Env) -> Option<PathBuf> {
+    let home = env.home.as_deref().and_then(|h| h.canonicalize().ok());
+    let start = resolve_partly(project_dir);
+    for dir in start.ancestors() {
+        if let Some(home) = &home
+            && home.starts_with(dir)
+        {
+            return None;
+        }
+        if dir.join(".git").exists() || dir.join(".hg").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
 }
 
 /// The user's setup file, and the user directory it's in (when it's in one).
@@ -1948,7 +2138,7 @@ fn parse_reference<'a>(reference: &'a str, section: &'a str) -> Result<(&'a str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::testing::TempDir;
+    use crate::config::testing::{TempDir, load_setup};
 
     fn messages(errors: Vec<ConfigError>) -> Vec<String> {
         errors
@@ -1957,11 +2147,11 @@ mod tests {
             .collect()
     }
 
-    /// Load a single `--user-setup` file.
+    /// Load a single setup file, as the user's.
     fn load_one(text: &str) -> Result<SystemConfig, Vec<String>> {
         let dir = TempDir::new();
         let file = dir.write("setup.yaml", text);
-        load(Some(&file), None, None, Env::default()).map_err(messages)
+        load_setup(&file, None, None, Env::default()).map_err(messages)
     }
 
     fn one_error(text: &str) -> String {
@@ -1981,7 +2171,6 @@ mod tests {
     #[test]
     fn discovery_order() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "a:\n  paths:\n    k: cli\n");
         let user = dir.write(
             "home/.config/surf-scoter.setup.yml",
             "a:\n  paths:\n    k: user\n    u: user\n",
@@ -1998,9 +2187,9 @@ mod tests {
             home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        let config = load(Some(&cli), Some(&dir.path().join("dist")), None, env).unwrap();
-        assert_eq!(config.files(), [cli, user.clone(), dist]);
-        assert_eq!(config.get("a", "k").as_deref(), Some("cli"));
+        let config = load(Some(&dir.path().join("dist")), None, env).unwrap();
+        assert_eq!(config.files(), [user.clone(), dist]);
+        assert_eq!(config.get("a", "k").as_deref(), Some("user"));
         assert_eq!(config.get("a", "u").as_deref(), Some("user"));
         assert_eq!(config.get("a", "d").as_deref(), Some("dist"));
         assert_eq!(config.get("a", "o"), None);
@@ -2028,7 +2217,7 @@ mod tests {
             scoter_home: Some(scoter_home.clone()),
             ..Env::default()
         };
-        let config = load(None, None, None, env.clone()).unwrap();
+        let config = load(None, None, env.clone()).unwrap();
         assert_eq!(config.files(), [in_d]);
         assert_eq!(
             config.get_path(SCOTER_SECTION, USER_DIR),
@@ -2036,7 +2225,7 @@ mod tests {
         );
 
         let in_home = dir.write("scoter-home/setup.yml", "");
-        let config = load(None, None, None, env).unwrap();
+        let config = load(None, None, env).unwrap();
         assert_eq!(config.files(), [in_home]);
         assert_eq!(config.get_path(SCOTER_SECTION, USER_DIR), Some(scoter_home));
     }
@@ -2048,7 +2237,7 @@ mod tests {
             home: Some(dir.path().to_path_buf()),
             ..Env::default()
         };
-        let config = load(None, None, None, env).unwrap();
+        let config = load(None, None, env).unwrap();
         assert!(config.files().is_empty());
         assert_eq!(config.get(SCOTER_SECTION, DISTRIBUTION_DIR), None);
         // The tool's own section is always there.
@@ -2066,53 +2255,17 @@ mod tests {
             home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        let errors = load(
-            Some(&dir.path().join("missing.yaml")),
-            Some(&dir.path().join("dist")),
-            None,
-            env,
-        )
-        .unwrap_err();
+        let errors = load(Some(&dir.path().join("dist")), None, env).unwrap_err();
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
-        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
-            errors[0].ends_with("missing.yaml: the --user-setup file doesn't exist"),
-            "{errors:?}"
-        );
-        assert!(
-            errors[1]
+            errors[0]
                 .ends_with("surf-scoter.d: both setup.yaml and setup.yml exist; keep only one"),
             "{errors:?}"
         );
         assert!(
-            errors[2].ends_with("dist: both setup.yaml and setup.yml exist; keep only one"),
+            errors[1].ends_with("dist: both setup.yaml and setup.yml exist; keep only one"),
             "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn several_user_setup_files() {
-        let dir = TempDir::new();
-        let user = dir.write("user.yaml", "a:\n  values:\n    k: user\n    u: 1\n");
-        let project = dir.write("project.yaml", "a:\n  values:\n    k: project\n");
-        let given = [user.clone(), project.clone()];
-        let options = SetupOptions {
-            user_setup: &given,
-            no_search: true,
-            ..SetupOptions::default()
-        };
-        let config = load_with(&options, Env::default()).unwrap();
-        // The last given wins.
-        assert_eq!(config.files(), [project, user]);
-        let a = config.section("a", &SectionDefaults::default()).unwrap();
-        assert_eq!(a.values["k"], ScalarValue::String("project".to_string()));
-        assert_eq!(a.values["u"], ScalarValue::Int(1));
-        assert!(
-            config
-                .setup_record()
-                .files
-                .iter()
-                .all(|f| f.source == Source::UserSetup)
         );
     }
 
@@ -2121,16 +2274,17 @@ mod tests {
         let dir = TempDir::new();
         dir.write("proj/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let project_dir = dir.path().join("proj");
-        let project_config = project_dir.join("scoter.yaml");
+        let project_config = project_dir.join(".surf-scoter.d/project.yaml");
         let workspace = dir.path().join("ws");
         dir.write("ws/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let errors = |setting: &str, project: bool| {
-            let setup = [dir.write(
+            dir.write(
                 "setup.yaml",
-                &format!("scoter:\n  paths:\n    distribution-dir: {setting}\n"),
-            )];
+                &format!(
+                    "scoter:\n  paths:\n    distribution-dir: {setting}\n  values:\n    project-files-dir: .surf-scoter.d\n"
+                ),
+            );
             let options = SetupOptions {
-                user_setup: &setup,
                 project_dir: project.then_some(project_dir.as_path()),
                 project_config: project.then_some(project_config.as_path()),
                 dev_container_workspace_dir: project.then_some(workspace.as_path()),
@@ -2138,6 +2292,7 @@ mod tests {
             };
             let env = Env {
                 cwd: Some(project_dir.clone()),
+                scoter_home: Some(dir.path().to_path_buf()),
                 ..Env::default()
             };
             load_with(&options, env).map_err(messages).unwrap_err()
@@ -2170,7 +2325,6 @@ mod tests {
 
         // Given, it's the caller's choice.
         let given = load(
-            None,
             Some(&project_dir.join("dist")),
             Some(&project_dir),
             Env::default(),
@@ -2178,11 +2332,236 @@ mod tests {
         assert!(given.is_ok());
     }
 
+    /// The setup for a project file in `.surf-scoter.d`, with nothing else.
+    const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n";
+
+    #[test]
+    fn no_user_setup_from_the_project() {
+        let dir = TempDir::new();
+        // A repository, with the project in `client`.
+        std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
+        let project_dir = dir.path().join("repo/client");
+        let project_config = project_dir.join(".surf-scoter.d/project.yaml");
+        let workspace = dir.path().join("ws");
+        let options = SetupOptions {
+            project_dir: Some(project_dir.as_path()),
+            project_config: Some(project_config.as_path()),
+            dev_container_workspace_dir: Some(workspace.as_path()),
+            ..SetupOptions::default()
+        };
+        let load_from = |home: &str| {
+            dir.write(&format!("{home}/setup.yaml"), PROJECT_FILES_SETUP);
+            let env = Env {
+                home: Some(dir.path().join("me")),
+                scoter_home: Some(dir.path().join(home)),
+                ..Env::default()
+            };
+            load_with(&options, env).map_err(messages)
+        };
+        for (home, location) in [
+            ("repo/client/conf", "scoter:project-dir"),
+            ("repo/client/.surf-scoter.d", "scoter:project-dir"),
+            ("repo/server/conf", "the repository"),
+            ("repo", "the repository"),
+            ("ws/conf", "scoter:dev-container-workspace-dir"),
+        ] {
+            assert_eq!(
+                load_from(home).unwrap_err(),
+                [format!(
+                    ": `SURF_SCOTER_HOME` is in the project (`{location}`); the user's setup file is never read from a project"
+                )],
+                "{home}"
+            );
+        }
+        assert!(load_from("elsewhere").is_ok());
+        // Even without a setup file there.
+        let env = Env {
+            scoter_home: Some(dir.path().join("repo/empty")),
+            ..Env::default()
+        };
+        assert_eq!(
+            load_with(&options, env)
+                .map_err(messages)
+                .unwrap_err()
+                .len(),
+            1
+        );
+
+        // A `distribution-dir` elsewhere in the repository is in the project too.
+        dir.write(
+            "elsewhere/setup.yaml",
+            &format!(
+                "{PROJECT_FILES_SETUP}  paths:\n    distribution-dir: {}\n",
+                dir.path().join("repo/tools").display()
+            ),
+        );
+        dir.write("repo/tools/setup.yaml", "");
+        let env = Env {
+            scoter_home: Some(dir.path().join("elsewhere")),
+            ..Env::default()
+        };
+        let errors = load_with(&options, env).map_err(messages).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("is in the project (`the repository`)"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn no_user_setup_from_the_project_found_earlier() {
+        // Found before the project was known, the file is in the record.
+        let dir = TempDir::new();
+        let file = dir.write("proj/conf/setup.yaml", PROJECT_FILES_SETUP);
+        let first = load_setup(&file, None, None, Env::default()).unwrap();
+        let record = first.setup_record().clone();
+        let origin = dir.path().join("first.json");
+        let project_dir = dir.path().join("proj");
+        let project_config = project_dir.join(".surf-scoter.d/project.yaml");
+        let options = SetupOptions {
+            project_dir: Some(project_dir.as_path()),
+            project_config: Some(project_config.as_path()),
+            no_search: true,
+            base: Some(base(&record, &origin)),
+            ..SetupOptions::default()
+        };
+        let errors = load_with(&options, Env::default())
+            .map_err(messages)
+            .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                ": the user's setup file is in the project (`scoter:project-dir`); it's never read from a project"
+            ]
+        );
+    }
+
+    #[test]
+    fn verified_dir_outside_the_project() {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
+        let project_dir = dir.path().join("repo/client");
+        let project_config = project_dir.join(".surf-scoter.d/project.yaml");
+        let options = SetupOptions {
+            project_dir: Some(project_dir.as_path()),
+            project_config: Some(project_config.as_path()),
+            ..SetupOptions::default()
+        };
+        let load_with_verified = |verified: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!("{PROJECT_FILES_SETUP}  paths:\n    verified-dir: {verified}\n"),
+            );
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_with(&options, env).map_err(messages)
+        };
+        let outside = dir.path().join("me/verified").display().to_string();
+        assert_eq!(
+            load_with_verified(&outside)
+                .unwrap()
+                .get_path(SCOTER_SECTION, VERIFIED_DIR),
+            Some(PathBuf::from(&outside))
+        );
+        for (verified, location) in [
+            ("./verified", "scoter:project-dir"),
+            ("${scoter:project-dir}/../server/v", "the repository"),
+        ] {
+            let errors = load_with_verified(verified).unwrap_err();
+            assert_eq!(errors.len(), 1, "{verified}: {errors:?}");
+            assert!(
+                errors[0].ends_with(&format!(
+                    "is in the project (`{location}`); the accepted project settings are never kept in a project"
+                )),
+                "{verified}: {errors:?}"
+            );
+        }
+        let errors = load_with_verified("relative/v").unwrap_err();
+        assert_eq!(
+            errors,
+            [": `scoter:verified-dir` relative/v must be an absolute path"]
+        );
+    }
+
+    #[test]
+    fn resolve_partly_works_out_missing_parts() {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.path().join("repo/client")).unwrap();
+        let at = |p: &str| dir.path().join(p);
+        assert_eq!(resolve_partly(&at("repo/client")), at("repo/client"));
+        assert_eq!(
+            resolve_partly(&at("repo/client/../server/v")),
+            at("repo/server/v")
+        );
+        assert_eq!(resolve_partly(&at("elsewhere/../repo/x")), at("repo/x"));
+        assert_eq!(resolve_partly(&at("missing/./a/../b")), at("missing/b"));
+        #[cfg(unix)]
+        {
+            // A symlink in the part that exists is followed.
+            std::os::unix::fs::symlink(at("repo"), at("link")).unwrap();
+            assert_eq!(resolve_partly(&at("link/new/v")), at("repo/new/v"));
+        }
+    }
+
+    #[test]
+    fn repository_root_stops_below_home() {
+        let dir = TempDir::new();
+        // A home directory kept in a repository.
+        std::fs::create_dir_all(dir.path().join("me/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("me/work/proj")).unwrap();
+        let env = Env {
+            home: Some(dir.path().join("me")),
+            ..Env::default()
+        };
+        assert_eq!(
+            repository_root(&dir.path().join("me/work/proj"), &env),
+            None
+        );
+        // A repository of its own, below home, counts; `.git` may be a file.
+        dir.write("me/work/.git", "gitdir: /elsewhere\n");
+        assert_eq!(
+            repository_root(&dir.path().join("me/work/proj"), &env),
+            Some(dir.path().join("me/work"))
+        );
+        // As does a Mercurial one.
+        std::fs::create_dir_all(dir.path().join("other/.hg")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other/proj")).unwrap();
+        assert_eq!(
+            repository_root(&dir.path().join("other/proj"), &env),
+            Some(dir.path().join("other"))
+        );
+    }
+
+    #[test]
+    fn misnamed_project_files_dir_is_the_only_problem() {
+        // In the wrong directory, the project directory used for the other
+        // checks is wrong too: here, it would hold `SURF_SCOTER_HOME`.
+        let dir = TempDir::new();
+        let project_dir = dir.path().to_path_buf();
+        let project_config = dir.path().join("proj/project.yaml");
+        dir.write("home/setup.yaml", PROJECT_FILES_SETUP);
+        let options = SetupOptions {
+            project_dir: Some(project_dir.as_path()),
+            project_config: Some(project_config.as_path()),
+            ..SetupOptions::default()
+        };
+        let env = Env {
+            scoter_home: Some(dir.path().join("home")),
+            ..Env::default()
+        };
+        assert_eq!(
+            load_with(&options, env).map_err(messages).unwrap_err(),
+            [": the project file must be in a `.surf-scoter.d` directory"]
+        );
+    }
+
     #[test]
     fn distribution_dir_given() {
         let dir = TempDir::new();
         let dist = dir.write("dist/setup.yaml", "a:\n  paths:\n    k: v\n");
-        let config = load(None, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
+        let config = load(Some(&dir.path().join("dist")), None, Env::default()).unwrap();
         assert_eq!(config.files(), [dist]);
         assert_eq!(
             config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR),
@@ -2194,7 +2573,7 @@ mod tests {
     fn distribution_dir_from_a_file() {
         let dir = TempDir::new();
         let cli = dir.write(
-            "cli.yaml",
+            "home-setup/setup.yaml",
             "scoter:\n  paths:\n    distribution-dir: ~/dist\n",
         );
         let dist = dir.write("home/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
@@ -2203,7 +2582,7 @@ mod tests {
             home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        let config = load(Some(&cli), None, None, env.clone()).unwrap();
+        let config = load_setup(&cli, None, None, env.clone()).unwrap();
         assert_eq!(config.files(), [cli.clone(), dist]);
         assert_eq!(config.get("a", "k").as_deref(), Some("v"));
         assert_eq!(
@@ -2212,28 +2591,20 @@ mod tests {
         );
 
         // The one given wins over the file's.
-        let config = load(
-            Some(&cli),
-            Some(&dir.path().join("other")),
-            None,
-            env.clone(),
-        )
-        .unwrap();
+        let config = load_setup(&cli, Some(&dir.path().join("other")), None, env.clone()).unwrap();
         assert_eq!(config.files(), [cli.clone(), other]);
         assert_eq!(config.get("a", "k").as_deref(), Some("other"));
 
-        // Without the search, only a given one's file is read.
+        // Without the search, the user's file isn't read, nor the
+        // distribution directory's it names.
         let options = SetupOptions {
-            user_setup: std::slice::from_ref(&cli),
             no_search: true,
             ..SetupOptions::default()
         };
+        let env = crate::config::testing::home_env(cli.parent().unwrap(), env);
         let config = load_with(&options, env).unwrap();
-        assert_eq!(config.files(), [cli]);
-        assert_eq!(
-            config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR),
-            Some(dir.path().join("home/dist"))
-        );
+        assert!(config.files().is_empty());
+        assert_eq!(config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR), None);
     }
 
     #[test]
@@ -2253,15 +2624,15 @@ mod tests {
         let dir = TempDir::new();
         let setup = dir.write(
             "setup.yaml",
-            "a:\n  paths:\n    p: ${scoter:project-dir}/p\n    c: ${scoter:project-config}\n    w: ${scoter:cwd}/w\n",
+            "a:\n  paths:\n    p: ${scoter:project-dir}/p\n    c: ${scoter:project-config}\n    w: ${scoter:cwd}/w\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n",
         );
         let options = SetupOptions {
-            user_setup: std::slice::from_ref(&setup),
             project_dir: Some(Path::new("/proj")),
-            project_config: Some(Path::new("/proj/.scoter/scoter.yaml")),
+            project_config: Some(Path::new("/proj/.surf-scoter.d/project.yaml")),
             ..SetupOptions::default()
         };
         let env = Env {
+            scoter_home: Some(dir.path().to_path_buf()),
             cwd: Some(PathBuf::from("/work")),
             ..Env::default()
         };
@@ -2269,12 +2640,12 @@ mod tests {
         assert_eq!(config.get("a", "p").as_deref(), Some("/proj/p"));
         assert_eq!(
             config.get("a", "c").as_deref(),
-            Some("/proj/.scoter/scoter.yaml")
+            Some("/proj/.surf-scoter.d/project.yaml")
         );
         assert_eq!(config.get("a", "w").as_deref(), Some("/work/w"));
 
         // Unset, they're not an error: what needs them just has no value.
-        let config = load(Some(&setup), None, None, Env::default()).unwrap();
+        let config = load_setup(&setup, None, None, Env::default()).unwrap();
         assert_eq!(config.get("a", "p"), None);
         let section = config.section("a", &SectionDefaults::default()).unwrap();
         assert_eq!(
@@ -2333,15 +2704,15 @@ mod tests {
             "a:\n  paths:\n    x: ${scoter:dev-container-path}/x\n",
         );
         // Without a dev container, it's not set: no value.
-        let config = load(Some(&setup), None, None, Env::default()).unwrap();
+        let config = load_setup(&setup, None, None, Env::default()).unwrap();
         assert_eq!(config.get("a", "x"), None);
 
         let options = SetupOptions {
-            user_setup: std::slice::from_ref(&setup),
             dev_container: true,
             ..SetupOptions::default()
         };
-        let mut config = load_with(&options, Env::default()).unwrap();
+        let env = crate::config::testing::home_env(dir.path(), Env::default());
+        let mut config = load_with(&options, env).unwrap();
         assert_eq!(config.get("a", "x"), None);
         config.set_dev_container_path(Path::new("/dev"));
         assert_eq!(config.get("a", "x").as_deref(), Some("/dev/x"));
@@ -2450,15 +2821,10 @@ mod tests {
     #[test]
     fn a_bad_file_doesnt_hide_the_others() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "a: [\n");
+        let cli = dir.write("home-setup/setup.yaml", "a: [\n");
         dir.write("dist/setup.yaml", "b: text\n");
-        let errors = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap_err();
+        let errors =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
     }
 
@@ -2468,20 +2834,15 @@ mod tests {
     fn lists_are_replaced_sections_merged() {
         let dir = TempDir::new();
         let cli = dir.write(
-            "cli.yaml",
+            "home-setup/setup.yaml",
             "a:\n  paths:\n    x: high\n  runs:\n    r: high\n  path-lists:\n    l: [/high]\n  values:\n    v: high\n",
         );
         dir.write(
             "dist/setup.yaml",
             "a:\n  paths:\n    x: low\n    y: low\n  runs:\n    r: low\n    s: low\n  path-lists:\n    l: [/low1, /low2]\n    m: [/m]\n  values:\n    v: low\n    w: 2\n",
         );
-        let config = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap();
+        let config =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
         assert_eq!(config.get("a", "x").as_deref(), Some("high"));
         assert_eq!(config.get("a", "y").as_deref(), Some("low"));
         let section = found(config.section("a", &SectionDefaults::default()).unwrap());
@@ -2521,7 +2882,7 @@ mod tests {
             home: Some(PathBuf::from("/home/me")),
             ..Env::default()
         };
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         assert_eq!(config.get("ssh", "home").as_deref(), Some("/home/me/.ssh"));
         assert_eq!(
             config.get("ssh", "config-file").as_deref(),
@@ -2555,7 +2916,7 @@ mod tests {
             home: Some(PathBuf::from("/home/me")),
             ..Env::default()
         };
-        let config = load(Some(&file), None, Some(Path::new("/proj")), env.clone()).unwrap();
+        let config = load_setup(&file, None, Some(Path::new("/proj")), env.clone()).unwrap();
         assert_eq!(
             config.get_path("s", "home"),
             Some(PathBuf::from("/home/me/x"))
@@ -2580,7 +2941,7 @@ mod tests {
             ]
         );
         // Without a project, `./` paths stay as written, and `./` list entries are left out.
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         assert_eq!(config.get("s", "local").as_deref(), Some("./local"));
         assert_eq!(
             config.path_list("s", "l"),
@@ -2644,43 +3005,26 @@ mod tests {
     fn a_key_keeps_its_kind_across_files() {
         let dir = TempDir::new();
         let cli = dir.write(
-            "cli.yaml",
+            "home-setup/setup.yaml",
             "a:\n  values:\n    x: 5\n  paths:\n    y: /high\n",
-        );
-        let user = dir.write(
-            "home/.config/surf-scoter.setup.yaml",
-            "a:\n  runs:\n    x: go\n",
         );
         let dist = dir.write(
             "dist/setup.yaml",
             "a:\n  paths:\n    x: /low\n    y: /low\n",
         );
-        let env = Env {
-            home: Some(dir.path().join("home")),
-            ..Env::default()
-        };
-        let errors = load(Some(&cli), Some(&dir.path().join("dist")), None, env).unwrap_err();
-        // Each change is reported where it's made; changing only the value is fine.
+        let errors =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
+        // The change is reported where it's made; changing only the value is fine.
         assert_eq!(
             errors,
-            [
-                ConfigError::new(
-                    Some(&user),
-                    "a.runs.x",
-                    format!(
-                        "is set in `paths` by {}; a key's kind of value can't change",
-                        dist.display()
-                    ),
+            [ConfigError::new(
+                Some(&cli),
+                "a.values.x",
+                format!(
+                    "is set in `paths` by {}; a key's kind of value can't change",
+                    dist.display()
                 ),
-                ConfigError::new(
-                    Some(&cli),
-                    "a.values.x",
-                    format!(
-                        "is set in `paths` by {}; a key's kind of value can't change",
-                        dist.display()
-                    ),
-                ),
-            ]
+            ),]
         );
     }
 
@@ -2812,18 +3156,13 @@ mod tests {
     #[test]
     fn errors_name_the_file_that_set_the_value() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "a:\n  paths:\n    x: ${a:bad}\n");
+        let cli = dir.write("home-setup/setup.yaml", "a:\n  paths:\n    x: ${a:bad}\n");
         dir.write(
             "dist/setup.yaml",
             "b:\n  paths:\n    y: ${a:x}\n  runs:\n    z: go ${a:x}\n",
         );
-        let errors = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap_err();
+        let errors =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
         assert_eq!(
             errors,
             [ConfigError::new(
@@ -2862,7 +3201,7 @@ mod tests {
             path: Some(dir.path().join("bin dir").into_os_string()),
             ..Env::default()
         };
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         assert_eq!(config.program_keys("docker").collect::<Vec<_>>(), ["exec"]);
         assert_eq!(config.path_keys("docker").collect::<Vec<_>>(), ["socket"]);
         let defaults = SectionDefaults {
@@ -2930,7 +3269,7 @@ mod tests {
             home: Some(home.clone()),
             ..Env::default()
         };
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         let section = found(config.section("t", &SectionDefaults::default()).unwrap());
         assert_eq!(section.programs["exec"], Some(found_tool.clone()));
         assert_eq!(section.paths["conf"], Some(home.join("my conf")));
@@ -2968,7 +3307,7 @@ mod tests {
             path: Some(dir.path().join("bin").into_os_string()),
             ..Env::default()
         };
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         let section = found(config.section("ssh", &SectionDefaults::default()).unwrap());
         assert_eq!(
             section.programs,
@@ -3010,15 +3349,13 @@ mod tests {
     #[test]
     fn programs_and_paths_are_different_kinds() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "t:\n  paths:\n    exec: /usr/bin/tool\n");
+        let cli = dir.write(
+            "home-setup/setup.yaml",
+            "t:\n  paths:\n    exec: /usr/bin/tool\n",
+        );
         dir.write("dist/setup.yaml", "t:\n  programs:\n    exec: tool\n");
-        let errors = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap_err();
+        let errors =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
@@ -3108,18 +3445,16 @@ mod tests {
     #[test]
     fn run_list_and_line_merge() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "t:\n  runs:\n    go: [high, 'a b']\n");
+        let cli = dir.write(
+            "home-setup/setup.yaml",
+            "t:\n  runs:\n    go: [high, 'a b']\n",
+        );
         dir.write(
             "dist/setup.yaml",
             "t:\n  runs:\n    go: low line\n    other: [low]\n",
         );
-        let config = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap();
+        let config =
+            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
         let section = found(config.section("t", &SectionDefaults::default()).unwrap());
         let render = |key: &str| {
             section.runs[key]
@@ -3149,7 +3484,7 @@ mod tests {
                 dir.path().join("missing-data").display(),
             ),
         );
-        let config = load(Some(&file), None, None, Env::default()).unwrap();
+        let config = load_setup(&file, None, None, Env::default()).unwrap();
         let section = config.section("t", &SectionDefaults::default()).unwrap();
         // Not executable, a directory, and not on the `PATH`: no value.
         assert_eq!(section.programs["exec"], None);
@@ -3226,7 +3561,7 @@ mod tests {
             path: Some(dir.path().join("bin").into_os_string()),
             ..Env::default()
         };
-        let config = load(Some(&file), None, None, env).unwrap();
+        let config = load_setup(&file, None, None, env).unwrap();
         let defaults = SectionDefaults {
             runs: &[("go", "${exec} 'x")],
             ..SectionDefaults::default()
@@ -3276,13 +3611,13 @@ mod tests {
                 "  values:\n    n: 3\n    t: ${home}/t\n",
             ),
         );
-        let first = load(Some(&file), None, None, Env::default()).unwrap();
+        let first = load_setup(&file, None, None, Env::default()).unwrap();
         // Without a project, `./` stays as written, and `./` list entries are left out.
         assert_eq!(first.get("a", "local").as_deref(), Some("./local"));
         assert_eq!(first.path_list("a", "dirs"), [PathBuf::from("/h/e")]);
         let record = first.setup_record().clone();
         assert_eq!(record.files.len(), 1);
-        assert_eq!(record.files[0].source, Source::UserSetup);
+        assert_eq!(record.files[0].source, Source::User);
 
         // The second pass doesn't read the file, so it can be gone.
         std::fs::remove_file(&file).unwrap();
@@ -3318,18 +3653,15 @@ mod tests {
     #[test]
     fn record_is_a_base_layer_for_the_search() {
         let dir = TempDir::new();
-        let cli = dir.write("cli.yaml", "a:\n  paths:\n    x: /cli\n    y: /cli\n");
+        let cli = dir.write(
+            "home-setup/setup.yaml",
+            "a:\n  paths:\n    x: /cli\n    y: /cli\n",
+        );
         let dist = dir.write(
             "dist/setup.yaml",
             "a:\n  paths:\n    x: /dist\n    z: /dist\n",
         );
-        let first = load(
-            Some(&cli),
-            Some(&dir.path().join("dist")),
-            None,
-            Env::default(),
-        )
-        .unwrap();
+        let first = load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
         let record = first.setup_record().clone();
         assert_eq!(
             first.loaded_from().distribution_dir,
@@ -3338,7 +3670,8 @@ mod tests {
 
         // Changed on disk since: the record's copy is used, not read again.
         dir.write("dist/setup.yaml", "a:\n  paths:\n    x: /changed\n");
-        // Found by the search now: a user file, between the two in priority.
+        // Found by the search now: another user file, which goes before the
+        // record's.
         let user = dir.write(
             "home/.config/surf-scoter.setup.yaml",
             "a:\n  paths:\n    x: /user\n    y: /user\n    w: /user\n",
@@ -3353,9 +3686,9 @@ mod tests {
             ..SetupOptions::default()
         };
         let config = load_with(&options, env.clone()).unwrap();
-        assert_eq!(config.files(), [cli.clone(), user.clone(), dist.clone()]);
-        assert_eq!(config.get("a", "x").as_deref(), Some("/cli"));
-        assert_eq!(config.get("a", "y").as_deref(), Some("/cli"));
+        assert_eq!(config.files(), [user.clone(), cli.clone(), dist.clone()]);
+        assert_eq!(config.get("a", "x").as_deref(), Some("/user"));
+        assert_eq!(config.get("a", "y").as_deref(), Some("/user"));
         assert_eq!(config.get("a", "z").as_deref(), Some("/dist"));
         assert_eq!(config.get("a", "w").as_deref(), Some("/user"));
         assert_eq!(

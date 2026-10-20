@@ -1,5 +1,0 @@
-
-vcs: git
-
-container:
-  dev-container-path: ./examples/surf-scoter/dev-env-container

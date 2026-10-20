@@ -41,7 +41,6 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
     """Load the SUC based on the arguments."""
     bin_dir = args.bin_dir
     distribution_dir = args.distribution_dir
-    user_setup = args.user_config
     project_config_file = args.project_config
     project_dir = args.project_dir
 
@@ -54,7 +53,6 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
         project_dir=project_dir,
         dev_container_workspace_dir=None,
         dev_container_settings_dir=None,
-        user_setup=user_setup,
         universal_file=None,
         no_setup_search=False,
     )
@@ -67,7 +65,7 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
             # Reload the setup with that discovered path.
             settings = reprocess_config(
                 resolved_bin_dir,
-                distribution_dir,
+                dist_dir,
                 project_file,
                 settings,
             )
@@ -99,7 +97,6 @@ def reprocess_config(
             project_dir=None,
             dev_container_workspace_dir=None,
             dev_container_settings_dir=None,
-            user_setup=[],
             universal_file=tmp,
             no_setup_search=True,
         )
@@ -135,15 +132,15 @@ def require_global_config_path(distribution_dir: str | None) -> Path:
             return Path(os.path.abspath(distribution_dir))
         raise ConfigErr(f"The distribution directory {distribution_dir} doesn't exist.")
 
-    # Try to find it based on the location of this script file.
+    # Try to find it based on the location of this script file.  That's the
+    # tool the user chose to run, so it's passed on as the given distribution
+    # directory, the same as '--distribution-dir'.
     this = os.path.realpath(__file__)
     if os.path.isfile(this):
         this_dir = os.path.dirname(this)
         # All we care about here is that the executables exist.
-        if (
-            os.path.isdir(os.path.join(this_dir, DISTRIBUTION_BIN_DIR, SCOTER_HOST_EXEC))
-            and os.path.isdir(os.path.join(this_dir, DISTRIBUTION_BIN_DIR, GEN_SCOTER_UC_EXEC))
-        ):
+        bin_dir = Path(this_dir) / DISTRIBUTION_BIN_DIR
+        if _is_exe_file(bin_dir / SCOTER_HOST_EXEC) and _is_exe_file(bin_dir / GEN_SCOTER_UC_EXEC):
             return Path(this_dir)
 
     # Couldn't find it.
@@ -221,7 +218,6 @@ def generate_config(
     project_dir: str | None,
     dev_container_workspace_dir: str | None,
     dev_container_settings_dir: str | None,
-    user_setup: list[str],
     universal_file: str | None,
     no_setup_search: bool,
 ) -> DictJsonData:
@@ -239,8 +235,6 @@ def generate_config(
         args.extend(("--dev-container-workspace-dir", dev_container_workspace_dir))
     if dev_container_settings_dir:
         args.extend(("--dev-container-settings-dir", dev_container_settings_dir))
-    for user_setup_loc in user_setup:
-        args.extend(("--user-setup", user_setup_loc))
     if universal_file:
         args.extend(("--universal", universal_file))
     if no_setup_search:
@@ -290,6 +284,13 @@ def _find_exe(name: str | Path) -> Path | None:
         return Path(os.path.abspath(name))
     # Not a non-Windows executable.
     return None
+
+
+def _is_exe_file(path: Path) -> bool:
+    """Whether 'path' is an executable file (with '.exe' added, on Windows)."""
+    if _is_windows():
+        return path.is_file() or path.with_name(path.name + ".exe").is_file()
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def _require_exe(name: str | Path) -> Path:
@@ -382,17 +383,6 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         action="store",
         dest="project_dir",
         help="Set the project configuration directory.",
-    )
-    parser.add_argument(
-        "-U",
-        "--user-config",
-        action="append",
-        dest="user_config",
-        default=[],
-        help=(
-            "Set your user configuration directory or file.  "
-            "Also set through the SURF_SCOTER_HOME environment variable."
-        ),
     )
     parser.add_argument(
         "-D",

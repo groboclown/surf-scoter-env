@@ -28,6 +28,13 @@
 //! `parents`: the local parents to build, as `{dir, tag}`, in build order.
 //!
 //! Other keys are allowed, and kept in `DevEnv::raw`.
+//!
+//! The dev container, and every parent `dir` and `file`, must resolve
+//! (following symlinks) to somewhere inside the project files directory (the
+//! one holding the project file) or one of the system configuration's
+//! `dev-containers-search` directories.
+//! Those are the only places the tools build from, so a project can't make
+//! them read, or use as a build context, anything else on the host.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -102,22 +109,44 @@ pub struct ParentBuild {
 
 /// Find the project's dev container.  `project` is the project file, which
 /// `dev-container-path` is relative to; `lookup` holds the directories to
-/// search for a `dev-container` name.
+/// search for a `dev-container` name.  The container and its parents must be
+/// inside the project file's directory or a `lookup` directory.
 pub fn find(
     reference: &ContainerRef,
     project: &Path,
     lookup: &[PathBuf],
 ) -> Result<DevContainer, Vec<ConfigError>> {
+    let base = project.parent().unwrap_or(Path::new(""));
+    // The search list normally holds the project files directory too.
+    let mut roots: Vec<PathBuf> = vec![base.to_path_buf()];
+    for dir in lookup {
+        if !roots.contains(dir) {
+            roots.push(dir.clone());
+        }
+    }
+    let outside = |key: &str, dir: &Path| {
+        vec![ConfigError::new(
+            Some(project),
+            key,
+            outside_message(dir, &roots),
+        )]
+    };
     match reference {
         ContainerRef::Path(path) => {
-            let base = project.parent().unwrap_or(Path::new(""));
-            load(&base.join(path))
+            let dir = base.join(path);
+            if !within(&dir, &roots) {
+                return Err(outside("container.dev-container-path", &dir));
+            }
+            load(&dir, &roots)
         }
         ContainerRef::Name(name) => {
             for dir in lookup {
                 let candidate = dir.join(name);
                 if candidate.join(DOCKERFILE).is_file() && candidate.join(DEV_ENV_FILE).is_file() {
-                    return load(&candidate);
+                    if !within(&candidate, &roots) {
+                        return Err(outside("container.dev-container", &candidate));
+                    }
+                    return load(&candidate, &roots);
                 }
             }
             let message = if lookup.is_empty() {
@@ -141,8 +170,31 @@ pub fn find(
     }
 }
 
-/// Read the dev container in `dir`, with its parents.
-pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
+/// Whether `path` resolves (following symlinks) to somewhere inside one of
+/// `roots`.  A path that doesn't exist is reported elsewhere, so it passes.
+fn within(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return true;
+    };
+    roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| path.starts_with(root))
+}
+
+/// The message for a container or parent that isn't inside one of `roots`.
+fn outside_message(path: &Path, roots: &[PathBuf]) -> String {
+    let roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    format!(
+        "{} is outside the project files directory and the `dev-containers-search` directories: {}",
+        path.display(),
+        roots.join(", ")
+    )
+}
+
+/// Read the dev container in `dir`, with its parents, which must all be
+/// inside one of `roots`.
+pub fn load(dir: &Path, roots: &[PathBuf]) -> Result<DevContainer, Vec<ConfigError>> {
     if !dir.is_dir() {
         return Err(vec![ConfigError::new(
             Some(dir),
@@ -161,7 +213,7 @@ pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
     // Canonical, so it reads well in messages and the universal configuration.
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let env_file = dir.join(DEV_ENV_FILE);
-    let env = resolve(&env_file).and_then(|value| parse(value, &env_file));
+    let env = resolve(&env_file, roots).and_then(|value| parse(value, &env_file));
     match env {
         Ok(env) if errors.is_empty() => Ok(DevContainer { dir, env }),
         Ok(_) => Err(errors),
@@ -174,8 +226,11 @@ pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
 
 /// Read `file` and all its parents, giving the merged values with
 /// `parent-builds` in place of `parents`.
-fn resolve(file: &Path) -> Result<Value, Vec<ConfigError>> {
-    let mut resolver = Resolver::default();
+fn resolve(file: &Path, roots: &[PathBuf]) -> Result<Value, Vec<ConfigError>> {
+    let mut resolver = Resolver {
+        roots: roots.to_vec(),
+        ..Resolver::default()
+    };
     let merged = resolver.values(file);
     let mut builds = Vec::new();
     if resolver.errors.is_empty() {
@@ -238,6 +293,8 @@ struct Resolver {
     /// The files being merged, to find cycles.
     visiting: Vec<PathBuf>,
     errors: Vec<ConfigError>,
+    /// Where parents may be.
+    roots: Vec<PathBuf>,
 }
 
 impl Resolver {
@@ -331,15 +388,15 @@ impl Resolver {
         let node = read_limited(file)
             .and_then(|text| parse_yaml(&text))
             .map_err(|m| vec![ConfigError::new(Some(file), "", m)])
-            .and_then(|value| parse_node(value, file));
+            .and_then(|value| parse_node(value, file, &self.roots));
         let node = node.map_err(|e| self.errors.extend(e)).ok();
         self.nodes.insert(file.to_path_buf(), node);
     }
 }
 
 /// Check one `dev-env.yaml` as written, separating its parents from its
-/// values.
-fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
+/// values.  Parents must be inside one of `roots`.
+fn parse_node(value: Value, file: &Path, roots: &[PathBuf]) -> Result<Node, Vec<ConfigError>> {
     let error = |key: &str, message: &str| ConfigError::new(Some(file), key, message);
     let tags = tag_errors(&value);
     if !tags.is_empty() {
@@ -417,6 +474,15 @@ fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
                     }
                     Some(Parent::Published { ref file }) if !file.is_file() => {
                         errors.push(error(&key, &format!("{} doesn't exist", file.display())));
+                    }
+                    Some(Parent::Local { ref dir, .. }) if !within(dir, roots) => {
+                        errors.push(error(&child_key(&key, "dir"), &outside_message(dir, roots)));
+                    }
+                    Some(Parent::Published { ref file }) if !within(file, roots) => {
+                        errors.push(error(
+                            &child_key(&key, "file"),
+                            &outside_message(file, roots),
+                        ));
                     }
                     Some(p) if problems.is_empty() => parents.push(p),
                     _ => {}
@@ -610,6 +676,7 @@ fn text_field(
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+    use std::fs;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
 
@@ -620,6 +687,11 @@ mod tests {
                 .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
                 .collect()
         })
+    }
+
+    /// The whole temporary directory as the only allowed root.
+    fn roots(dir: &TempDir) -> Vec<PathBuf> {
+        vec![dir.path().to_path_buf()]
     }
 
     fn container(dir: &TempDir, at: &str) -> PathBuf {
@@ -692,14 +764,9 @@ mod tests {
     #[test]
     fn find_by_path() {
         let dir = TempDir::new();
-        let expected = container(&dir, "proj/.scoter/env");
-        let project = dir.path().join("proj/scoter.yaml");
-        let found = find(
-            &ContainerRef::Path("./.scoter/env".to_string()),
-            &project,
-            &[],
-        )
-        .unwrap();
+        let expected = container(&dir, "proj/.surf-scoter.d/env");
+        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
+        let found = find(&ContainerRef::Path("./env".to_string()), &project, &[]).unwrap();
         assert_eq!(found.dir.canonicalize().unwrap(), expected);
         assert_eq!(found.env.sshd_port, Some(22022));
         // An absolute path is used as is.
@@ -735,6 +802,90 @@ mod tests {
     }
 
     #[test]
+    fn find_outside_errors() {
+        let dir = TempDir::new();
+        let project = dir.write("proj/.surf-scoter.d/project.yaml", "");
+        let outside = container(&dir, "proj/env");
+        let errors = find(&ContainerRef::Path("../env".to_string()), &project, &[]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].key.as_deref(),
+            Some("container.dev-container-path")
+        );
+        assert!(
+            errors[0].message.ends_with(&format!(
+                "is outside the project files directory and the `dev-containers-search` directories: {}",
+                dir.path().join("proj/.surf-scoter.d").display()
+            )),
+            "{}",
+            errors[0]
+        );
+        // An absolute path is no different.
+        let abs = ContainerRef::Path(outside.display().to_string());
+        assert!(find(&abs, &project, &[]).is_err());
+        // A search directory makes it allowed.
+        assert_eq!(
+            find(&abs, &project, &[dir.path().join("proj")])
+                .unwrap()
+                .dir,
+            outside
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_symlink_outside_errors() {
+        let dir = TempDir::new();
+        let outside = container(&dir, "elsewhere/env");
+        fs::create_dir_all(dir.path().join("proj/.surf-scoter.d")).unwrap();
+        fs::create_dir_all(dir.path().join("search")).unwrap();
+        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
+        std::os::unix::fs::symlink(&outside, dir.path().join("proj/.surf-scoter.d/env")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("search/env")).unwrap();
+
+        let errors = find(&ContainerRef::Path("env".to_string()), &project, &[]).unwrap_err();
+        assert_eq!(
+            errors[0].key.as_deref(),
+            Some("container.dev-container-path")
+        );
+        let errors = find(
+            &ContainerRef::Name("env".to_string()),
+            &project,
+            &[dir.path().join("search")],
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].key.as_deref(), Some("container.dev-container"));
+    }
+
+    #[test]
+    fn load_parents_outside_errors() {
+        let dir = TempDir::new();
+        container(&dir, "outside/base");
+        container_with(
+            &dir,
+            "proj/.surf-scoter.d/env",
+            concat!(
+                "parents:\n",
+                "  - {dir: ../../../outside/base, tag: base}\n",
+                "  - {file: ../../../outside/base/dev-env.yaml}\n",
+            ),
+        );
+        let roots = [dir.path().join("proj/.surf-scoter.d")];
+        let errors: Vec<String> = load(&dir.path().join("proj/.surf-scoter.d/env"), &roots)
+            .unwrap_err()
+            .into_iter()
+            .map(|e| e.key.unwrap_or_default())
+            .collect();
+        assert_eq!(errors, ["parents[0].dir", "parents[1].file"]);
+        // With the other directory allowed, it loads.
+        let roots = [
+            dir.path().join("proj/.surf-scoter.d"),
+            dir.path().join("outside"),
+        ];
+        assert!(load(&dir.path().join("proj/.surf-scoter.d/env"), &roots).is_ok());
+    }
+
+    #[test]
     fn find_by_name_errors() {
         let dir = TempDir::new();
         let project = Path::new("/p/scoter.yaml");
@@ -757,12 +908,12 @@ mod tests {
     #[test]
     fn load_errors() {
         let dir = TempDir::new();
-        let missing = load(&dir.path().join("nothing")).unwrap_err();
+        let missing = load(&dir.path().join("nothing"), &roots(&dir)).unwrap_err();
         assert_eq!(missing.len(), 1);
         assert!(missing[0].message.contains("doesn't exist"));
 
         dir.write("bad/dev-env.yaml", "user: ubuntu\n");
-        let errors = load(&dir.path().join("bad")).unwrap_err();
+        let errors = load(&dir.path().join("bad"), &roots(&dir)).unwrap_err();
         let messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
         // No Dockerfile, plus the three missing fields.
         assert_eq!(messages.len(), 4, "{messages:?}");
@@ -770,7 +921,7 @@ mod tests {
 
         dir.write("big/Dockerfile", "");
         dir.write("big/dev-env.yaml", &"#".repeat(3 * 1024 * 1024));
-        let errors = load(&dir.path().join("big")).unwrap_err();
+        let errors = load(&dir.path().join("big"), &roots(&dir)).unwrap_err();
         assert_eq!(errors[0].message, "the file is larger than the 2 MB limit");
     }
     #[test]
@@ -851,7 +1002,7 @@ mod tests {
             "env",
             "parents:\n  - {dir: ../base, tag: 'base:latest'}\n",
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir)).unwrap().env;
         assert_eq!(env.user, "ubuntu");
         assert_eq!(env.sshd_port, Some(22022));
         assert_eq!(env.parent_builds, [build(&base, "base:latest")]);
@@ -884,7 +1035,7 @@ mod tests {
                 "extra: {b: 3}\n",
             ),
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir)).unwrap().env;
         assert!(env.parent_builds.is_empty());
         // Nearest wins; mappings merge key by key.
         assert_eq!(env.user, "root");
@@ -912,13 +1063,13 @@ mod tests {
             "env",
             &format!("parents: [{{dir: ../ci, tag: 'ci:latest'}}]\n{DEV_ENV}"),
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir)).unwrap().env;
         assert_eq!(env.parent_builds, [build(&ci, "ci:latest")]);
         assert_eq!(env.user, "ubuntu");
 
         // It adds no values, so this file must give them all.
         container_with(&dir, "bare", "parents: [{dir: ../ci, tag: ci}]\n");
-        let errors = load(&dir.path().join("bare")).unwrap_err();
+        let errors = load(&dir.path().join("bare"), &roots(&dir)).unwrap_err();
         assert_eq!(errors.len(), 4, "{errors:?}");
     }
 
@@ -942,7 +1093,7 @@ mod tests {
             "env",
             "parents:\n  - {dir: ../a, tag: a}\n  - {dir: ../b, tag: b}\n",
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir)).unwrap().env;
         assert_eq!(
             env.parent_builds,
             [build(&root, "root"), build(&a, "a"), build(&b, "b")]
@@ -956,7 +1107,7 @@ mod tests {
         let dir = TempDir::new();
         container_with(&dir, "x", "parents: [{dir: ../y, tag: y}]\n");
         container_with(&dir, "y", "parents: [{dir: ../x, tag: x}]\n");
-        let errors = load(&dir.path().join("x")).unwrap_err();
+        let errors = load(&dir.path().join("x"), &roots(&dir)).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
             errors[0].message.starts_with("is its own parent: "),
@@ -971,7 +1122,7 @@ mod tests {
             "two-tags",
             "parents: [{dir: ../a, tag: a}, {dir: ../root, tag: two}]\n",
         );
-        let errors = load(&dir.path().join("two-tags")).unwrap_err();
+        let errors = load(&dir.path().join("two-tags"), &roots(&dir)).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].key.as_deref(), Some("parents[1].tag"));
         assert!(
@@ -995,7 +1146,7 @@ mod tests {
                 "  - text\n",
             ),
         );
-        let errors: Vec<String> = load(&dir.path().join("bad"))
+        let errors: Vec<String> = load(&dir.path().join("bad"), &roots(&dir))
             .unwrap_err()
             .into_iter()
             .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
@@ -1021,7 +1172,7 @@ mod tests {
         // The merged result must still be whole.
         container_with(&dir, "partial", "user: u\n");
         container_with(&dir, "child", "parents: [{dir: ../partial, tag: p}]\n");
-        let errors = load(&dir.path().join("child")).unwrap_err();
+        let errors = load(&dir.path().join("child"), &roots(&dir)).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");
     }
 }

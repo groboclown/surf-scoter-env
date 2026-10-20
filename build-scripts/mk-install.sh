@@ -37,7 +37,7 @@ mkdir -p "${workdir}/bin/surf_scoter_lib"
 cp "${base}/scripts/surf_scoter_lib"/*.py "${workdir}/bin/surf_scoter_lib/."
 
 cp -R "${base}/containers" "${workdir}/."
-rm -r "${base}/containers/dev-env/target"
+rm -r "${workdir}/containers/dev-env/target"
 cp -R "${base}/examples" "${workdir}/."
 
 mkdir -p "${workdir}/docs"
@@ -47,9 +47,9 @@ cp "${base}/LICENSE" "${workdir}/."
 
 if [ -z "${ext}" ] ; then
     test -f "${outfile}.zip" && rm "${outfile}.zip"
-    cp "${base}/scoter.py" "${workdir}/scoter.py"
+    cp "${workdir}/scoter.py" "${workdir}/scoter.py"
     ( cd "${base}" && zip -9r ${abs_outfile} * )
 else
     cp "${base}/scoter.py" "${workdir}/scoter"
-    ( cd "${base}" && tar zcf ${abs_outfile} * )
+    ( cd "${workdir}" && tar zcf ${abs_outfile} * )
 fi

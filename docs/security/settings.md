@@ -16,9 +16,9 @@ You can replace every one of them through your own [system configuration](../sys
 
 The [system configuration file](../system-config-file.md) describes the loading rules in full.  The parts that matter for security:
 
-* Settings load from the installation's `setup.yaml` (lowest priority), your own setup file, then any `--user-setup` files (highest).  A higher priority file replaces individual keys.
-* The tools **never** read setup files from a project.  A project's setup file is read only if you pass it with `--user-setup`, and a `distribution-dir` taken from a setup file must lie outside the project and its workspace.
-* A setup file can run any program on your computer: every `runs` entry is a command line, and every `programs` entry picks an executable.  Treat a setup file like a shell script.  Passing a project's file with `--user-setup` is the same as running that project's script.
+* Settings load from the installation's `setup.yaml` (lowest priority), then your own setup file (highest).  A higher priority file replaces individual keys.
+* The tools **never** read setup files from a project.  `$SURF_SCOTER_HOME`, your setup file, and a `distribution-dir` taken from a setup file must all lie outside the project, its workspace, and the repository holding it; otherwise the tools stop without making a configuration.  This matters because a project can set `SURF_SCOTER_HOME` itself, through tools such as direnv that run when you enter its directory.
+* A setup file can run any program on your computer: every `runs` entry is a command line, and every `programs` entry picks an executable.  It also decides what a project may do, such as the project files directory and where dev containers may come from.  Treat a setup file like a shell script.
 
 
 ## The system configuration

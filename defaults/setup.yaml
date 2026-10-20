@@ -134,30 +134,37 @@ scoter:
     # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
     # these after they've loaded would be a lie.
     #    project-config: set to the project configuration file.
-    #    project-dir: set to the project directory (--project-dir, or the project file's directory).
+    #    project-dir: set to the project directory (--project-dir, or the directory holding the
+    #        project file's `project-files-dir`).
     #    dev-container-path: set to the project's dev container directory.
     #    user-setup-file: set to the user's scoter configuration file.
     #    user-dir: set to the user's scoter configuration directory.
-    #    cwd: set to the directory the tool ran in.
+    #    cwd: set to the directory the tool ran in, or the --project-dir when given.
+    paths:
+        # Where your accepted (verified) project settings are kept.  They decide what each
+        # project may do, so this must be an absolute path outside any project, its workspace
+        # and its repository.
+        verified-dir: ~/.config/surf-scoter.d/verified
+
     path-lists:
-        # Where to find the project file.
+        # Where to find the project file.  It must be in a `project-files-dir` directory.
         project-file-search:
-            - ${scoter:cwd}/.surf-scoter.yaml
-            - ${scoter:cwd}/.surf-scoter.yml
-            - ${scoter:cwd}/.surf-scoter/container.yaml
-            - ${scoter:cwd}/.surf-scoter/container.yml
-            - ${scoter:project-dir}/.surf-scoter.yaml
-            - ${scoter:project-dir}/.surf-scoter.yml
-            - ${scoter:project-dir}/.surf-scoter/container.yaml
-            - ${scoter:project-dir}/.surf-scoter/container.yml
+            - ${scoter:cwd}/${scoter:project-files-dir}/project.yaml
+            - ${scoter:project-dir}/${scoter:project-files-dir}/project.yaml
 
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
+        # SECURITY: a dev container, and every parent it builds on, must be inside
+        # the project's `project-files-dir` or one of these directories.  Don't add
+        # directories a project controls, such as `${scoter:project-dir}` itself:
+        # they would let a project build from, and read, files outside its
+        # `project-files-dir`.
         dev-containers-search:
-            - ${scoter:project-dir}
-            - ${scoter:project-dir}/containers
-            - ${scoter:project-dir}/.surf-scoter
-            - ${scoter:project-dir}/.surf-scoter/containers
+            - ${scoter:project-dir}/${scoter:project-files-dir}
             - ${scoter:distribution-dir}/containers
 
     values:
+        # The directory, inside the project directory, that holds the project file and the
+        # project's dev containers.  Everything the tools read from a project lives there.
+        # It must be a single directory name.
+        project-files-dir: .surf-scoter.d
         backup-file-extension: .backup

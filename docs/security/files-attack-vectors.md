@@ -95,10 +95,11 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 `git fetch` from the workspace runs nothing, but what it brings is code the container wrote.  Changes that are easy to miss in review:
 
 * build and test scripts, CI workflows, package manifests with install hooks;
-* `.surf-scoter.yaml`, `.surf-scoter/allowed-domains.txt` and `dev-env.yaml`, which widen what the *next* environment may do;
+* anything in `.surf-scoter.d/` (the project file, and the dev containers' `Dockerfile`, `dev-env.yaml` and build files) and `.surf-scoter/allowed-domains.txt`, which widen what the *next* environment may do;
 * `.vscode/`, `.idea/` and other settings tools act on when they open a folder;
 * symlinks, which point at host files once checked out on the host;
 * `.gitmodules` entries pointing at attacker-controlled repositories.
+* when the project is Surf Scoter itself, its own scripts, `setup.yaml`, containers and host programs, which run on the host if the tools run from that checkout (see [Working on Surf Scoter With Surf Scoter](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
 
 **Red team:** get a change from each category through a realistic review.
 

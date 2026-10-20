@@ -1,0 +1,10 @@
+# Crate access
+.crates.io
+
+# Python access, for script tooling.
+.pypi.org
+.pythonhosted.org
+
+# Intentionally left out: VS Code download locations.
+# These should come from VS Code by the "Local Server Download" and
+# "Download Extensions Locally" settings.

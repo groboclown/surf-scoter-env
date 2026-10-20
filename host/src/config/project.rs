@@ -1,5 +1,11 @@
 //! The project configuration file, shared by everyone working on the project.
 //!
+//! It lives in the project's files directory (the system configuration's
+//! `scoter` `values: project-files-dir`, normally `.surf-scoter.d`), with the
+//! project's dev containers.  The project directory is the one holding that
+//! directory.  Checking the directory's name needs the system configuration,
+//! so `config::load_all` does it.
+//!
 //! The host bypass exists so the container can perform an action that needs
 //! privileges the container doesn't have (credentials, the Docker daemon, and
 //! so on).  Because those actions run on the host, everything they touch on
@@ -15,8 +21,8 @@
 //!
 //! container:
 //!   # The dev container: a directory with a Dockerfile and dev-env.yaml,
-//!   # relative to this file...
-//!   dev-container-path: ./.scoter/dev-env
+//!   # relative to this file, inside the project's files directory...
+//!   dev-container-path: ./dev-env
 //!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers-search`.
 //!   # dev-container: dev-env
 //!
@@ -110,8 +116,22 @@ use yaml_serde::Value;
 
 use super::environment::{EnvPlan, EnvRules};
 use super::pattern::WorkspacePattern;
-use super::read::{parse_yaml, read_limited, tag_errors};
+use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
+
+/// The project directory for the project file at `path`: the directory
+/// holding the project files directory the file is in.
+pub fn project_dir_of(path: &Path) -> Option<&Path> {
+    path.parent()?.parent()
+}
+
+/// Whether the project file at `path` is directly inside a directory named
+/// `files_dir_name` (the system configuration's `project-files-dir`).
+pub fn in_files_dir(path: &Path, files_dir_name: &str) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == files_dir_name)
+}
 
 /// The project configuration file.
 #[derive(Debug, PartialEq, Eq)]
@@ -133,7 +153,8 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    /// The directory holding the file; relative paths start here.
+    /// The directory holding the file (the project files directory); relative
+    /// paths start here.
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new(""))
     }
@@ -299,9 +320,28 @@ pub(crate) fn load_checked(
     Option<ContainerRef>,
 ) {
     let path = super::absolute(path);
-    match read_limited(&path) {
+    if let Err(m) = check_location(&path) {
+        return (Err(vec![ConfigError::new(Some(&path), "", m)]), None);
+    }
+    match read_regular_file(&path) {
         Ok(text) => parse_checked(&text, &path),
         Err(m) => (Err(vec![ConfigError::new(Some(&path), "", m)]), None),
+    }
+}
+
+/// The directory holding the project file must not be a symlink: everything
+/// the tools read from the project, and the build context of its dev
+/// containers, stays in there.  (Its name is checked by `config::load_all`.)
+fn check_location(path: &Path) -> Result<(), String> {
+    let Some(files_dir) = path.parent() else {
+        return Ok(());
+    };
+    match files_dir.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("the project file's directory is a symlink; it must be a directory".to_string())
+        }
+        // A missing directory is reported when the file is read.
+        _ => Ok(()),
     }
 }
 
@@ -571,6 +611,7 @@ impl PathOptions {
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+    use std::fs;
 
     const PROJECT: &str = "/proj/scoter.yaml";
     const CONTAINER: &str = "container:\n  dev-container: dev-env\n";
@@ -761,20 +802,70 @@ mod tests {
     #[test]
     fn load_reads_file() {
         let dir = TempDir::new();
-        let path = dir.write("scoter.yaml", CONTAINER);
-        assert_eq!(load(&path).unwrap().path, path);
+        let path = dir.write("proj/.surf-scoter.d/project.yaml", CONTAINER);
+        let project = load(&path).unwrap();
+        assert_eq!(project.path, path);
+        assert_eq!(project.dir(), dir.path().join("proj/.surf-scoter.d"));
+        assert_eq!(
+            project_dir_of(&path),
+            Some(dir.path().join("proj").as_path())
+        );
     }
 
     #[test]
     fn load_missing_file() {
-        let errors = load(Path::new("/nonexistent/scoter/project.yaml")).unwrap_err();
+        let errors = load(Path::new("/nonexistent/.surf-scoter.d/project.yaml")).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0]
                 .to_string()
-                .starts_with("/nonexistent/scoter/project.yaml: cannot read the file: "),
+                .starts_with("/nonexistent/.surf-scoter.d/project.yaml: cannot read the file: "),
             "{}",
             errors[0]
+        );
+    }
+
+    #[test]
+    fn project_files_dir_name() {
+        let path = Path::new("/proj/.surf-scoter.d/project.yaml");
+        assert!(in_files_dir(path, ".surf-scoter.d"));
+        assert!(!in_files_dir(path, ".other"));
+        assert!(!in_files_dir(
+            Path::new("/proj/project.yaml"),
+            ".surf-scoter.d"
+        ));
+        assert!(!in_files_dir(Path::new("project.yaml"), ".surf-scoter.d"));
+        assert_eq!(project_dir_of(path), Some(Path::new("/proj")));
+        assert_eq!(project_dir_of(Path::new("project.yaml")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_symlinks() {
+        let dir = TempDir::new();
+        let real = dir.write("elsewhere/project.yaml", CONTAINER);
+
+        // The project file itself.
+        fs::create_dir_all(dir.path().join("a/.surf-scoter.d")).unwrap();
+        let link = dir.path().join("a/.surf-scoter.d/project.yaml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let errors = load(&link).unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "the file is a symlink; it must be a regular file"
+        );
+
+        // The directory holding it.
+        fs::create_dir_all(dir.path().join("b")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("elsewhere"),
+            dir.path().join("b/.surf-scoter.d"),
+        )
+        .unwrap();
+        let errors = load(&dir.path().join("b/.surf-scoter.d/project.yaml")).unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "the project file's directory is a symlink; it must be a directory"
         );
     }
 

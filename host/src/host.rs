@@ -513,14 +513,21 @@ mod tests {
                 std::fs::write(&path, text).unwrap();
                 path
             };
-            write("env/Dockerfile", "FROM scratch\n");
+            // The user's setup file must be outside the project, and its workspace.
+            write("project/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
             write(
-                "env/dev-env.yaml",
+                "project/.surf-scoter.d/env/dev-env.yaml",
                 "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
             );
             TestProject {
-                project: write("scoter.yaml", "container:\n  dev-container-path: env\n"),
-                setup: write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n"),
+                project: write(
+                    "project/.surf-scoter.d/project.yaml",
+                    "container:\n  dev-container-path: env\n",
+                ),
+                setup: write(
+                    "home/setup.yaml",
+                    "docker:\n  programs:\n    exec: /bin/sh\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n",
+                ),
             }
         }
 
@@ -528,12 +535,15 @@ mod tests {
         fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
             let options = LoadOptions {
                 project: with_project.then(|| self.project.clone()),
-                user_setup: vec![self.setup.clone()],
                 dev_container_workspace_dir: workspace.map(Path::to_path_buf),
-                no_setup_search: true,
                 ..LoadOptions::default()
             };
-            let config = config::load_all(&options).unwrap();
+            // The setup file as the user's, and nothing else.
+            let env = config::system::Env {
+                scoter_home: self.setup.parent().map(Path::to_path_buf),
+                ..config::system::Env::default()
+            };
+            let config = config::load_all_with_env(&options, env).unwrap();
             let json =
                 scoter_host::universal::to_json(&scoter_host::universal::build(&config).unwrap());
             let path = self.project.with_file_name(format!(
@@ -563,7 +573,8 @@ mod tests {
     fn run_needs_the_project_and_workspace() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
-        let ws = std::env::temp_dir();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
         assert_eq!(
             run(universal_args(&test.universal(false, Some(&ws)), "dev")),
             EXIT_FAILURE
@@ -586,7 +597,9 @@ mod tests {
     fn run_rejects_bad_container_name() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
-        let universal = test.universal(true, Some(&std::env::temp_dir()));
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let universal = test.universal(true, Some(&ws));
         assert_eq!(
             run(universal_args(&universal, "--privileged=x")),
             EXIT_USAGE

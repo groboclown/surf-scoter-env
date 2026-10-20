@@ -7,7 +7,7 @@
 //! parse, though, as tagged values; `tag_errors` reports them so no file can
 //! suggest a meaning the tools don't give it.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
@@ -31,6 +31,69 @@ pub fn read_limited(path: &Path) -> Result<String, String> {
 /// while reading, so special or growing files can't get around it.
 pub fn read_limited_to(path: &Path, max: u64) -> Result<String, String> {
     let file = File::open(path).map_err(|e| format!("cannot read the file: {e}"))?;
+    read_file(file, max)
+}
+
+/// Read a whole configuration file the project supplies, as `read_limited`
+/// does, refusing anything but a regular file.  A symlink isn't followed (it
+/// could point at a secret, or at a file the container writes), and a FIFO or
+/// device is refused before anything is read from it, as reading one could
+/// hang or have side effects.
+pub fn read_regular_file(path: &Path) -> Result<String, String> {
+    let file = open_regular(path)?;
+    read_file(file, MAX_CONFIG_FILE_SIZE)
+}
+
+/// Open `path` without following a symlink in its last component, and
+/// without blocking, then require a regular file.
+#[cfg(unix)]
+fn open_regular(path: &Path) -> Result<File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => "the file is a symlink; it must be a regular file".to_string(),
+            _ => format!("cannot read the file: {e}"),
+        })?;
+    require_regular(file)
+}
+
+/// Open `path` without following a symlink or other reparse point, then
+/// require a regular file.
+#[cfg(windows)]
+fn open_regular(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself, not its target.
+    const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|e| format!("cannot read the file: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot read the file: {e}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("the file is a symlink; it must be a regular file".to_string());
+    }
+    require_regular(file)
+}
+
+fn require_regular(file: File) -> Result<File, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot read the file: {e}"))?;
+    if metadata.is_file() {
+        Ok(file)
+    } else {
+        Err("not a regular file".to_string())
+    }
+}
+
+/// Read all of `file`, refusing anything over `max` bytes.
+fn read_file(file: File, max: u64) -> Result<String, String> {
     let mut bytes = Vec::new();
     file.take(max + 1)
         .read_to_end(&mut bytes)
@@ -136,6 +199,60 @@ mod tests {
             read_limited(&binary).unwrap_err(),
             "the file is not valid UTF-8"
         );
+    }
+
+    #[test]
+    fn regular_file_reads() {
+        let dir = TempDir::new();
+        let file = dir.write("project.yaml", "a: 1\n");
+        assert_eq!(read_regular_file(&file).unwrap(), "a: 1\n");
+
+        let over = dir.path().join("over.yaml");
+        fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_SIZE as usize + 1]).unwrap();
+        assert_eq!(
+            read_regular_file(&over).unwrap_err(),
+            "the file is larger than the 2 MB limit"
+        );
+        assert!(
+            read_regular_file(&dir.path().join("missing.yaml"))
+                .unwrap_err()
+                .starts_with("cannot read the file: ")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_refuses_others() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new();
+        let target = dir.write("secret.env", "TOKEN=x\n");
+        let link = dir.path().join("link.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            read_regular_file(&link).unwrap_err(),
+            "the file is a symlink; it must be a regular file"
+        );
+        // A symlink to a directory, or a dangling one, is refused the same way.
+        let dangling = dir.path().join("dangling.yaml");
+        std::os::unix::fs::symlink(dir.path().join("nothing"), &dangling).unwrap();
+        assert_eq!(
+            read_regular_file(&dangling).unwrap_err(),
+            "the file is a symlink; it must be a regular file"
+        );
+
+        fs::create_dir(dir.path().join("a-dir.yaml")).unwrap();
+        assert_eq!(
+            read_regular_file(&dir.path().join("a-dir.yaml")).unwrap_err(),
+            "not a regular file"
+        );
+
+        // Nothing writes to the FIFO, so a blocking read would never return.
+        let fifo = dir.path().join("fifo.yaml");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_regular_file(&fifo).unwrap_err(), "not a regular file");
     }
 
     #[test]

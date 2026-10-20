@@ -19,7 +19,7 @@ These are the things you need to do to keep Surf Scoter's protections working.  
 
 If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the files that decide what its container can do.  They define how the container can communicate outside its sandbox, which means it can do things you're not ready for.
 
-- **The project configuration file** (`.surf-scoter.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
+- **The project configuration file** (`.surf-scoter.d/project.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
 - **The allowed domain list** (`.surf-scoter/allowed-domains.txt`) says where the container may connect.
 - **The dev container's `Dockerfile` and `dev-env.yaml`** build and run the container.  Look for multi-line values in `dev-env.yaml`, a final `USER` other than an unprivileged user, and downloads in `RUN` steps.
 

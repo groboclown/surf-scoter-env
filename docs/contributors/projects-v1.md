@@ -267,18 +267,19 @@ For each step, the documentation and tests should correspondingly have updates. 
 
 Update the [defaults/setup.yaml](../../defaults/setup.yaml) file to now have the one place for the project file.
 
-* `project-file-search` only looks in `.surf-scoter.d`.  Remove the `.surf-scoter.yaml`, `.surf-scoter.yml` and `.surf-scoter/container.y*ml` entries.
+* `project-file-search` only looks for `.surf-scoter.d/project.yaml`.  Remove the `.surf-scoter.yaml`, `.surf-scoter.yml` and `.surf-scoter/container.y*ml` entries.  The project file must be in a directory named `.surf-scoter.d` (even when given with `--project-config`), and the project directory is the one holding it.
 * `dev-containers-search` only looks in `.surf-scoter.d` and the installation's `containers` directory.  Remove `${scoter:project-dir}`, `containers/` and `.surf-scoter/`.
-* A `parents: dir` entry in a `dev-env.yaml` may only name a container directory inside `.surf-scoter.d` or the installation directory.
+* The dev container, and every `parents` `dir` and `file` entry in a `dev-env.yaml`, must resolve (following symlinks) inside the project's `.surf-scoter.d` or one of the `dev-containers-search` directories.  The search list comes only from the user's and the installation's setup files, so it's user-trusted; the setup file warns against listing directories a project controls.
 * Decide whether the installation's own container directories (such as `dev-env`) are fingerprinted, or trusted as part of the installation.
 * Open the project file without following symlinks (`O_NOFOLLOW`), check with `fstat` that it's a regular file, and read it with a size limit.
-* The `allowed-domains` setup entry keeps working until the gateway step (step 8) replaces it.
+* The `allowed-domains` setup entry stays until the gateway step (step 8) replaces it.  It still reads `.surf-scoter/allowed-domains.txt`, so a project that keeps its list in `.surf-scoter.d` (as this repository does) gets an empty allowlist until then; see step 8.
+* **Remaining:** a dev container's `parents` can only name a `dir` or `file` by path.  A project's container that builds on one from the installation (such as `dev-env`) can't reach it: a path from `.surf-scoter.d` into the installation isn't portable, and a path to the checkout's own `containers/` is refused unless the checkout is the distribution.  Add a parent found by name through `dev-containers-search`, for example `parents: [{name: dev-env, tag: local-surf-scoter-env/dev-env:build}]`: the first search directory holding `NAME/Dockerfile` (and, when it has one, `NAME/dev-env.yaml`), with the same confinement as the other parents.  This repository's own `.surf-scoter.d/dev-env-container/dev-env.yaml` needs it to run with the self-host copy (see [CONTRIBUTORS.md](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
 
-Discovery walks up from the current directory to find `.surf-scoter.d`.  Until the VCS root detection exists (step 3), it stops at the current directory or `--project-dir`; after that, it stops at the VCS root.
+Discovery walks up from the current directory to find `.surf-scoter.d`.  Until the VCS root detection exists (step 3), it stops at the current directory or `--project-dir`; after that, it stops at the VCS root.  A given `--project-dir` replaces the current directory (it's the `${scoter:cwd}` value), so the search never falls back to the directory the tool ran in.
 
 Double check that the [SUC generator](../../host/src/bin/gen-scoter-uc.rs) follows those paths.
 
-**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository.
+**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository; a `name` parent found in the second search directory, missing from all of them, or found through a symlink that leads outside them.
 
 ## 2. Register Python as a program
 
@@ -297,6 +298,8 @@ Root detection rules:
 * Stop at the user's home directory or a file system boundary.
 * Ignore `GIT_DIR` and `GIT_WORK_TREE` from the environment.
 * A `root` value from the project may only name an ancestor of `.surf-scoter.d`.
+
+The setup file checks already need the repository root: `SURF_SCOTER_HOME`, the user's setup file and a `distribution-dir` from the setup files must be outside it.  Until this step, `repository_root` in [`system.rs`](../../host/src/config/system.rs) stands in, walking up from the project directory to the nearest `.git` or `.hg` (stopping below the home directory).  Replace it with this step's detection, so both agree on where the repository is.
 
 `${scoter:project-dir}` currently means both the directory to clone and the place for `.dev-env`.  Split it into two values:
 
@@ -332,7 +335,9 @@ The user's setup file can add to these lists.  Decide whether it can also remove
 
 ## 5. Design the user-directory verified storage
 
-The user scoter directory needs a solid structure around how to store each project's verified storage.
+The verified storage lives in the directory the setup files name as `scoter: paths: verified-dir` (default `~/.config/surf-scoter.d/verified`), not in `${scoter:user-dir}`, which isn't set when the user's setup file is `~/.config/surf-scoter.setup.yaml` or there's none.  Loading the setup files already refuses a `verified-dir` that's relative, or inside the project, its workspace or its repository.  It needs a solid structure around how to store each project's verified storage.
+
+`running-env-config` and `running-env-config-lock` have the same gap: [defaults/setup.yaml](../../defaults/setup.yaml) puts them under `${scoter:user-dir}`, so they have no value without a user directory.  Give them a dedicated `scoter: paths` setting of their own (say, `state-dir`, default `~/.config/surf-scoter.d/state`), checked the same way as `verified-dir`, as they hold the ports and names of the running environments.
 
 These should be stored in JSON formats so that Python can easily read it.  In order to allow for multiple project directories, I recommend an index file that points the local directory to the stored directory.  The stored directory is named by the environment id from step 3, so two directories with the same name don't collide and need no conflict resolution.  The directory here is *always* the parent of the `.surf-scoter.d` directory, not the VCS root; this allows for multi-project repositories.  The index maps the full canonical path to the id, which also makes it easy to list and revoke acceptances.
 
@@ -346,6 +351,14 @@ I started a little of the implementation in the [auth_project_file.py](../../scr
 Fix the related code while here:
 
 * [`docker.py`](../../scripts/surf_scoter_lib/project_auth/docker.py) - With whole directories stored, hash the file bytes directly.
+
+Record the setup the review was made under.  The accepted data is only right for the boundaries it was reviewed with, and those come from the setup files, not the project.  A user or distribution change to any of them changes what gets built and run, so store their resolved values with each acceptance, and ask for a new review when one changes:
+
+* `scoter: values: project-files-dir`;
+* `scoter: path-lists: dev-containers-search`;
+* the VCS section's `runs` for the project's `vcs` (`local-clone`, `fetch-changes-into`, `show-fetch-changes`, `merge-changes`);
+* the gateway the egress rules were accepted for (step 8);
+* `scoter: paths: verified-dir` itself, so a moved store can't quietly start empty, or be swapped for another.
 
 Protect the storage:
 
@@ -390,6 +403,12 @@ This will introduce a new section for the egress settings, and expand the VCS se
 
 "host-brokered" is built only from the verified settings, never from "current-project-setup".
 
+From this step on, the SUC is security-critical: whoever can write it decides what runs on the host, and `scoter-host` loads it without running the setup checks again.
+
+* Write it only with `mkstemp` (mode `0600`) in a directory only the user can read, as `scoter.py` does now, and never into the setup directory the container mounts.
+* Pass sub-commands its path, never its contents through the environment, and remove it when the run ends.
+* Decide what `scoter-host` checks again when it loads the SUC.  At least: the file's owner and mode, that its project and dev container locations are still where the accepted settings say, and that the accepted settings it carries match the ones in `verified-dir` (by fingerprint), so an old or edited SUC can't stand in for a review.
+
 ## 8. Add a default section for the network gateway settings
 
 With the addition of the egress setup, the network gateway translation of those settings to the one used by the container become important.  Most likely, this will fork off to a script in the scripts directory that will manage the implementation-specific translation.  The settings will also need to include a list of mount mappings for the generated file (would need to be ingested by the docker-compose section).  First cut will limit the output to a single file.
@@ -400,7 +419,7 @@ This will also need a method to read those settings and report on what it can an
 * Ports other than 443 also need firewall rule changes (N4), not just Squid changes.  The first cut can refuse them.
 * Keep refusing private, loopback, link-local and metadata addresses after DNS resolution.
 * The verified settings record the gateway they were accepted for.  A different gateway at run time triggers a new review.
-* This replaces the `allowed-domains` setup entry and `.surf-scoter/allowed-domains.txt`.
+* This replaces the `allowed-domains` setup entry and `.surf-scoter/allowed-domains.txt`.  Until then, the entry in [defaults/setup.yaml](../../defaults/setup.yaml) points at the old location, and a missing list makes `main_run.py` create an empty one with mode `0666` (FILE-7).  If this step is a while off, change the default to `${scoter:project-dir}/${scoter:project-files-dir}/allowed-domains.txt` in the meantime, and refuse to start without a list instead of creating one.
 
 **Tests:** `methods` on a `tls` rule; a rule for port 22; a listed hostname that resolves to `169.254.169.254` or a private address; a gateway change after acceptance.
 
@@ -500,3 +519,14 @@ Use the three stored versions (step 5) to show what the project changed separate
 - Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
 - Allow a user to revoke a project's acceptance.
 - Allow a user to list accepted projects, with their expiry and exemptions.
+
+
+# Future Tasks
+
+## Choosing the setup for a project run
+
+`--user-setup` was removed: with the egress rules in the project file, and the accepted settings in the user's own storage, a project no longer needs its own setup file.  The remaining need is to run a project with a different docker-compose file and related images (say, an alternate gateway, or extra service containers).
+
+Instead of reading another setup file, let the user choose, for a project run, which setup section to use for those parts, from sections their own setup files (or the distribution's) define.  The choice is the user's, recorded with the project's accepted settings, never the project's.
+
+This also bears on the accepted egress rules: they were reviewed for one gateway (step 8), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.

@@ -58,11 +58,27 @@ dev-install:
 ##                           Set the --distribution-dir= argument to this current directory.
 .PHONY: dev-prep
 dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug
-	test -f setup.yaml || cp defaults/setup.yaml .
 	mkdir -p bin
 	cd bin && ln -s ../build-scripts/cargo-gen-scoter-uc.sh gen-scoter-uc
 	cd bin && ln -s ../build-scripts/cargo-scoter-host.sh scoter-host
 	cd bin && ln -s ../scripts/*.py ../scripts/surf_scoter_lib/ .
+
+# ---------------------------------------------------------------------
+# Running Surf Scoter on itself.  See CONTRIBUTORS.md.
+
+SELF_HOST_REF ?= main
+SELF_HOST_DIR ?= $(HOME)/.local/share/surf-scoter-self-host
+
+## self-host-install         Install a copy of the tools from SELF_HOST_REF (default: main) into
+##                           SELF_HOST_DIR, to run against this checkout.
+.PHONY: self-host-install
+self-host-install:
+	build-scripts/self-host-install.sh install "$(SELF_HOST_REF)" "$(SELF_HOST_DIR)"
+
+## self-host-remove          Remove the copy installed by self-host-install.
+.PHONY: self-host-remove
+self-host-remove:
+	build-scripts/self-host-install.sh remove "$(SELF_HOST_DIR)"
 
 # ---------------------------------------------------------------------
 # Rust-related tasks.
@@ -195,7 +211,7 @@ firewall-router-clean:
 .PHONY: network-gateway-image
 build: network-gateway-image
 network-gateway-image:
-	cd containers/network-gateway && $(DOCKER) build -t $(FIREWALL_ROUTER_TAG) .
+	cd containers/network-gateway && $(DOCKER) build -t $(NETWORK_GATEWAY_TAG) .
 
 ## network-gateway-clean     Delete the local network-gateway image.
 .PHONY: network-gateway-clean
@@ -241,10 +257,8 @@ python-bandit:
 .PHONY: mk-installer
 mk-installer:
 
-# TODO this target is big and complex.
-# Probably want to make it a script so that this Makefile doesn't fill up
-# with cut-and-paste code.  Also, this should carefully copy files, so that
-# developer remnants aren't accidentally copied in.
+# TODO come up with an approach to handle all platforms,
+# rather than a onsey-twosy.
 
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 mk-installer: mk-installer-x86_64-unknown-linux-gnu

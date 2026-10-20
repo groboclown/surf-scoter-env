@@ -49,7 +49,7 @@ Git runs in your repository, with your configuration and your hooks.  The worksp
 Review what arrives as untrusted code before merging, paying particular attention to:
 
 * build and test scripts, CI workflows, and package manifests with install hooks;
-* `.surf-scoter.yaml` and `.surf-scoter/` (they change what the *next* environment may do; see [the host bridge](host-bridge.md) and [network](network.md));
+* `.surf-scoter.d/` and `.surf-scoter/` (they change what the *next* environment may do; see [the host bridge](host-bridge.md) and [network](network.md));
 * `.vscode/`, `.idea/`, `.editorconfig`, and other files your tools act on when they open a folder;
 * symlinks, which can point at files outside the project once they're on your host.
 
