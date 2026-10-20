@@ -159,6 +159,77 @@ The general layout:
         }
     },
 
+    // Every section's `host-commands` checks, put together (see the system configuration
+    // file's "Host command checks").  Checks a setup file removes (null) aren't here.
+    "host-command-checks": {
+        // Each check, by `section:key`, expanded: 'commands' holds `commands` and `command-map`
+        // together, each name with the executable it runs (`null` when it isn't there), and
+        // 'paths' are expanded file locations.  'files' are the setup files that set this
+        // `section:key`, highest priority first: the check is the first one's alone (a check's
+        // fields aren't merged), and the others hold the versions it hides.
+        "checks": {
+            "host-bridge:shells": {
+                "files": [
+                    "/home/user/.config/surf-scoter.d/setup.yaml",
+                    "/home/user/.local/share/surf-scoter/setup.yaml"
+                ],
+                "action": "refuse",
+                "reason": "A shell runs whatever command it's given, ...",
+                "commands": {"bash": "/usr/bin/bash", "sh": "/usr/bin/sh", "ksh": "/usr/bin/ksh"},
+                "name-patterns": [], "options": [], "env": [], "paths": [], "overrides": []
+            },
+            "host-bridge:ksh-is-mine": {
+                "files": ["/home/user/.config/surf-scoter.d/setup.yaml"],
+                "action": "warn",
+                "reason": "I review the ksh scripts this project's commands run.",
+                "commands": {"ksh": "/usr/bin/ksh"},
+                "name-patterns": [], "options": [], "env": [], "paths": [],
+                "overrides": ["host-bridge:shells"]
+            },
+            "docker:docker": {
+                "files": ["/home/user/.local/share/surf-scoter/setup.yaml"],
+                "action": "warn",
+                "reason": "An allowed `docker` command can start a container ...",
+                "commands": {"docker": "/usr/sbin/podman"},
+                "name-patterns": [], "options": [], "env": [], "paths": [], "overrides": []
+            }
+        },
+        // Each command name the checks map, with the program it runs and the checks that map it.
+        "command-map": {
+            "bash": {"program": "/usr/bin/bash", "checks": ["host-bridge:shells"]},
+            "docker": {"program": "/usr/sbin/podman", "checks": ["docker:docker"]}
+        },
+        // For each mapped command, what the checks that match on its name alone make of it, in
+        // two steps.  First, the checks without `overrides` that match it: the most restrictive
+        // of their actions.  Then each override for the command takes the place of the check it
+        // overrides, and the action is the most restrictive of what's left.  'checks' are the
+        // checks the action comes from; 'overridden' are the matching checks an override
+        // replaced.  Checks with 'options', 'env' or 'paths' depend on the project's command,
+        // so they're left to whoever checks it.
+        "commands": {
+            "bash": {"action": "refuse", "checks": ["host-bridge:shells"], "overridden": []},
+            "docker": {"action": "warn", "checks": ["docker:docker"], "overridden": []},
+            "ksh": {
+                "action": "warn",
+                "checks": ["host-bridge:ksh-is-mine"],
+                "overridden": [{"check": "host-bridge:shells", "by": "host-bridge:ksh-is-mine"}]
+            }
+        },
+        // Things to tell the user: a check removed or replaced (which misses what the lower
+        // priority file adds to it later), or an override that does nothing.  See below.
+        "notices": [
+            {
+                "message": "/home/user/.config/surf-scoter.d/setup.yaml replaces `host-bridge:shells` from /home/user/.local/share/surf-scoter/setup.yaml without its commands `nu`; ...",
+                "id": "check-replaced-without",
+                "parameters": {"check": "host-bridge:shells", "field": "commands", "entries": ["nu"]},
+                "sources": [
+                    "/home/user/.config/surf-scoter.d/setup.yaml",
+                    "/home/user/.local/share/surf-scoter/setup.yaml"
+                ]
+            }
+        ]
+    },
+
     "host-brokered": [
         // This is the `commands` section from the project configuration file.
         // It's nearly verbatim, except for two fields, so each entry says exactly what it does:
@@ -223,7 +294,10 @@ The general layout:
                         "programs": {"exec": "/usr/sbin/podman"},
                         "runs": {"build": "${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}"},
                         "path-lists": {},
-                        "values": {}
+                        "values": {},
+                        // Only when the file has some; a null check removes a lower
+                        // priority file's.
+                        "host-commands": {"shells": null}
                     }
                 }
             }
@@ -260,9 +334,30 @@ Notes on the values:
 
 * Paths are absolute.  `dev-container-path` has symbolic links resolved.
 * `active-config-locations` and the `resolved` `scoter` section's `paths` of the same names always hold the same values (a `null` location is left out of `paths`).
-* Every `resolved` entry has `paths`, `programs`, `runs`, `path-lists` and `values`, possibly empty.
+* Every `resolved` entry has `paths`, `programs`, `runs`, `path-lists` and `values`, possibly empty.  A section's `host-commands` checks aren't in `resolved`: they're in `host-command-checks`, combined with every other section's.
+* Every `host-command-checks` check has all its fields, possibly empty.  A check a setup file removes (with `null`) isn't in `checks`; the `check-removed` notice says so.  `commands` and `command-map` give the program found, as a `programs` value does, and `gen-scoter-uc` refuses (with an error) a program in the project directory, the project files directory, the workspace or the repository, or a command two checks map to different programs.
 * `setup` is for `gen-scoter-uc`; read the expanded values from `resolved`.
 * `paths` and `path-lists` entries have `~` and `./` already resolved, and are given whether or not they exist.
 * `values` keep their types: text, numbers, `true`/`false` and `null`.  Only text has its `${...}` references expanded.
 * Each `runs` command is a list of arguments, the first being the program.  The quotes from the setup file are already removed, and the `{x:name}` placeholders are left in place: fill them in within each argument, so a value with spaces stays a single argument.
 * `project`, `host-brokered` and `dev-container` keep their keys as written, though not necessarily in the same order.  `dev-container` is the merge of the `dev-env.yaml` and its parents, so always has `sshd-port`, `sshd-port-env` and `parent-builds` (possibly `null` or empty), and never `parents`.
+
+### Notices
+
+Each `host-command-checks` notice is an object:
+
+* `message`: the text to show the user.
+* `id`: what kind of notice it is, below.  With `parameters`, it says the same as `message`, so a tool can show it in another language.  (The tools don't translate them yet; the format is ready for it.)
+* `parameters`: the notice's values, by name: each a text, or a list of texts.
+* `sources`: the setup files it's about, highest priority first.
+
+| `id` | When | `parameters` | `sources` |
+|---|---|---|---|
+| `override-target-unset` | A check overrides one that isn't set, so the override does nothing. | `check`, `target` | the override's file |
+| `override-not-matched` | A check overrides another for a command, option or environment variable the other doesn't match, so it does nothing for it. | `check`, `target`, `kind` (`command`, `option` or `env`), `name` | the override's file, the target's |
+| `check-removed` | A setup file sets a lower priority file's check to `null`. | `check` | the file, the lower priority one |
+| `check-replaced-without` | A setup file replaces a lower priority file's check without some of its entries.  One notice for each field. | `check`, `field` (`commands`, `name-patterns`, `options`, `env` or `paths`), `entries` (a list) | the file, the lower priority one |
+| `check-replaced-less-restrictive` | A setup file replaces a lower priority file's check with a less restrictive action. | `check`, `action`, `replaced-action` | the file, the lower priority one |
+
+A new kind of notice gets a new `id`.  Tools that don't know an `id` show its `message`.
+

@@ -64,6 +64,7 @@ ssh:
 * `runs`: command patterns (see [Defining Executables](#defining-executables)).
 * `path-lists`: lists of file locations (see [Defining Path Lists](#defining-path-lists)).
 * `values`: plain values (see [Plain Values](#plain-values)).
+* `host-commands`: checks on the commands a project may run on your computer (see [Host Command Checks](#host-command-checks)).
 
 Each key in a section has exactly one kind of value: setting the same key in two of the mappings (say, `paths: retries` and `values: retries`) is an error.  That holds across files too: the kind of value is part of what a key means, so a higher priority file can change a key's value, but not its kind.  You can think of a section as a mapping of keys, where each key has a value and a kind.
 
@@ -76,6 +77,7 @@ Inside the values, you can refer to any other key with the `${[section:]key}` fo
 What a reference gives depends on the kind of value it refers to:
 
 * `paths`, `programs` and `values` are text, and can be used anywhere.  A `null` value can't be used.  A reference to a program gives the program found (see [Programs](#programs)).
+* `host-commands` checks can't be referred to at all: `${host-bridge:shells}` is an error.
 * `runs` and `path-lists` are lists.  A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
 
 Referring to a key that isn't set anywhere is an error (except for the `scoter` locations the tool sets; see [below](#the-scoter-section)), as is a set of values that refer to each other in a loop.  You can escape a `${` expression by doubling up the dollars - `$${` becomes `${`; you don't need to double-up a `$` unless it's followed by a `{`.
@@ -173,10 +175,13 @@ The tools use these sections:
 
 * `docker`: the container tool.
     * `programs: exec`: the program; defaults to `docker`.
+    * `host-commands: docker`: a project's `docker` command runs `${exec}`, and is warned about.
     * `runs: broker`: how `scoter-host` starts the broker inside the development container.  It defaults to `${exec} exec -i {x:container} {x:broker}`, where `{x:container}` is the container name and `{x:broker}` is the `broker-bin` from the container's `dev-env.yaml`.  It must not ask for a TTY.
 * `python`: the interpreter that runs the tool's sub-commands (the distribution's `bin/main_*.py` scripts).
     * `programs: exec`: the interpreter, normally `python3`.  Point it at a virtual environment's interpreter, such as `${scoter:distribution-dir}/.venv/bin/python`, to give the scripts installed libraries.  It runs on your computer with your privileges, so never point it into a project.
     * `runs: sub-command`: how the tool starts a sub-command script: normally `${exec} -E -s {x:script}`.  `{x:script}` is the script, and the tool adds the universal configuration file, the sub-command name and its arguments after it.  It must start with the interpreter; `-E` ignores the `PYTHON*` environment variables (which a project could set when you enter its directory) and `-s` your user site-packages.
+* `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  Its `host-commands` map a project's `git` command to `${exec}`, and warn about it, and about the options that set Git configuration.
+* `host-bridge`: the [host command checks](#host-command-checks) that aren't about one tool: shells, interpreters, programs that run other programs, options and environment variables that run code, and version manager shims.
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
     * `paths: home`: your SSH directory, normally `~/.ssh`.
@@ -216,3 +221,90 @@ ssh:
         strict-host-key-checking: false
         banner: Connecting with ${ssh:config-file}
 ```
+
+## Host Command Checks
+
+A project can ask to run commands on your computer (its `commands`, in the [project configuration file](project-configuration-file.md)).  A section's `host-commands` are checks on those commands: what to refuse, what to warn you about, and what you've decided to allow.  Each key is one check:
+
+```yaml
+host-bridge:
+    host-commands:
+        shells:
+            action: refuse
+            reason: >-
+                A shell runs whatever command it's given, so the container could
+                run anything on your computer.
+            commands: [sh, bash, zsh, ksh]
+docker:
+    programs:
+        exec: podman
+    host-commands:
+        docker:
+            action: warn
+            reason: An allowed `docker` command can mount your home directory.
+            command-map:
+                docker: ${exec}
+```
+
+Note: for now, `gen-scoter-uc` only checks, expands and combines these (see the universal configuration file's `host-command-checks`).  Applying them to a project's commands comes with the review of the project file, which is still being built ([Projects in v1](contributors/projects-v1.md)).
+
+Any section can have them, so a check can sit with the tool it's about; the distribution's checks that aren't about one tool are in `host-bridge`.  A check has:
+
+* `action` (required): `refuse`, `warn` or `allow`, from most to least restrictive.
+* `reason` (required): why, shown when the check matches a project's command.
+* What it matches: one or more of these.  With more than one, all of them must match: `commands: [git]` with `options: [-c]` matches `git -c`, not `git` alone.
+    * `commands`: command names, as the project file's `command` gives them.  Each is found on the `PATH`, as a `programs` value is.
+    * `command-map`: command names, each with the program it runs, written as a `programs` value is (`docker: ${docker:exec}`, or `docker: podman`).  The command `docker` then runs `podman`.  A name can't be in both `commands` and `command-map`.
+    * `name-patterns`: patterns for command names, with `*` (any characters), `?` (one character) and `[...]` (one of a set; `[!...]` is one not in it), such as `python*`.
+    * `options`: options that run code, such as `-c`.  They match when the project lets the container fill in what follows them.  Without names, they apply to every command.
+    * `env`: environment variables, matched against a command's `env` `allow` entries as exact text: `LD_*` matches an `allow: ['LD_*']` entry, but not `allow: ['L*']`.
+    * `paths`: directories, written as `path-lists` entries are.  They match a command whose program is in one of them.  `paths` can't go with the other matches.
+* `overrides` (optional): the checks (`section:key`) this one replaces, for the commands it names (see below).
+
+Names are case sensitive.  A check doesn't look only at the name: a command whose program is a link to the same file as one a check names matches that check too, and `name-patterns` are also matched against the name of the file the program really is.  So a command `mytool` that's a link to `env` is refused as `env` is.
+
+Only `command-map` values and `paths` entries are expanded.  The other fields are used as written, and a `${` in them is an error.  Every field is checked: a misspelled field, or a value that can't be right (a `commands` entry with a `/` in it, say), is an error.
+
+A command's program can't be in the project directory, the project files directory, the workspace or the repository holding the project, and two checks can't map the same command to different programs; `gen-scoter-uc` reports either as an error.
+
+### When checks disagree
+
+A command's action is worked out in two steps:
+
+1. Every check without `overrides` that matches the command counts, and the most restrictive of their actions wins.  So adding a check can only add to what's refused or warned about.  `allow` matters only for a command that no other check matches: it says you've decided about it.
+2. Then each [override](#overrides) for the command takes the place of the check it overrides, and the action is again the most restrictive of what's left.  An override changes what one check says about a command; it doesn't decide the command on its own.  The other checks that match still count, and an override for a command no check matches does nothing.
+
+You're shown the reason of every check that counts, and which checks an override replaced.
+
+Your setup file's checks merge with the distribution's key by key, like the other kinds of values:
+
+* to **add** a check, give it a name of your own;
+* to **relax** one for some commands, add a check that names those commands and `overrides` it (below);
+* to **replace** one, set it again under the same name (the whole check: its fields aren't merged with the distribution's);
+* to **remove** one, set it to `null`.
+
+Prefer `overrides` to replacing or removing a check.  A replaced check is frozen: when a later Surf Scoter version adds a newly found shell to `host-bridge: shells`, your replacement doesn't get it.  `scoter user-setup` lists the checks your setup replaces or removes, and what each gives up.
+
+### Overrides
+
+To allow `ksh` without allowing the other shells:
+
+```yaml
+host-bridge:
+    host-commands:
+        ksh-is-mine:
+            action: warn
+            reason: I review the ksh scripts this project's commands run.
+            commands: [ksh]
+            overrides: [host-bridge:shells]
+```
+
+For `ksh`, this check's `warn` takes the place of `host-bridge: shells`' `refuse`.  The rest of `shells` still applies, including what later versions add to it, and so does any other check that matches `ksh`: if one refuses it, it's still refused.  So an override can't undo more than you meant:
+
+* It names the checks it overrides exactly.  Any other check that matches `ksh`, including one a later version adds, still applies.
+* It names its commands exactly, with `commands` or `command-map`, and can't use `name-patterns` or `paths`.  Its `env` entries must be exact names, too.
+* A command (or option, or environment variable) the overridden check doesn't match is reported, as the override does nothing for it.  So is an override of a check that isn't set.
+* A check can only override checks from its own setup file or a lower priority one: the distribution's can't override yours.
+* It can only override checks without `overrides` of their own.
+* Two checks can't override the same check for the same command (or, with `options` or `env`, for the same option or variable): only one can say what the check becomes.  `gen-scoter-uc` reports it as an error, as it does the two above.
+

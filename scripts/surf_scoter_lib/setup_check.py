@@ -150,3 +150,24 @@ def _relative_path_entries(path_env: str) -> list[str]:
         for entry in path_env.split(os.pathsep)
         if not entry or not os.path.isabs(entry)
     ]
+
+
+def host_command_report(config: UserConfig) -> list[str]:
+    """What the user should know about their setup's host command checks.
+
+    The generator's notices (checks removed or replaced, overrides that do
+    nothing), and each override in effect: what a check gives up, and for what.
+    """
+    report = list(config.host_command_notices())
+    for check_id, check in sorted(config.host_command_checks().items()):
+        overrides = check.get("overrides") or []
+        commands = check.get("commands") or {}
+        if not isinstance(overrides, list) or not isinstance(commands, dict):
+            continue
+        for target in overrides:
+            names = ", ".join(f"`{name}`" for name in sorted(commands))
+            report.append(
+                f"`{check_id}` overrides `{target}` for {names}, "
+                f"with `{check.get('action')}`"
+            )
+    return report

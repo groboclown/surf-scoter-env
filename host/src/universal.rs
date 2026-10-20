@@ -12,6 +12,11 @@
 //! Fill in the placeholders argument by argument; a value with spaces stays
 //! one argument.
 //!
+//! `host-command-checks` holds every section's `host-commands` checks, put
+//! together: each check expanded, the program each command name they map
+//! runs, the action the name-only checks give each of those commands, and
+//! notices about checks that are removed, replaced or overridden.
+//!
 //! `setup` holds the system setup files' settings as written, so a later run
 //! can start from this file (with a project file found since, say) without
 //! reading the setup files again.
@@ -23,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
+use crate::config::host_commands::{self, Combined};
 use crate::config::system::{self, LoadedFrom, ScalarValue, SectionDefaults, SetupRecord};
 use crate::config::{ConfigError, ConfigErrors, FullConfig, child_key, index_key};
 
@@ -35,6 +41,8 @@ pub struct Universal {
     pub active_config_locations: ActiveConfigLocations,
     /// Every section, expanded.
     pub resolved: BTreeMap<String, UniversalSection>,
+    /// Every section's `host-commands` checks, put together.
+    pub host_command_checks: Combined,
     /// The project configuration file, as written.
     pub project: Option<Json>,
     /// The project's `commands`, with `program` set to the executable found
@@ -114,6 +122,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     let system = &config.system;
 
     let mut resolved = BTreeMap::new();
+    let mut sections = Vec::new();
     for name in system.sections() {
         match system.section(name, &SectionDefaults::default()) {
             Ok(section) => {
@@ -144,13 +153,17 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                         programs: found(&section.programs),
                         runs,
                         path_lists,
-                        values: section.values,
+                        values: section.values.clone(),
                     },
                 );
+                sections.push(section);
             }
             Err(e) => errors.push(e),
         }
     }
+    let host_command_checks = host_commands::combine(system, &sections)
+        .map_err(|e| errors.extend(e))
+        .unwrap_or_default();
 
     let mut host_brokered = Vec::new();
     if let Some(project) = &config.project {
@@ -205,6 +218,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             cwd: location(system::CWD),
         },
         resolved,
+        host_command_checks,
         project,
         host_brokered,
         dev_container,
@@ -290,7 +304,7 @@ mod tests {
     use super::*;
     use crate::config::system::Env;
     use crate::config::testing::TempDir;
-    use crate::config::{LoadOptions, load_all_with_env};
+    use crate::config::{ConfigErrors, LoadOptions, load_all_with_env};
     use std::path::PathBuf;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\nextra:\n  ratio: 0.5\n  1: one\n";
@@ -630,5 +644,376 @@ mod tests {
         );
         assert_eq!(json["ok"], 1.5);
         assert_eq!(json["b"][0], 1);
+    }
+
+    // ---- host-commands checks ----
+
+    /// Load the user's and the distribution's setup files, with `bin` as
+    /// the `PATH`.
+    fn load_setups(dir: &TempDir, user: &str, dist: &str) -> Result<FullConfig, Vec<String>> {
+        dir.write("home/setup.yaml", user);
+        dir.write("dist/setup.yaml", dist);
+        let options = LoadOptions {
+            distribution_dir: Some(dir.path().join("dist")),
+            ..LoadOptions::default()
+        };
+        let env = Env {
+            scoter_home: Some(dir.path().join("home")),
+            path: Some(dir.path().join("bin").into_os_string()),
+            ..Env::default()
+        };
+        load_all_with_env(&options, env).map_err(error_texts)
+    }
+
+    fn error_texts(errors: ConfigErrors) -> Vec<String> {
+        errors
+            .0
+            .into_iter()
+            .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
+            .collect()
+    }
+
+    fn combined(dir: &TempDir, user: &str, dist: &str) -> Result<Combined, Vec<String>> {
+        let config = load_setups(dir, user, dist)?;
+        build(&config)
+            .map(|u| u.host_command_checks)
+            .map_err(error_texts)
+    }
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_checks_combined() {
+        use crate::config::host_commands::{Action, MappedCommand, Verdict};
+        let dir = TempDir::new();
+        let sh = tool(&dir, "bin/sh");
+        let podman = tool(&dir, "bin/podman");
+        let python = tool(&dir, "bin/python3.12");
+        let mytool = dir.path().join("bin/mytool");
+        std::os::unix::fs::symlink(&sh, &mytool).unwrap();
+        let checks = combined(
+            &dir,
+            concat!(
+                "docker:\n  programs:\n    exec: podman\n",
+                "  host-commands:\n    docker:\n      action: warn\n      reason: mounts\n",
+                "      command-map:\n        docker: ${exec}\n",
+                "mine:\n  host-commands:\n    tools:\n      action: allow\n      reason: mine\n",
+                "      command-map: {mytool: mytool, py: python3.12}\n",
+            ),
+            concat!(
+                "host-bridge:\n  host-commands:\n",
+                "    shells: {action: refuse, reason: shell, commands: [sh, bash]}\n",
+                "    interpreters: {action: refuse, reason: interp, name-patterns: ['python*']}\n",
+                "    code-options: {action: warn, reason: opts, options: [-c]}\n",
+                "    shims: {action: refuse, reason: shim, paths: ['${scoter:distribution-dir}/shims']}\n",
+            ),
+        )
+        .unwrap();
+        let p = |path: &PathBuf| Some(path.display().to_string());
+        let mapped = |program: Option<String>, checks: &[&str]| MappedCommand {
+            program,
+            checks: ids(checks),
+        };
+        assert_eq!(
+            checks.command_map,
+            BTreeMap::from([
+                ("bash".to_string(), mapped(None, &["host-bridge:shells"])),
+                ("docker".to_string(), mapped(p(&podman), &["docker:docker"])),
+                ("mytool".to_string(), mapped(p(&mytool), &["mine:tools"])),
+                ("py".to_string(), mapped(p(&python), &["mine:tools"])),
+                ("sh".to_string(), mapped(p(&sh), &["host-bridge:shells"])),
+            ])
+        );
+        let verdict = |action, checks: &[&str]| Verdict {
+            action,
+            checks: ids(checks),
+            overridden: Vec::new(),
+        };
+        assert_eq!(
+            checks.commands,
+            BTreeMap::from([
+                (
+                    "bash".to_string(),
+                    verdict(Action::Refuse, &["host-bridge:shells"])
+                ),
+                (
+                    "docker".to_string(),
+                    verdict(Action::Warn, &["docker:docker"])
+                ),
+                // The same file as `sh`.
+                (
+                    "mytool".to_string(),
+                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                ),
+                // By the base name of its executable.
+                (
+                    "py".to_string(),
+                    verdict(Action::Refuse, &["host-bridge:interpreters", "mine:tools"])
+                ),
+                // And the other way around.
+                (
+                    "sh".to_string(),
+                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                ),
+            ])
+        );
+        let shims = &checks.checks["host-bridge:shims"];
+        assert_eq!(
+            shims.paths,
+            [dir.path().join("dist/shims").display().to_string()]
+        );
+        assert_eq!(
+            shims.files,
+            [dir.path().join("dist/setup.yaml").display().to_string()]
+        );
+        assert_eq!(checks.checks["host-bridge:code-options"].options, ["-c"]);
+        assert!(checks.notices.is_empty(), "{:?}", checks.notices);
+    }
+
+    fn messages(notices: &[host_commands::Notice]) -> Vec<String> {
+        notices.iter().map(|n| n.message.clone()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_overrides() {
+        use crate::config::host_commands::{Action, NoticeValue, Overridden};
+        let dir = TempDir::new();
+        tool(&dir, "bin/sh");
+        tool(&dir, "bin/ksh");
+        let checks = combined(
+            &dir,
+            concat!(
+                "host-bridge:\n  host-commands:\n    ksh-ok:\n      action: allow\n      reason: mine\n",
+                "      commands: [ksh, zsh]\n      overrides: ['host-bridge:shells', 'host-bridge:gone']\n",
+            ),
+            concat!(
+                "host-bridge:\n  host-commands:\n",
+                "    shells: {action: refuse, reason: shell, commands: [sh, ksh]}\n",
+                "    korn: {action: warn, reason: korn, commands: [ksh]}\n",
+            ),
+        )
+        .unwrap();
+        // First the most restrictive of the matching checks (refuse); then
+        // the override takes `shells`' place, and `korn` still applies.
+        let ksh = &checks.commands["ksh"];
+        assert_eq!(ksh.action, Action::Warn);
+        assert_eq!(ksh.checks, ids(&["host-bridge:korn", "host-bridge:ksh-ok"]));
+        assert_eq!(
+            ksh.overridden,
+            [Overridden {
+                check: "host-bridge:shells".to_string(),
+                by: "host-bridge:ksh-ok".to_string()
+            }]
+        );
+        assert_eq!(checks.commands["sh"].action, Action::Refuse);
+        assert!(checks.commands["sh"].overridden.is_empty());
+        // Nothing to override: an override alone doesn't decide a command.
+        assert!(!checks.commands.contains_key("zsh"));
+        assert_eq!(
+            messages(&checks.notices),
+            [
+                "`host-bridge:ksh-ok` overrides `host-bridge:shells` for the command `zsh`, which `host-bridge:shells` doesn't match; the override does nothing for it",
+                "`host-bridge:ksh-ok` overrides `host-bridge:gone`, which isn't set; the override does nothing",
+            ]
+        );
+        let user = dir.path().join("home/setup.yaml").display().to_string();
+        let dist = dir.path().join("dist/setup.yaml").display().to_string();
+        let notice = &checks.notices[0];
+        assert_eq!(notice.id, "override-not-matched");
+        assert_eq!(notice.sources, [user.clone(), dist]);
+        assert_eq!(
+            notice.parameters["name"],
+            NoticeValue::Text("zsh".to_string())
+        );
+        assert_eq!(checks.notices[1].id, "override-target-unset");
+        assert_eq!(checks.notices[1].sources, [user]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_override_errors() {
+        let dir = TempDir::new();
+        tool(&dir, "bin/ksh");
+        tool(&dir, "bin/git");
+        let errors = combined(
+            &dir,
+            concat!(
+                "a:\n  host-commands:\n",
+                "    one: {action: warn, reason: r, commands: [ksh], overrides: ['h:shells']}\n",
+                "    two: {action: allow, reason: r, commands: [ksh], overrides: ['h:shells']}\n",
+                "    three: {action: allow, reason: r, commands: [ksh], overrides: ['a:one']}\n",
+                "    c: {action: allow, reason: r, commands: [git], options: [-c], overrides: ['h:git']}\n",
+                "    e: {action: allow, reason: r, commands: [git], options: [-e], overrides: ['h:git']}\n",
+                "    all: {action: allow, reason: r, commands: [git], overrides: ['h:git']}\n",
+            ),
+            concat!(
+                "h:\n  host-commands:\n",
+                "    shells: {action: refuse, reason: r, commands: [ksh]}\n",
+                "    git: {action: warn, reason: r, commands: [git], options: [-c, -e]}\n",
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                // `a:all` covers every option; `a:c` and `a:e` cover different ones.
+                "a.host-commands.c: overrides `h:git` for `git`, as `a:all` does; only one override can say what a check becomes for a command",
+                "a.host-commands.e: overrides `h:git` for `git`, as `a:all` does; only one override can say what a check becomes for a command",
+                "a.host-commands.three: overrides `a:one`, which is an override itself; an override can only replace checks without `overrides`",
+                "a.host-commands.two: overrides `h:shells` for `ksh`, as `a:one` does; only one override can say what a check becomes for a command",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_errors() {
+        let dir = TempDir::new();
+        let sh = tool(&dir, "bin/sh");
+        let podman = tool(&dir, "bin/podman");
+        let errors = combined(
+            &dir,
+            concat!(
+                "host-bridge:\n  host-commands:\n    shells: {action: refuse, reason: r, commands: [sh]}\n",
+                "a:\n  host-commands:\n    one: {action: warn, reason: r, command-map: {docker: podman}}\n",
+                "c:\n  host-commands:\n    x: {action: warn, reason: r, commands: [sh], overrides: ['c:x']}\n",
+            ),
+            concat!(
+                "b:\n  host-commands:\n    two: {action: warn, reason: r, command-map: {docker: sh}}\n",
+                "    relax: {action: allow, reason: r, commands: [sh], overrides: ['host-bridge:shells']}\n",
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                format!(
+                    "b.host-commands.two: maps `docker` to {}, but `a:one` maps it to {}; a command runs one program, so change or override one of them",
+                    sh.display(),
+                    podman.display()
+                ),
+                format!(
+                    "b.host-commands.relax: overrides `host-bridge:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
+                    dir.path().join("home/setup.yaml").display()
+                ),
+                "c.host-commands.x: can't override itself".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_program_in_the_project() {
+        let dir = TempDir::new();
+        let tool_path = tool(&dir, "proj/tool");
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        let config = load(
+            &dir,
+            Some("container:\n  dev-container-path: ./env\nvcs: git\n"),
+            concat!(
+                "p:\n  host-commands:\n    c: {action: warn, reason: r, command-map: {tool: ./tool}}\n",
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+            ),
+        );
+        assert_eq!(
+            error_texts(build(&config).unwrap_err()),
+            [format!(
+                "p.host-commands.c: `tool` runs {}, which is in the project (`scoter:project-dir`); a host command never runs a program from the project",
+                tool_path.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn host_command_replacements() {
+        let dir = TempDir::new();
+        let checks = combined(
+            &dir,
+            concat!(
+                "host-bridge:\n  host-commands:\n",
+                "    shells: {action: warn, reason: mine, commands: [sh]}\n",
+                "    runners: null\n",
+                "    same: {action: refuse, reason: mine, commands: [x, y]}\n",
+            ),
+            concat!(
+                "host-bridge:\n  host-commands:\n",
+                "    shells: {action: refuse, reason: shell, commands: [sh, ksh, nu]}\n",
+                "    runners: {action: refuse, reason: run, commands: [env]}\n",
+                "    same: {action: warn, reason: theirs, commands: [x]}\n",
+            ),
+        )
+        .unwrap();
+        let user = dir.path().join("home/setup.yaml").display().to_string();
+        let dist = dir.path().join("dist/setup.yaml").display().to_string();
+        assert_eq!(
+            messages(&checks.notices),
+            [
+                format!(
+                    "{user} removes `host-bridge:runners`, so {dist}'s check no longer applies, nor will what it adds later"
+                ),
+                format!(
+                    "{user} replaces `host-bridge:shells` from {dist} without its commands `ksh`, `nu`; what {dist} adds to it later won't apply (`overrides` relaxes a check without replacing it)"
+                ),
+                format!(
+                    "{user} replaces `host-bridge:shells` from {dist} with `warn` in place of `refuse`"
+                ),
+            ]
+        );
+        let ids_of: Vec<&str> = checks.notices.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids_of,
+            [
+                "check-removed",
+                "check-replaced-without",
+                "check-replaced-less-restrictive"
+            ]
+        );
+        assert_eq!(
+            checks.notices[1].parameters["entries"],
+            host_commands::NoticeValue::List(ids(&["ksh", "nu"]))
+        );
+        assert!(
+            checks
+                .notices
+                .iter()
+                .all(|n| n.sources == [user.clone(), dist.clone()])
+        );
+        // The check in effect is the user's; the distribution's is hidden.
+        assert_eq!(
+            checks.checks["host-bridge:shells"].files,
+            [user.clone(), dist.clone()]
+        );
+        assert!(!checks.checks.contains_key("host-bridge:runners"));
+        assert_eq!(checks.checks["host-bridge:same"].reason, "mine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_command_checks_survive_the_universal_file() {
+        let dir = TempDir::new();
+        tool(&dir, "bin/sh");
+        let config = load_setups(
+            &dir,
+            "a:\n  host-commands:\n    c: {action: warn, reason: r, commands: [sh], overrides: ['b:d']}\n",
+            "b:\n  host-commands:\n    d: {action: refuse, reason: r, commands: [sh]}\n    e: null\n",
+        )
+        .unwrap();
+        let first = build(&config).unwrap();
+        let file = dir.write("universal.json", &to_json(&first));
+        let env = Env {
+            path: Some(dir.path().join("bin").into_os_string()),
+            ..Env::default()
+        };
+        let again = crate::config::load_universal_with_env(&file, env).unwrap();
+        assert_eq!(
+            build(&again).unwrap().host_command_checks,
+            first.host_command_checks
+        );
+        assert_eq!(first.setup, again.system.setup_record().clone());
     }
 }

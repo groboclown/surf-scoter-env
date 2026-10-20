@@ -280,37 +280,31 @@ Double check that the [SUC generator](../../host/src/bin/gen-scoter-uc.rs) follo
 
 **Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository (tested with step 3's search).
 
+Completed.
+
 ## 2. Register Python as a program
 
 The setup file needs to register the Python executable as a runnable program.
 
 This will allow adding the distribution script directory files as part of the execution path.  with this, the [scoter script](../../scoter.py) finds the Python executable through this path, rather than reusing the default Python interpreter.
 
-Done: [defaults/setup.yaml](../../defaults/setup.yaml) has a `python` section, with `programs: exec` (default `python3`) and `runs: sub-command` (default `${exec} -E -s {x:script}`).  [`scoter.py`](../../scoter.py) starts sub-commands with that command, not `sys.executable`, and stops with an error when the interpreter isn't found.  `-E` keeps a project's `PYTHONPATH` (say, from a `.envrc`) and other `PYTHON*` variables away from the scripts, and `-s` the user's site-packages.
+Completed: [defaults/setup.yaml](../../defaults/setup.yaml) has a `python` section, with `programs: exec` (default `python3`) and `runs: sub-command` (default `${exec} -E -s {x:script}`).  [`scoter.py`](../../scoter.py) starts sub-commands with that command, not `sys.executable`, and stops with an error when the interpreter isn't found.  `-E` keeps a project's `PYTHONPATH` (say, from a `.envrc`) and other `PYTHON*` variables away from the scripts, and `-s` the user's site-packages.
 
 The interpreter is a program the setup files name, so a `./` value (relative to the project directory) or one inside the project would run project-controlled code on the host.  The same holds for every `programs` entry.  `scoter user-setup` now checks for this ([`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py)): it reports, and fails on, any `programs` value written as `./...`, referring to a project location (`${scoter:project-dir}`, `${scoter:cwd}` and the like), or a relative path with a directory in it; any program found inside the project directory, the project files directory, the workspace or the repository; and any relative or empty `PATH` entry.
-
-Still open: that's a check the user runs, not one the tools enforce.  `scoter run` should run the same check before it starts anything, and step 11's path checks for host commands (directories others can write to, version manager shims) should cover the setup's programs too.
 
 ## 3. Change VCS to discover the root directory.
 
 Find the root of the repository holding the project, so the whole repository is cloned, and the setup file checks know where the repository ends.
 
-Done:
+Completed:
 
 * **Extensible, in separate scripts.**  Each `NAME-vcs` setup section that can find its root has a `runs: find-root` command, given `{x:start}`, that prints the root (or nothing).  The distribution has a script for each kind of search, [`vcs_root_nearest.py`](../../scripts/vcs_root_nearest.py) (Git `.git`, Mercurial `.hg`, Subversion `.svn`) and [`vcs_root_outermost.py`](../../scripts/vcs_root_outermost.py) (CVS's `CVS` directories, one in every directory of a checkout), both given the marker's name; they share [`vcs_root.py`](../../scripts/surf_scoter_lib/vcs_root.py).  Adding a VCS is a setup change.  The VCS is never run (no `git rev-parse --show-toplevel`, which reads the repository's configuration), no environment variable (such as `GIT_DIR`) is used, and the search stops below the home directory and at a file system boundary.  [defaults/setup.yaml](../../defaults/setup.yaml) gives Git's.
 * **Found by `scoter`, given to the generator.**  [`scoter.py`](../../scoter.py) finds the root during its two-phase loading: phase 1 loads the setup alone; `scoter` then runs every VCS section's `find-root` from the search's start (the current directory, or `--project-dir`), and the nearest root wins.  Phase 2 passes the project directory and the root as `gen-scoter-uc --project-dir` and `--vcs-root`; the generator checks that the root holds the project directory and records it as `${scoter:vcs-root}`.
 * **Submodules.**  A Git submodule's `.git` file is a marker, so running a command inside the submodule puts you in its context; above it, you're in the owning repository's.
 * **Project search.**  The project directory is looked for in the search's start and each directory above it up to the root, never above it, so a `.surf-scoter.d` planted above the repository isn't found.  Outside any repository, only the start is searched.
-* **The project's `vcs` must match.**  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (`file`) can be anywhere.
+* **The project's `vcs` must match.**  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (e.g. `file`) can be anywhere.
 * **One answer for the repository.**  The setup file checks (`SURF_SCOTER_HOME`, the user's setup file, `distribution-dir`, `verified-dir`) and [`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py) use `${scoter:vcs-root}`; the interim walk-up in `system.rs` is gone.
 * **Cloning.**  `git-vcs`'s `local-clone` clones `${scoter:vcs-root}`; `file-vcs` still copies the project directory, as it has no repository.
-
-Remaining:
-
-* The container's starting directory in the workspace should be the project directory's path relative to the VCS root.
-* The VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with.  A project can set `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*` when you enter its directory (say, through a `.envrc`), which would redirect them.  Run them without the VCS's own environment variables; the VCS section could list the ones to drop.
-* If the project file gets a `root` setting (step 7), it may only name a directory between the project directory and the root found here.
 
 **Tests:** in [`test_vcs_root.py`](../../scripts/tests/s_lib/test_vcs_root.py): `.git` as a directory and as a submodule's file; the `outermost` search, with directories not yet added and gaps; the home directory stop.  In [`test_scoter.py`](../../scripts/tests/test_scoter.py), running the scripts as `find-root`: the nearest root of several VCS; a submodule; two VCS with one root; failing or unusable `find-root` commands; the project directory found above the start but not above the root, with the setup's names; the project's `vcs` against the root's.  In [`config.rs`](../../host/src/config.rs): a `--vcs-root` that doesn't hold the project directory, or doesn't exist; the project file found with the setup's names.  Still to add: the starting directory in the workspace, and `GIT_DIR` set when the VCS commands run.
 
@@ -321,14 +315,191 @@ Rather than hard-code program names and file glob patterns, these belong in the 
 The lists to start with:
 
 * **Refused programs:** shells, `env`, interpreters (`python`, `node`, `perl`, `ruby`, `pwsh`), privilege tools (`sudo`, `doas`), `xargs`, `ssh`, and multi-call binaries (`busybox`, `toybox`).
-* **Programs to warn about:** commands that run configuration from their working directory or file arguments (`npm`, `make`, `docker`, `git`, `terraform`, `kubectl`, `find`).
+* **Programs to warn about:** commands that run configuration from their working directory or file arguments (`npm`, `make`, `docker`, `git`, `terraform`, `kubectl`, `find`, `poetry`, `yarn`).
 * **Options that run code:** `-c`, `-e`, `--eval`, `--exec`, flagged when an `any` placeholder follows them.
 * **Environment variables that steer loading:** `LD_PRELOAD`, `PATH`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `DOCKER_HOST`.
 * **Version manager shims:** the install directories of asdf, mise, pyenv, nodenv, rbenv and similar.
 * **Secret-looking files:** `.env*`, `*.pem`, `id_*`, `.aws/`.
 * **Hosts that can carry data out:** code hosts, paste sites, `*.s3.amazonaws.com`, user content CDNs, webhook services.
 
-The user's setup file can add to these lists.  Decide whether it can also remove entries.
+The user's setup file can add to these lists, and remove or replace entries (see [Combining the checks](#combining-the-checks)).
+
+### Draft: a `host-commands` kind of value
+
+None of the current kinds fit.  Each finding needs an action and an explanation (step 11), not just a name, and `path-lists` replace the whole list, so a user adding one program would have to copy the distribution's list and then keep it up to date.
+
+Add a sixth kind, `host-commands`, next to `paths`, `programs`, `runs`, `path-lists` and `values`.  Each key is one check on the project's host commands: a mapping with a fixed set of fields, which the loader validates like the rest of the setup.  It's named for what it checks, so later checks (the project files, the egress hosts) get kinds of their own, with their own fields, rather than sharing one.
+
+Any section can have `host-commands`, so a check can sit with the tool it's about: the `docker` section maps the `docker` command to its own `${exec}`, and the `git-vcs` section warns about `git -c`.  The checks that don't belong to any tool (shells, interpreters and the like) go in a `host-bridge` section.  The cost is that the checks are spread through the setup; the generator's combined section in the SUC (below), and a listing from `scoter user-setup`, put them back in one place, each with the `section:key` it came from, so a user knows what to override.
+
+```yaml
+docker:
+    programs:
+        exec: podman
+    host-commands:
+        docker:
+            action: warn
+            reason: >-
+                An allowed `docker` can mount your home directory into a
+                container, and rewrite the accepted settings themselves.
+            command-map:
+                docker: ${exec}
+
+host-bridge:
+    host-commands:
+        shells:
+            action: refuse
+            reason: >-
+                A shell runs whatever command it's given, so the container
+                could run anything on your computer.
+            commands: [sh, bash, dash, zsh, ksh, mksh, csh, tcsh, fish, nu, cmd, powershell, pwsh]
+        version-manager-shims:
+            action: refuse
+            reason: >-
+                A shim picks the real program from a file such as `.tool-versions`
+                in its working directory, which may be the workspace.  Name the
+                real program instead.
+            paths: [~/.asdf/shims, ~/.local/share/mise/shims, ~/.pyenv/shims, ~/.nodenv/shims, ~/.rbenv/shims]
+
+git-vcs:
+    host-commands:
+        git-options:
+            action: warn
+            reason: >-
+                `-c` and `--config-env` set any Git configuration, including
+                `core.sshCommand` and `core.fsmonitor`, which run commands.
+            commands: [git]
+            options: [-c, --config-env, --exec-path]
+```
+
+**Fields:**
+
+* `action` (required): `refuse`, `warn` or `allow`, from most to least restrictive.
+* `reason` (required): the explanation that goes into the generated `#scoter:` comment.
+* What it matches, one or more of the fields below.  When a check has more than one, all of them must match (so `commands` with `options` means "these options, on these commands").  The loader refuses combinations that make no sense, such as `paths` with `options`.
+    * `commands`: names, as the project file's `command` field gives them.  Each is found the way a `programs` value is (a bare name on the `PATH`), so `commands: [git]` is short for `command-map: {git: git}`.
+    * `command-map`: names mapped to the host program each one runs, expanded as a `programs` value is, so it can refer to one (`docker: ${docker:exec}`).
+    * `name-patterns`: name patterns, with `*`, `?` and `[...]` as in shell globs (`python*` covers `python3.12`).  Matched against the command's name, and the base name of the file its executable really is (with a Windows `PATHEXT` extension removed), case sensitive.  These aren't resolved: there's no one program for `python*`.
+    * `options`: options that run code (each starting with `-`).  Matched when an `any` placeholder follows the option, or is joined to it (`--eval=...`).  Without `commands` or `name-patterns`, they apply to every command.
+    * `env`: environment variable names, or patterns a project might write (`LD_*`), matched against a command's `env` `allow` entries, as exact text (see [Design decisions](#design-decisions)).
+    * `paths`: directories, expanded like `path-lists` entries (`~`, `${...}`, and a whole entry that refers to a `path-lists` list puts its items in its place).  Matched when the resolved executable is inside one.
+* `overrides` (optional): the checks (`section:key`) this one replaces, for the commands it matches only.  See [Relaxing a check without copying it](#relaxing-a-check-without-copying-it).
+
+No other field is allowed, and the loader reports a misspelled one: a typo that quietly turned off a refusal would be the worst kind of setup mistake.  `command-map` values and `paths` entries are expanded; the other fields are used as written, and a `${` in them is an error, to catch a reference that would do nothing.
+
+**Nothing can refer to a check.**  `${host-bridge:shells}` is unresolvable, and an error.  (`overrides` names checks, but as plain `section:key` text, never expanded.)
+
+### Resolving the commands
+
+The generator resolves every `commands` and `command-map` name to a host executable, so the resolved form only has a mapping, name to absolute path (or `null` when the program isn't there, as for `programs`).  The `commands` list doesn't appear in it.
+
+* An executable inside the project directory, the project files directory, the workspace or the repository is an error, found after resolving symlinks, the same check the setup's `programs` get (step 2).
+* Matching uses the file the executable really is, not just its name.  A project command `mytool` whose executable is a link to `/usr/bin/env` matches the check that names `env`, because both resolve to the same file.  `name-patterns` covers what identity can't: a `python3.11` next to the `python3.12` that `python3` resolves to.
+* A command mapped to two different executables, by two checks, is an error that names both; the user overrides one of them.
+* The mapping is what the review resolves a project's `command` to (step 11), in place of a `PATH` lookup, so `docker` runs the user's `podman`.  A name no check maps is still found on the `PATH`, as now.
+
+### Combining the checks
+
+Checks merge key by key across the setup files, like every other kind:
+
+* **adding** is a new check under a new name, without copying anything;
+* **changing** a check means writing the whole check again; its fields aren't merged with the lower priority file's;
+* **removing** is setting the check to `null`.
+
+The SUC gets a new top-level `host-command-checks` section with every section's checks combined: the merged `command-map` (each name with its executable and the check it came from), and the checks themselves, with their `section:key`, their expanded `paths`, and without the removed ones.  Each check lists the setup `files` that set its `section:key`, highest priority first: the check is the first one's alone, as fields aren't merged, and the rest are the versions it hides (which step 5 needs).  The `setup` record keeps them as written.
+
+The section's `notices` are objects, ready for translation though the tools don't translate yet: the `message` to show, an `id` and `parameters` that say the same, and the `sources` (setup files) they're about.  The [universal configuration file](universal-configuration-file.md#notices) lists the ids.
+
+A project command's action is worked out in two steps, and the review shows the reason of every check that counts:
+
+1. The checks without `overrides` that match the command: the most restrictive of their actions.
+2. Each override for the command takes the place of the check it overrides; the action is the most restrictive of what's left.  An override alters what one check says; it never decides a command on its own, so the other matching checks still count, and an override for a command no check matches does nothing.
+
+For checks that only name commands, the generator works this out ahead of time, per command, and records which checks an override replaced.  Checks with `options`, `env` or `paths` depend on the project's command, so the checks library (step 11) applies the same rule when it runs.
+
+### Relaxing a check without copying it
+
+Replacing a check to relax one entry freezes the rest of it.  The user who copies `shells` without `ksh` keeps that copy when an upgrade adds a newly found shell to the distribution's `shells`, so the new shell is never refused.  The distribution needs to keep adding to its checks as new problems are found, so the normal way to relax a check has to leave the rest of it alone.
+
+A check can name the checks it overrides, for the commands it lists only:
+
+```yaml
+host-bridge:
+    host-commands:
+        ksh-is-mine:
+            action: warn
+            reason: I review every ksh script this project's commands run.
+            commands: [ksh]
+            overrides: [host-bridge:shells]
+```
+
+For a command `ksh-is-mine` matches, `host-bridge:shells` doesn't apply, and `ksh-is-mine`'s action does.  Everything else about `shells` stays as the distribution defines it, including the shells it adds later.
+
+The rules keep this narrow, as one careless override could undo a whole check:
+
+* **Named checks only.**  `overrides` lists `section:key` names, never patterns.  Any other check that matches `ksh`, including one a later upgrade adds, still applies, and the most restrictive of those still wins.  An override switches off one check for some commands; it doesn't make a command trusted.
+* **Exact names only.**  An overriding check matches with `commands` or `command-map`, plus `options` or `env` names when the check it overrides has them.  `name-patterns`, `env` patterns and `paths` aren't allowed, so `name-patterns: ['*']` can't switch off a whole check.
+* **Only what the target covers.**  Each listed command must be one the overridden check matches.  One it doesn't match (the distribution dropped it, or the user misspelled it) is reported, so stale overrides get cleaned up.  An override of a check that doesn't exist is reported too, but isn't an error: the override then does nothing, which errs on the strict side.
+* **Only downwards in priority.**  A check can only override checks from the same file or a lower priority one, so the distribution's setup can't override the user's.
+* **Either direction.**  `action: refuse` in an override makes a command stricter than the check it replaces; that's allowed, though adding a check does the same without `overrides`.
+* **One override per check and command.**  Two checks overriding the same check for the same command (or, with `options` or `env`, for an option or variable in common) is an error: there's no good answer to which one says what the check becomes.  An override also can't override another override; overrides only replace checks without `overrides`.
+
+Replacing a whole check, or setting it to `null`, still works, for when the user really means to take over the check.  Those are the cases that miss upgrades, so the tools keep them visible:
+
+* the generator compares a replaced check with the lower priority file's version, and reports the commands, options, `env` names and paths the lower one has that the replacement doesn't;
+* `scoter user-setup` lists the distribution's checks the user's setup removes, replaces, or overrides, with what each one gives up;
+* step 5 records, with each acceptance, the setup's resolved checks *and* the lower priority versions they hide, so an upgrade that changes a hidden check asks for a new review, even though the user's copy hasn't changed.
+
+(`overload` was the other name considered; `overrides` says what it does to the named checks.)
+
+`allow` adds nothing when another check matches, because the more restrictive one wins.  It's for commands no other check covers: the review can tell "your setup allows this" apart from "no check knows this command", and a later strict mode could refuse every command without an `allow`.
+
+### Draft: the starting lists
+
+`host-commands` checks (in `host-bridge`, unless the Section column says otherwise):
+
+| Check | Section | Action | Matches |
+|---|---|---|---|
+| `shells` | | refuse | `sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, `csh`, `tcsh`, `fish`, `nu`, `cmd`, `powershell`, `pwsh` |
+| `command-runners` | | refuse | `env`, `xargs`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `chroot`, `unshare`, `nsenter`, `script`, `watch`, `parallel`, `strace`, `ltrace`, `gdb` |
+| `interpreters` | | refuse | `node`, `nodejs`, `deno`, `bun`, `awk`, `gawk`, `mawk`, `nawk`, `Rscript`, `julia`, `osascript`, `cscript`, `wscript`, `mshta`; name patterns `python*`, `pypy*`, `perl*`, `ruby*`, `php*`, `lua*`, `tclsh*`, `wish*` |
+| `privilege` | | refuse | `sudo`, `doas`, `su`, `pkexec`, `runas`, `gsudo` |
+| `remote-shells` | | refuse | `ssh`, `scp`, `sftp`, `telnet`, `rsh` |
+| `multi-call` | | refuse | `busybox`, `toybox` |
+| `project-config` | | warn | `npm`, `npx`, `yarn`, `pnpm`, `make`, `terraform`, `kubectl`, `helm`, `find`, `poetry`, `uv`, `cargo`, `go`, `mvn`, `gradle`, `rake`, `bundle`; name patterns `pip*` |
+| `docker` | `docker` | warn | command map `docker: ${exec}` |
+| `git` | `git-vcs` | warn | command map `git: ${exec}` |
+| `git-options` | `git-vcs` | warn | `git` with `-c`, `--config-env`, `--exec-path` |
+| `code-options` | | warn | options `-c`, `-e`, `--eval`, `--exec`, `--command`, on any command |
+| `find-options` | | refuse | `find` with `-exec`, `-execdir`, `-ok`, `-okdir` |
+| `tar-options` | | refuse | `tar` with `--to-command`, `--use-compress-program`, `-I`, `--checkpoint-action`, `--info-script`, `-F` |
+| `rsync-options` | | refuse | `rsync` with `-e`, `--rsh`, `--rsync-path` |
+| `loader-env` | | refuse | env `*`, `LD_*`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `PYTHON*`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`, `PERL5OPT`, `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `BASH_ENV`, `ENV`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` |
+| `config-env` | | warn | env `HOME`, `XDG_*`, `XDG_CONFIG_HOME`, `GIT_*`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`, `GIT_ASKPASS`, `SSH_ASKPASS`, `EDITOR`, `VISUAL`, `PAGER`, `DOCKER_HOST`, `DOCKER_CONFIG`, `KUBECONFIG`, `AWS_CONFIG_FILE`, `NPM_CONFIG_*`, `NPM_CONFIG_USERCONFIG` |
+| `version-manager-shims` | | refuse | paths `~/.asdf/shims`, `~/.local/share/mise/shims`, `~/.pyenv/shims`, `~/.pyenv/pyenv-win/shims`, `~/.nodenv/shims`, `~/.rbenv/shims`, `~/.goenv/shims`, `~/.jenv/shims`, `~/.plenv/shims`, `~/.volta/bin`, `~/.proto/shims` |
+
+Some entries that look out of place:
+
+* `awk` is an interpreter: `awk 'BEGIN{system("...")}'`.  GNU `sed`'s `e` command runs a shell command too, but refusing `sed` seems heavy; leave it out, or add a `sed` check that warns on an `any` script argument.  However, the user should have no reason to run `sed` or `awk` in a host session - these don't require elevated privileges.
+* `scp` and `sftp` take `-o ProxyCommand=...`, which runs a local command, as well as reaching another host.
+* The plain `-c`/`-e` option check warns on every command, so it will also flag `grep -e` and `tar -c`.  The per-command checks (`git-options` and the rest) are where the precise ones go; the generic one is a safety net.
+
+### Design decisions
+
+* **Names are case sensitive.**  The project file's `command` is case sensitive, and so are `commands`, `command-map` keys and `name-patterns`.  How a name resolves to a host executable (including `PATHEXT` and file systems that ignore case, on Windows and macOS) is the generator's business; a user whose host spells a program differently maps it with `command-map`.
+* **`env` entries match exactly.**  An `env` entry matches a command's `env` `allow` entry only when the two are the same text.  Matching the check's patterns against the command's patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is pattern overlap, which is harder to get right, so it waits for later.  Until then, the lists name both the variables (`LD_PRELOAD`) and the broad patterns a project is likely to write (`LD_*`, `*`), each as plain text.  A pattern the lists don't name, such as `L*`, isn't caught: a known gap.
+* **`command-map` stays in the checks, for now.**  Mapping a command is a statement about it (`docker` runs `podman`, and warns), and one use puts it squarely there: mapping a command to a wrapper script that checks its arguments at run time, for commands too complex for the project file's argument patterns.  The cost is that a user who only wants to map a command writes an `allow` check with nothing but a `command-map`, and has to know that the mapping lives in the checks.  Moving it to a kind of its own (say, a section's `host-command-map`), with the checks only judging, would lighten that.  Worth revisiting once the review flow (steps 12 to 15) shows how people use it.
+
+### Completed
+
+* **The kind.**  [`host_commands.rs`](../../host/src/config/host_commands.rs) has the check as written (`CheckRecord`, with its field checks), the expanded check, the name patterns, and `combine`.  [`system.rs`](../../host/src/config/system.rs) reads `host-commands` like the other kinds, keeps it in the `setup` record (so a `--universal` run checks it again), expands `command-map` values and `paths`, and refuses references to a check.
+* **Combined in the SUC.**  [`universal.rs`](../../host/src/universal.rs) writes `host-command-checks`: the checks (each with its `files`), the `command-map`, the precomputed action for each mapped command from the checks that match on names alone (by name, by the file the program really is, and by `name-patterns` on that file's name; overrides by exact name only), with the checks overrides replaced, and the notices as objects.
+* **Errors:** a program in the project, the project files directory, the workspace or the repository; a command two checks map to different programs (a program that isn't there doesn't count, so the one found wins); an override of a check from a higher priority file, of another override, or of itself; two overrides of one check for the same command.  These need every setup file, so the generator reports them with the other setup errors, rather than the loader with a single file's.
+* **Notices:** an override of a check that isn't set, or for a command, option or `env` name the check doesn't match; a check a setup file removes, or replaces without some of the lower priority file's entries or with a less restrictive action.  [`scoter user-setup`](../../scripts/main_user_setup.py) prints them, with each override in effect ([`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py)); they don't fail it.
+* **Defaults.**  [defaults/setup.yaml](../../defaults/setup.yaml) has the `host-bridge` checks from the table above, `docker: host-commands: docker` and `git-vcs`'s `git` and `git-options`.  The `git` checks use `command-map: {git: ${exec}}` rather than `commands: [git]`, so a user who points `git-vcs: programs: exec` elsewhere doesn't get a conflicting map.
+* **Docs:** [the system configuration file](../system-config-file.md#host-command-checks) and [the universal configuration file](universal-configuration-file.md).
+
+**Tests:** in `host_commands.rs`: parsing, each field's checks, the combinations, the name patterns.  In `system.rs`: references to a check, errors and their keys, a kind change across files, expansion (`${exec}`, a missing program, `~`, a spliced `path-lists`), a null check hiding the distribution's.  In `universal.rs`: the combined checks (identity through a symlink, `name-patterns` on the real file's name), overrides (another matching check still counting after one; an override with nothing to override) and their notices, the override errors (two overrides of one check and command, with and without options; an override of an override), the other errors, a program in the project, replacement notices with their ids, parameters and sources, the `files` of a replaced check, and the checks surviving a `--universal` round trip.  In `test_setup_check.py`: the `user-setup` report.
 
 ## 5. Design the user-directory verified storage
 
@@ -522,12 +693,38 @@ Add in the capability for the main_verify.py script to perform a diff if the dir
 
 Use the three stored versions (step 5) to show what the project changed separately from what the user changed, and show only those differences in the verification file.
 
-## 18. Final bow
+## 18. Wrap up previous steps
 
-- Allow a timed exemption for working on a project.
-- Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
-- Allow a user to revoke a project's acceptance.
-- Allow a user to list accepted projects, with their expiry and exemptions.
+Things left dangling because of dependency ordering.  These may be tackled earlier, but this tracks unfinished work.  Some of these may end up as future tasks.
+
+- Step 2:
+  - The `./` path resolution on program files remains a check the user runs, not one the tools enforce.  `scoter run` should run the same check before it starts anything, and step 11's path checks for host commands (directories others can write to, version manager shims) should cover the setup's programs too.
+- Step 3:
+  - The container's starting directory in the workspace should be the project directory's path relative to the VCS root.
+  * The VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with.  A project can set `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*` when you enter its directory (say, through a `.envrc`), which would redirect them.  Run them without the VCS's own environment variables; the VCS section could list the ones to drop.
+  * If the project file gets a `root` setting (step 7), it may only name a directory between the project directory and the root found here.
+- Step 4:
+  - The checks are only validated and combined.  Nothing applies them to the project's commands yet: that's step 11, and `host-brokered` still finds each command's `program` on the `PATH` rather than through the checks' `command-map` (steps 7, 8 and 10).
+  - The project files (secret-looking files) and egress host lists are drafted above, as kinds of their own, for steps 11 and 9.
+  - Step 5 must record, with each acceptance, the lower priority versions of the checks a setup file replaces or removes, so an upgrade that changes one asks for a new review.
+  - On Windows, matching `name-patterns` against the real file's name drops its extension, whatever it is, rather than only a `PATHEXT` one.  Revisit with step 10's Windows name decisions.
+  - `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
+  - The notices only show in `scoter user-setup`.  Decide whether the review (step 14) shows them too.
+
+## 19. Review the settings format
+
+The settings files have become important for declaring how to lock down an environment.  Because of that, it must present the information in such a way that the users can get a clear idea of what it's doing.  The more complex the file, the harder time users have understanding it, and the higher chance for mistakes.
+
+We should review the settings files and the formats and look for opportunities to make them clear and reduce the chances for mistakes.  We should also make it extremely obvious if the user follows malicous online instructions to remove important restrictions.
+
+The user-setup sub-command can provide capabilities for exploring and disecting the setup.  It should help to identify weaknesses without overwhealming the user.
+
+## 20. Put a bow on it
+
+* Allow a timed exemption for working on a project.
+* Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
+* Allow a user to revoke a project's acceptance.
+* Allow a user to list accepted projects, with their expiry and exemptions.
 
 
 # Future Tasks
@@ -539,3 +736,22 @@ Use the three stored versions (step 5) to show what the project changed separate
 Instead of reading another setup file, let the user choose, for a project run, which setup section to use for those parts, from sections their own setup files (or the distribution's) define.  The choice is the user's, recorded with the project's accepted settings, never the project's.
 
 This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.
+
+## Additional declarative prohibitions to include project files and egress hosts
+
+The secret-looking files and the hosts that can carry data out follow the same shape (`action`, `reason`, the most restrictive action winning), each as a kind of its own with its own match field.  They can wait for the steps that use them (step 11 for the files, step 9 for the egress rules).  Their starting lists:
+
+Project files (`.gitignore`-style patterns, warn): `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `*.kdbx`, `*.tfstate`, `.aws/`, `.ssh/`, `.docker/config.json`, `.kube/config`.
+
+Egress hosts (all warn; several, like `github.com`, are often needed, which is why they warn rather than refuse):
+
+| Check | Matches |
+|---|---|
+| `code-hosts` | `github.com`, `*.github.com`, `*.githubusercontent.com`, `gitlab.com`, `*.gitlab.com`, `bitbucket.org`, `codeberg.org` |
+| `paste-sites` | `pastebin.com`, `paste.ee`, `hastebin.com`, `dpaste.org`, `ghostbin.site`, `rentry.co` |
+| `object-storage` | `*.s3.amazonaws.com`, `s3.amazonaws.com`, `*.blob.core.windows.net`, `storage.googleapis.com`, `*.r2.cloudflarestorage.com`, `*.digitaloceanspaces.com` |
+| `user-content` | `*.ngrok.io`, `*.ngrok-free.app`, `*.trycloudflare.com`, `*.workers.dev`, `*.pages.dev`, `*.vercel.app`, `*.netlify.app`, `*.herokuapp.com`, `*.glitch.me`, `*.repl.co` |
+| `webhooks` | `webhook.site`, `*.requestbin.com`, `*.pipedream.net`, `hooks.slack.com`, `discord.com`, `*.discord.com`, `api.telegram.org` |
+| `file-sharing` | `transfer.sh`, `file.io`, `wetransfer.com`, `*.dropbox.com`, `drive.google.com` |
+
+These should go into a similar "checks" structure as the host-bridge items.

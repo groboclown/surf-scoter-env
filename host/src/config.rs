@@ -20,6 +20,7 @@
 pub mod command;
 pub mod dev_env;
 pub mod environment;
+pub mod host_commands;
 pub mod pattern;
 pub mod project;
 pub mod read;

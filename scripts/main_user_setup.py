@@ -35,6 +35,7 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
     """
     interactive = bool(args.interactive)
     setup_ok = check_setup(config)
+    report_host_command_checks(config)
     gen_key_pair(config, interactive)
     ensure_ssh_config(config, interactive)
     ensure_ssh_known_hosts(config, interactive)
@@ -57,6 +58,25 @@ def check_setup(config: UserConfig) -> bool:
     for problem in problems:
         print(f"  * {problem}", file=sys.stderr)
     return False
+
+
+def report_host_command_checks(config: UserConfig) -> None:
+    """Report the setup's changes to the host command checks.
+
+    These don't fail the setup: they're choices the user made, shown so they
+    stay deliberate.
+    """
+    report = setup_check.host_command_report(config)
+    count = len(config.host_command_checks())
+    if not report:
+        print(f"Your setup has {count} host command checks, none of them relaxed or replaced.")
+        return
+    print(
+        f"Your setup has {count} host command checks.  "
+        "Some of them are relaxed, replaced or removed; check these are still what you want:"
+    )
+    for line in report:
+        print(f"  * {line}")
 
 
 def gen_key_pair(config: UserConfig, interactive: bool) -> None:

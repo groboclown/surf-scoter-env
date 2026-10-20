@@ -116,3 +116,50 @@ class CheckProgramsTest(unittest.TestCase):
             "PATH: is relative",
             "PATH: is relative",
         ])
+
+
+class HostCommandReportTest(unittest.TestCase):
+    """Test host_command_report."""
+
+    def test_report(self) -> None:
+        """The generator's notices, then each override in effect."""
+        config = user_config.UserConfig({
+            "host-command-checks": {
+                "checks": {
+                    "host-bridge:shells": {
+                        "action": "refuse", "commands": {"sh": "/bin/sh"}, "overrides": [],
+                    },
+                    "mine:ksh": {
+                        "action": "warn",
+                        "commands": {"ksh": "/bin/ksh", "dash": None},
+                        "overrides": ["host-bridge:shells"],
+                    },
+                },
+                "notices": [{
+                    "message": "/u/setup.yaml removes `a:b`",
+                    "id": "check-removed",
+                    "parameters": {"check": "a:b"},
+                    "sources": ["/u/setup.yaml", "/d/setup.yaml"],
+                }],
+            },
+        })
+        self.assertEqual(
+            setup_check.host_command_report(config),
+            [
+                "/u/setup.yaml removes `a:b`",
+                "`mine:ksh` overrides `host-bridge:shells` for `dash`, `ksh`, with `warn`",
+            ],
+        )
+        self.assertEqual(len(config.host_command_checks()), 2)
+
+    def test_no_checks(self) -> None:
+        """An older universal file has no checks."""
+        config = user_config.UserConfig({})
+        self.assertEqual(setup_check.host_command_report(config), [])
+        self.assertEqual(config.host_command_checks(), {})
+
+    def test_bad_notices(self) -> None:
+        """A notice whose message isn't text is a bad file."""
+        config = user_config.UserConfig({"host-command-checks": {"notices": [{"message": 5}]}})
+        with self.assertRaises(user_config.ConfigErr):
+            setup_check.host_command_report(config)

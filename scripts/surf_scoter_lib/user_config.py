@@ -224,6 +224,31 @@ class UserConfig:
                     ret.append((file, section, str(key_path[-1]), value))
         return ret
 
+    def host_command_checks(self) -> dict[str, jdata.DictJsonData]:
+        """The setup's `host-commands` checks, by `section:key`, as the generator combined them."""
+        ret: dict[str, jdata.DictJsonData] = {}
+        # A universal file from before the checks has none.
+        if self._config.get("host-command-checks") is None:
+            return ret
+        for path in self.__req_dict_keys("host-command-checks", "checks"):
+            ret[str(path[-1])] = self.__req_dict(*path)
+        return ret
+
+    def host_command_notices(self) -> list[str]:
+        """What the generator noticed about the setup's `host-commands` checks, as text.
+
+        Such as a check a setup file removes or replaces, which then misses what
+        the lower priority file adds to it later, or an override that does nothing.
+        Each notice in the file also has an `id`, `parameters` (for translating it)
+        and `sources` (the setup files it's about); this gives its `message`.
+        """
+        ret: list[str] = []
+        if self._config.get("host-command-checks") is None:
+            return ret
+        for path in self.__req_list_keys("host-command-checks", "notices"):
+            ret.append(self.__req_str(*path, "message"))
+        return ret
+
     def resolved_program(self, section: str, key: str) -> str | None:
         """The program found for a `programs` entry; None if it wasn't found.
 

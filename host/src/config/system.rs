@@ -79,6 +79,7 @@ use serde::{Deserialize, Serialize};
 use yaml_serde::Value;
 
 use super::command::{self, CommandTemplate, Part};
+use super::host_commands::{self, Check, CheckRecord};
 use super::read::{parse_yaml, read_limited, tag_errors};
 use super::{ConfigError, child_key, index_key};
 
@@ -131,6 +132,8 @@ pub const RUNS: &str = "runs";
 pub const PATH_LISTS: &str = "path-lists";
 /// A section's plain values.
 pub const VALUES: &str = "values";
+/// A section's checks on the project's host commands.
+pub const HOST_COMMANDS: &str = "host-commands";
 const SETUP: &str = "setup";
 const USER_SETUP: &str = "surf-scoter.setup";
 
@@ -240,6 +243,8 @@ enum Entry {
     Run(RunValue),
     PathList(Vec<String>),
     Value(ScalarValue),
+    /// A `host-commands` check; `None` (null) removes a lower priority one.
+    HostCommand(Option<CheckRecord>),
 }
 
 impl Entry {
@@ -251,6 +256,7 @@ impl Entry {
             Entry::Run(_) => RUNS,
             Entry::PathList(_) => PATH_LISTS,
             Entry::Value(_) => VALUES,
+            Entry::HostCommand(_) => HOST_COMMANDS,
         }
     }
 }
@@ -363,6 +369,8 @@ pub struct SectionRecord {
     pub path_lists: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub values: BTreeMap<String, ScalarValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_commands: BTreeMap<String, Option<CheckRecord>>,
 }
 
 /// Where to find the system setup.
@@ -436,6 +444,8 @@ pub struct Section {
     pub path_lists: BTreeMap<String, Option<Vec<PathBuf>>>,
     /// The plain values.
     pub values: BTreeMap<String, ScalarValue>,
+    /// The `host-commands` checks; removed (null) ones aren't here.
+    pub host_commands: BTreeMap<String, Check>,
     /// The `programs` that aren't there: key -> the program it names.
     pub missing: BTreeMap<String, String>,
 }
@@ -1002,6 +1012,9 @@ impl SetupFile {
                     Entry::Value(value) => {
                         section.values.insert(key, value.clone());
                     }
+                    Entry::HostCommand(check) => {
+                        section.host_commands.insert(key, check.clone());
+                    }
                 }
             }
             sections.insert(name.clone(), section);
@@ -1047,12 +1060,29 @@ fn file_from_record(
                     .values
                     .iter()
                     .map(|(k, v)| (k, Entry::Value(v.clone()))),
+            )
+            .chain(
+                groups
+                    .host_commands
+                    .iter()
+                    .map(|(k, v)| (k, Entry::HostCommand(v.clone()))),
             );
         for (key, entry) in all {
             let at = format!(
                 "setup.files[{i}].sections.{}",
                 child_key(name, &group_key(entry.group(), key))
             );
+            if let Entry::HostCommand(Some(check)) = &entry {
+                let problems = check.problems(&at);
+                if !problems.is_empty() {
+                    errors.extend(
+                        problems
+                            .into_iter()
+                            .map(|(key, message)| ConfigError::new(Some(origin), &key, message)),
+                    );
+                    continue;
+                }
+            }
             if is_tool_only(name, key) {
                 errors.push(ConfigError::new(
                     Some(origin),
@@ -1128,7 +1158,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
             _ => {
                 errors.push(error(
                     name,
-                    "must be a section, with `paths`, `programs`, `runs`, `path-lists` and `values` mappings"
+                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands` mappings"
                         .to_string(),
                 ));
                 continue;
@@ -1142,13 +1172,14 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                 Some(RUNS) => RUNS,
                 Some(PATH_LISTS) => PATH_LISTS,
                 Some(VALUES) => VALUES,
+                Some(HOST_COMMANDS) => HOST_COMMANDS,
                 _ => {
                     let shown = group
                         .as_str()
                         .map_or_else(|| format!("{group:?}"), str::to_string);
                     errors.push(error(
                         &child_key(name, &shown),
-                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists` and `values`"
+                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`"
                             .to_string(),
                     ));
                     continue;
@@ -1204,6 +1235,17 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                         errors.push(error(&at, "must be a list of paths".to_string()));
                         continue;
                     }
+                    (HOST_COMMANDS, _) => match host_commands::parse(value.clone(), &at) {
+                        Ok(check) => Entry::HostCommand(check),
+                        Err(problems) => {
+                            errors.extend(
+                                problems
+                                    .into_iter()
+                                    .map(|(key, message)| error(&key, message)),
+                            );
+                            continue;
+                        }
+                    },
                     (VALUES, _) => match scalar_value(&value) {
                         Ok(scalar) => Entry::Value(scalar),
                         Err(message) => {
@@ -1436,6 +1478,14 @@ impl SystemConfig {
                             }
                         }
                     }
+                    Entry::HostCommand(None) => {}
+                    Entry::HostCommand(Some(check)) => {
+                        if let Err(failure) = expander.check_locations(name, key, check)
+                            && !failure.no_value()
+                        {
+                            add(self.failure_error(failure, file, &at));
+                        }
+                    }
                     // Only text is expanded.
                     Entry::Value(value) if !matches!(value, ScalarValue::String(_)) => {}
                     entry => match expander.resolve(name, key, &None, &mut Vec::new()) {
@@ -1459,7 +1509,8 @@ impl SystemConfig {
     /// `section`.
     fn setting_file(&self, section: &str, key_path: &str) -> Option<&Path> {
         let (_, key) = key_path.split_once('.')?;
-        let key = key.split_once('[').map_or(key, |(key, _)| key);
+        // A check's fields follow its key, as `KEY.command-map.NAME`.
+        let key = key.split(['[', '.']).next().unwrap_or(key);
         self.sections.get(section)?.get(key)?.file.as_deref()
     }
 
@@ -1529,6 +1580,31 @@ impl SystemConfig {
         self.keys_where(section, |e| matches!(e, Entry::Program(_)))
     }
 
+    /// The file that set the `host-commands` check `section:key`.
+    pub fn host_command_file(&self, section: &str, key: &str) -> Option<&Path> {
+        self.setting_file(section, &group_key(HOST_COMMANDS, key))
+    }
+
+    /// The name of the project location `path` is in, once symlinks are
+    /// resolved, if it's in one: the project directory, the project files
+    /// directory, the dev container's workspace, or the repository holding
+    /// the project.
+    pub fn project_location(&self, path: &Path) -> Option<String> {
+        let location = |key| self.get_path(SCOTER_SECTION, key);
+        let project_dir = location(PROJECT_DIR);
+        let project_config = location(PROJECT_CONFIG);
+        let workspace = location(DEV_CONTAINER_WORKSPACE_DIR);
+        let vcs_root = location(VCS_ROOT);
+        let options = SetupOptions {
+            project_dir: project_dir.as_deref(),
+            project_config: project_config.as_deref(),
+            dev_container_workspace_dir: workspace.as_deref(),
+            vcs_root: vcs_root.as_deref(),
+            ..SetupOptions::default()
+        };
+        in_project(path, &options)
+    }
+
     /// Find a program the way `programs` are found: a leading `~` is expanded,
     /// and a bare name is searched for on the `PATH`.
     pub fn find_program(&self, program: &str) -> Option<PathBuf> {
@@ -1563,6 +1639,7 @@ impl SystemConfig {
             Some(Entry::Run(_) | Entry::PathList(_)) => {
                 Err(format!("{reference} is a list; it can't be used here"))
             }
+            Some(Entry::HostCommand(_)) => Err(check_reference(section, key)),
             Some(Entry::Value(ScalarValue::Null)) => {
                 Err(format!("{reference} is null, so it can't be used here"))
             }
@@ -1747,6 +1824,7 @@ impl SystemConfig {
             runs: BTreeMap::new(),
             path_lists: BTreeMap::new(),
             values: BTreeMap::new(),
+            host_commands: BTreeMap::new(),
             missing: missing_programs,
         };
         for key in &path_keys {
@@ -1786,6 +1864,34 @@ impl SystemConfig {
                 }
                 Entry::Value(value) => {
                     section.values.insert(key.clone(), value.clone());
+                }
+                Entry::HostCommand(None) => {}
+                Entry::HostCommand(Some(check)) => {
+                    let locations = expander
+                        .check_locations(name, key, check)
+                        .map_err(|f| failure(f, HOST_COMMANDS, key))?;
+                    let mut commands: BTreeMap<String, Option<PathBuf>> = check
+                        .commands
+                        .iter()
+                        .map(|command| (command.clone(), self.find_program(command)))
+                        .collect();
+                    for (command, program) in locations.programs {
+                        let found = program.and_then(|p| self.find_program(&path_text(&p)));
+                        commands.insert(command, found);
+                    }
+                    section.host_commands.insert(
+                        key.clone(),
+                        Check {
+                            action: check.action,
+                            reason: check.reason.clone(),
+                            commands,
+                            name_patterns: check.name_patterns.clone(),
+                            options: check.options.clone(),
+                            env: check.env.clone(),
+                            paths: locations.paths,
+                            overrides: check.overrides.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -1852,6 +1958,13 @@ enum Resolved {
     Text(Vec<Part>),
     /// `runs` and `path-lists`: one entry per argument or path.
     List(Vec<Vec<Part>>),
+}
+
+/// A check's `command-map` programs (`None`: no value this run) and
+/// `paths`, expanded.
+struct CheckLocations {
+    programs: BTreeMap<String, Option<PathBuf>>,
+    paths: Vec<PathBuf>,
 }
 
 /// Expands `${...}` references.
@@ -1964,6 +2077,11 @@ impl Expander<'_> {
                 }),
             },
             Entry::Run(raw) => Ok(Resolved::List(self.words(section, raw, &origin, stack)?)),
+            Entry::HostCommand(_) => Err(Failure {
+                kind: FailureKind::Error,
+                origin: referrer.clone(),
+                message: check_reference(section, key),
+            }),
             Entry::PathList(entries) => {
                 let mut paths = Vec::new();
                 for (i, entry) in entries.iter().enumerate() {
@@ -2011,6 +2129,64 @@ impl Expander<'_> {
             section.to_string(),
             index_key(&group_key(PATH_LISTS, key), i),
         ));
+        self.location_entry(section, &origin, entry, stack)
+    }
+
+    /// The `host-commands` check `section:key`'s `command-map` programs and
+    /// `paths`, expanded.  A program with no value this run (it refers to a
+    /// program that isn't there, say) is `None`, and a path with none is
+    /// left out.
+    fn check_locations(
+        &self,
+        section: &str,
+        key: &str,
+        check: &CheckRecord,
+    ) -> Result<CheckLocations, Failure> {
+        let at = group_key(HOST_COMMANDS, key);
+        let mut stack = vec![(section.to_string(), key.to_string())];
+        let mut programs = BTreeMap::new();
+        for (name, raw) in &check.command_map {
+            let origin = Some((section.to_string(), format!("{at}.command-map.{name}")));
+            let program = match self.expand_text(section, raw, &origin, &mut stack) {
+                Ok(parts) if parts.iter().any(|p| matches!(p, Part::External(_))) => {
+                    return Err(Failure {
+                        kind: FailureKind::Error,
+                        origin,
+                        message: "programs are files; they can't use `{x:...}` values".to_string(),
+                    });
+                }
+                Ok(parts) => Some(resolve_path(
+                    &command::render_parts(&parts),
+                    self.env,
+                    self.project_dir,
+                )),
+                Err(f) if f.no_value() => None,
+                Err(f) => return Err(f),
+            };
+            programs.insert(name.clone(), program);
+        }
+        let mut paths = Vec::new();
+        for (i, entry) in check.paths.iter().enumerate() {
+            let origin = Some((section.to_string(), index_key(&format!("{at}.paths"), i)));
+            match self.location_entry(section, &origin, entry, &mut stack) {
+                Ok(found) => paths.extend(found),
+                Err(f) if f.no_value() => {}
+                Err(f) => return Err(f),
+            }
+        }
+        Ok(CheckLocations { programs, paths })
+    }
+
+    /// A list entry that's a file location, at `origin`: its file locations
+    /// (more than one when it's a whole reference to a list).
+    fn location_entry(
+        &self,
+        section: &str,
+        origin: &Origin,
+        entry: &str,
+        stack: &mut Vec<(String, String)>,
+    ) -> Result<Vec<PathBuf>, Failure> {
+        let origin = origin.clone();
         let words = match self.expand_word(section, entry, &origin, stack) {
             // Like a `./` entry without a project.
             Err(f) if f.kind == FailureKind::UnsetLocation => return Ok(Vec::new()),
@@ -2137,6 +2313,11 @@ impl Expander<'_> {
 }
 
 /// The reference in `word`, when the whole word is one `${...}`.
+/// The message for a reference to a `host-commands` check.
+fn check_reference(section: &str, key: &str) -> String {
+    format!("`${{{section}:{key}}}` is a `{HOST_COMMANDS}` check; nothing can refer to one")
+}
+
 fn whole_reference(word: &str) -> Option<&str> {
     let inner = word.strip_prefix("${")?.strip_suffix('}')?;
     (!inner.contains(['$', '{', '}'])).then_some(inner)
@@ -2749,7 +2930,7 @@ mod tests {
                 "a.paths.map: must be a single value, not a list or mapping",
                 "a.paths.none: has no value",
                 "a.runs: must be a mapping of names to values",
-                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists` and `values`",
+                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`",
                 "a.path-lists.c: must be a list of paths",
                 "a.path-lists.d[1]: must be a path",
                 "a.path-lists.d[2]: must be a path",
@@ -2757,7 +2938,7 @@ mod tests {
                 "a.values.map: must be a single value: text, a number, true/false or null",
                 "a.values.nan: must be a finite number",
                 "a.values.inf: must be a finite number",
-                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists` and `values` mappings",
+                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands` mappings",
                 "old-paths: must be a section; put lists of paths in a section's `path-lists`",
             ]
         );
@@ -2767,7 +2948,7 @@ mod tests {
     fn shape_old_flat_sections_are_refused() {
         assert_eq!(
             one_error("ssh:\n  home: ~/.ssh\n"),
-            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists` and `values`"
+            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`"
         );
     }
 
@@ -3959,5 +4140,146 @@ mod tests {
         assert_eq!(env.expand_home("~user/a"), PathBuf::from("~user/a"));
         assert_eq!(env.expand_home("/a/~"), PathBuf::from("/a/~"));
         assert_eq!(Env::default().expand_home("~/a"), PathBuf::from("~/a"));
+    }
+
+    // ---- host-commands ----
+
+    #[test]
+    fn host_commands_nothing_refers_to_a_check() {
+        let check = "  host-commands:\n    c: {action: warn, reason: r, commands: [x]}\n";
+        assert_eq!(
+            one_error(&format!("a:\n  values:\n    v: 'is ${{a:c}}'\n{check}")),
+            "a.values.v: `${a:c}` is a `host-commands` check; nothing can refer to one"
+        );
+        assert_eq!(
+            one_error(&format!("a:\n  path-lists:\n    l: ['${{c}}']\n{check}")),
+            "a.path-lists.l[0]: `${a:c}` is a `host-commands` check; nothing can refer to one"
+        );
+        let config = load_one(&format!("a:\n{check}")).unwrap();
+        assert_eq!(
+            config.scalar_text("a", "c").unwrap_err(),
+            "`${a:c}` is a `host-commands` check; nothing can refer to one"
+        );
+        assert_eq!(config.get("a", "c"), None);
+    }
+
+    #[test]
+    fn host_commands_errors() {
+        let errors = load_one(concat!(
+            "a:\n  host-commands:\n",
+            "    bad: {action: warn, reason: r, commands: [/bin/sh]}\n",
+            "    ref: {action: warn, reason: r, commands: [x]}\n",
+            "    list: [sh]\n",
+            "  values:\n    ref: 1\n",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                "a.host-commands.bad.commands[0]: '/bin/sh' is a command name, not a path; map the name to a program with `command-map`",
+                "a.host-commands.list: must be a check (a mapping with `action`, `reason` and what it matches), or null to remove it",
+                "a.values.ref: is also set in `host-commands`; a key has only one kind of value",
+            ]
+        );
+        assert_eq!(
+            one_error(
+                "a:\n  host-commands:\n    ext: {action: warn, reason: r, command-map: {d: '{x:d}'}}\n"
+            ),
+            "a.host-commands.ext.command-map.d: programs are files; they can't use `{x:...}` values"
+        );
+        assert_eq!(
+            one_error(
+                "a:\n  host-commands:\n    ref: {action: warn, reason: r, paths: ['${a:nope}/x']}\n"
+            ),
+            "a.host-commands.ref.paths[0]: unknown reference `${a:nope}`"
+        );
+    }
+
+    #[test]
+    fn host_commands_kind_cant_change() {
+        let dir = TempDir::new();
+        let dist = dir.write(
+            "dist/setup.yaml",
+            "a:\n  host-commands:\n    c: {action: warn, reason: r, commands: [x]}\n",
+        );
+        let user = dir.write("home/setup.yaml", "a:\n  values:\n    c: 1\n");
+        let errors = load_setup(&user, dist.parent(), None, Env::default())
+            .map_err(messages)
+            .unwrap_err();
+        assert_eq!(
+            errors,
+            [format!(
+                "a.values.c: is set in `host-commands` by {}; a key's kind of value can't change",
+                dist.display()
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_commands_expanded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let tool = |name: &str| {
+            let path = dir.write(name, "#!/bin/sh\n");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let podman = tool("bin/podman");
+        let git = tool("bin/git");
+        let dist = dir.write(
+            "dist/setup.yaml",
+            concat!(
+                "a:\n  host-commands:\n",
+                "    gone: {action: refuse, reason: r, commands: [x]}\n",
+                "    kept: {action: refuse, reason: r, commands: [y]}\n",
+            ),
+        );
+        let user = dir.write(
+            "home/setup.yaml",
+            concat!(
+                "a:\n  programs:\n    exec: podman\n    missing: not-there\n",
+                "  path-lists:\n    shims: [/s1, /s2]\n",
+                "  host-commands:\n",
+                "    gone: null\n",
+                "    c:\n      action: warn\n      reason: why\n      commands: [git, nope]\n",
+                "      command-map: {docker: '${exec}', other: '${missing}'}\n",
+                "      options: [-c]\n",
+                "    p: {action: refuse, reason: r, paths: ['~/shims', '${shims}']}\n",
+            ),
+        );
+        let env = Env {
+            home: Some(PathBuf::from("/home/u")),
+            path: Some(dir.path().join("bin").into_os_string()),
+            ..Env::default()
+        };
+        let config = load_setup(&user, dist.parent(), None, env).unwrap();
+        let section = config.section("a", &SectionDefaults::default()).unwrap();
+        assert_eq!(
+            section.host_commands.keys().collect::<Vec<_>>(),
+            ["c", "kept", "p"]
+        );
+        let c = &section.host_commands["c"];
+        assert_eq!(c.action, host_commands::Action::Warn);
+        assert_eq!(
+            c.commands,
+            BTreeMap::from([
+                ("docker".to_string(), Some(podman)),
+                ("git".to_string(), Some(git)),
+                ("nope".to_string(), None),
+                ("other".to_string(), None),
+            ])
+        );
+        assert_eq!(c.options, ["-c"]);
+        assert_eq!(
+            section.host_commands["p"].paths,
+            [
+                PathBuf::from("/home/u/shims"),
+                PathBuf::from("/s1"),
+                PathBuf::from("/s2")
+            ]
+        );
+        assert_eq!(config.host_command_file("a", "kept"), Some(dist.as_path()));
+        assert_eq!(config.host_command_file("a", "c"), Some(user.as_path()));
     }
 }

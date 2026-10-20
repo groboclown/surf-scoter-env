@@ -40,6 +40,16 @@ docker:
         inspect-container: ${exec} inspect --format json {x:name}
         image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
+    host-commands:
+        # A project's `docker` command runs this section's program.
+        docker:
+            action: warn
+            reason: >-
+                An allowed `docker` command can start a container that mounts your
+                home directory, and so change anything there, the accepted project
+                settings included.
+            command-map:
+                docker: ${exec}
 
 # The Python interpreter that runs the sub-command scripts (the distribution's
 # `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
@@ -56,6 +66,212 @@ python:
         # `-E` ignores the PYTHON* environment variables (a project's `.envrc`
         # could set PYTHONPATH, say), and `-s` ignores your user site-packages.
         sub-command: ${exec} -E -s {x:script}
+
+# Checks on the commands a project asks to run on your computer (its host
+# commands).  Any section can have `host-commands`; the checks that aren't about
+# one tool are here.  Each check has an `action` (refuse, warn or allow), a
+# `reason`, and what it matches.  When several checks match a command, the most
+# restrictive wins.
+#
+# Your setup file can add checks of its own.  To relax one of these for some
+# commands, add a check with `overrides: [host-bridge:NAME]` naming those
+# commands, rather than replacing the check: a replacement won't get what later
+# versions of Surf Scoter add to it.  See docs/system-config-file.md.
+#
+# Note that a project file declares only what's allowed, whereas this declares
+# what's blocked or raises warnings.  This format can't capture everything,
+# and instead works as a way to declaratively construct best practice rules
+# and warning signs.
+host-bridge:
+    host-commands:
+        shells:
+            action: refuse
+            reason: >-
+                A shell runs whatever command it's given, so the container could run
+                anything on your computer.
+            commands: [sh, bash, dash, zsh, ksh, mksh, csh, tcsh, fish, nu, cmd, powershell, pwsh]
+        command-runners:
+            action: refuse
+            reason: >-
+                It runs another command, named in its arguments, so the container
+                chooses what really runs.
+            commands:
+                - env
+                - xargs
+                - nice
+                - nohup
+                - timeout
+                - stdbuf
+                - setsid
+                - chroot
+                - unshare
+                - nsenter
+                - script
+                - watch
+                - parallel
+                - strace
+                - ltrace
+                - gdb
+        interpreters:
+            action: refuse
+            reason: >-
+                An interpreter runs the code it's given, so the container could run
+                anything on your computer.
+            commands:
+                - node
+                - nodejs
+                - deno
+                - bun
+                - awk
+                - gawk
+                - mawk
+                - nawk
+                - Rscript
+                - julia
+                - osascript
+                - cscript
+                - wscript
+                - mshta
+            name-patterns: ['python*', 'pypy*', 'perl*', 'ruby*', 'php*', 'lua*', 'tclsh*', 'wish*']
+        privilege:
+            action: refuse
+            reason: It runs commands as another user, such as root.
+            commands: [sudo, doas, su, pkexec, runas, gsudo]
+        remote-shells:
+            action: refuse
+            reason: >-
+                It runs commands on another computer, and takes options (such as
+                `-o ProxyCommand=...`) that run a command on yours.
+            commands: [ssh, scp, sftp, telnet, rsh]
+        multi-call:
+            action: refuse
+            reason: >-
+                A multi-call program is many programs in one, chosen by its name or
+                its first argument, including shells.
+            commands: [busybox, toybox]
+        project-config:
+            action: warn
+            reason: >-
+                It reads configuration, scripts or build files from its working
+                directory or its arguments, which the container can write, and those
+                can run commands on your computer.
+            commands:
+                - npm
+                - npx
+                - yarn
+                - pnpm
+                - make
+                - terraform
+                - kubectl
+                - helm
+                - find
+                - poetry
+                - uv
+                - cargo
+                - go
+                - mvn
+                - gradle
+                - rake
+                - bundle
+            name-patterns: ['pip*']
+        code-options:
+            action: warn
+            reason: >-
+                Many programs take code to run after options such as these; check
+                that this one doesn't, before letting the container fill it in.
+            options: [-c, -e, --eval, --exec, --command]
+        find-options:
+            action: refuse
+            reason: These options run a command for each file found.
+            commands: [find]
+            options: [-exec, -execdir, -ok, -okdir]
+        tar-options:
+            action: refuse
+            reason: These options run a command of the container's choosing.
+            commands: [tar]
+            options: [--to-command, --use-compress-program, -I, --checkpoint-action, --info-script, -F]
+        rsync-options:
+            action: refuse
+            reason: These options choose the command rsync runs to connect.
+            commands: [rsync]
+            options: [-e, --rsh, --rsync-path]
+        loader-env:
+            action: refuse
+            reason: >-
+                These variables decide what code a program loads, so the container
+                could run its own code inside the command.
+            env:
+                - '*'
+                - LD_*
+                - LD_PRELOAD
+                - LD_LIBRARY_PATH
+                - LD_AUDIT
+                - DYLD_*
+                - DYLD_INSERT_LIBRARIES
+                - DYLD_LIBRARY_PATH
+                - PATH
+                - PYTHON*
+                - PYTHONPATH
+                - PYTHONSTARTUP
+                - PYTHONHOME
+                - NODE_OPTIONS
+                - NODE_PATH
+                - PERL5LIB
+                - PERL5OPT
+                - PERLLIB
+                - RUBYOPT
+                - RUBYLIB
+                - BASH_ENV
+                - ENV
+                - JAVA_TOOL_OPTIONS
+                - _JAVA_OPTIONS
+        config-env:
+            action: warn
+            reason: >-
+                These variables decide which configuration a program reads, which can
+                name commands to run (such as an editor, or Git's SSH command).
+            env:
+                - HOME
+                - XDG_*
+                - XDG_CONFIG_HOME
+                - GIT_*
+                - GIT_SSH
+                - GIT_SSH_COMMAND
+                - GIT_EXEC_PATH
+                - GIT_DIR
+                - GIT_WORK_TREE
+                - GIT_CONFIG_GLOBAL
+                - GIT_CONFIG_SYSTEM
+                - GIT_CONFIG_COUNT
+                - GIT_ASKPASS
+                - SSH_ASKPASS
+                - EDITOR
+                - VISUAL
+                - PAGER
+                - DOCKER_HOST
+                - DOCKER_CONFIG
+                - KUBECONFIG
+                - AWS_CONFIG_FILE
+                - NPM_CONFIG_*
+                - NPM_CONFIG_USERCONFIG
+        version-manager-shims:
+            action: refuse
+            reason: >-
+                A version manager's shim picks the real program from a file (such as
+                `.tool-versions`) in its working directory, which may be the
+                workspace.  Name the real program instead.
+            paths:
+                - ~/.asdf/shims
+                - ~/.local/share/mise/shims
+                - ~/.pyenv/shims
+                - ~/.pyenv/pyenv-win/shims
+                - ~/.nodenv/shims
+                - ~/.rbenv/shims
+                - ~/.goenv/shims
+                - ~/.jenv/shims
+                - ~/.plenv/shims
+                - ~/.volta/bin
+                - ~/.proto/shims
 
 # Information for the workspace clone.
 workspace:
@@ -117,6 +333,24 @@ git-vcs:
             - '{x:start}'
     values:
         ignore-file: .gitignore
+    host-commands:
+        # A project's `git` command runs this section's program.
+        git:
+            action: warn
+            reason: >-
+                Git reads the configuration and hooks of the repository it runs in,
+                which can run commands; a repository the container can write is the
+                container's choice of commands.
+            command-map:
+                git: ${exec}
+        git-options:
+            action: warn
+            reason: >-
+                These set any Git configuration, including `core.sshCommand` and
+                `core.fsmonitor`, which run commands.
+            command-map:
+                git: ${exec}
+            options: [-c, --config-env, --exec-path]
 
 
 # Default for no vcs - stored as simple files.
