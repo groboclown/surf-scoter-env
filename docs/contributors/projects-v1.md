@@ -719,6 +719,10 @@ A dev container's `parents` can only name a `dir` or `file` by path.  A project'
 
 **Tests:** a `name` parent found in the second search directory; one missing from all of them; one found through a symlink that leads outside them; a `name` parent alongside `dir` and `file` parents, in build order.
 
+Completed: [`dev_env.rs`](../../host/src/config/dev_env.rs) takes `{name, tag}` parents, found in the first `dev-containers-search` directory holding `NAME/Dockerfile`, then treated as a `dir` parent: built with its tag, its `dev-env.yaml` optional, confined to the project files directory and the search directories after symlinks are resolved (an error on `parents[i].name`), and in `parent-builds` in build order.  `NAME` follows `dev-container`'s rules (a single directory name).  [The developer environment Dockerfile](../project-dockerfile.md#parents) documents it.  This repository's own `.surf-scoter.d/dev-env-container` now resolves its `name: dev-env` parent to the distribution's `containers/dev-env`.
+
+The tests above are in `dev_env.rs`, along with a `name` that isn't a single directory name, a `name` without a `tag`, `name` with `dir`, and no `dev-containers-search` at all.
+
 ## 7. Update the project file format
 
 Change around the project file format schema to include the new features - egress registration and VCS details.
