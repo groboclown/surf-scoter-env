@@ -17,6 +17,7 @@ from .user_config import UserConfig
 # The tool's locations that depend on the project, or on where the tool runs.
 PROJECT_LOCATIONS = (
     "project-dir",
+    "vcs-root",
     "project-config",
     "cwd",
     "dev-container-path",
@@ -47,17 +48,14 @@ class SetupProblem(NamedTuple):
 def check_programs(
     config: UserConfig,
     path_env: str | None = None,
-    home: Path | None = None,
 ) -> list[SetupProblem]:
     """Find setup `programs` that a project could supply.
 
     `path_env` is the `PATH` the programs are found on (by default, this
-    process's), and `home` the home directory (by default, the user's).
+    process's).
     """
     if path_env is None:
         path_env = os.environ.get("PATH", "")
-    if home is None:
-        home = Path.home()
     problems: list[SetupProblem] = []
     for file, section, key, value in config.setup_programs():
         reason = _written_problem(value)
@@ -65,7 +63,7 @@ def check_programs(
             problems.append(SetupProblem(file, f"{section}.programs.{key}", value, reason))
 
     # As found: anything inside the project, however it was referred to.
-    roots = _project_roots(config, home)
+    roots = _project_roots(config)
     seen: set[tuple[str, str]] = set()
     for _, section, key, _ in config.setup_programs():
         if (section, key) in seen:
@@ -118,42 +116,22 @@ def _written_problem(value: str) -> str | None:
     return None
 
 
-def _project_roots(config: UserConfig, home: Path) -> list[tuple[str, Path]]:
-    """The project's locations, and the repository holding it."""
+def _project_roots(config: UserConfig) -> list[tuple[str, Path]]:
+    """The project's locations, and the repository holding it (`vcs-root`)."""
     roots: list[tuple[str, Path]] = []
     project_dir = config.active_location("project-dir")
     project_config = config.active_location("project-config")
     workspace = config.active_location("dev-container-workspace-dir")
+    vcs_root = config.active_location("vcs-root")
     if project_dir:
         roots.append(("the project directory", project_dir))
     if project_config:
         roots.append(("the project files directory", project_config.parent))
-        if not project_dir:
-            project_dir = project_config.parent.parent
     if workspace:
         roots.append(("the workspace", workspace))
-    if project_dir:
-        repository = repository_root(project_dir, home)
-        if repository:
-            roots.append(("the repository", repository))
+    if vcs_root:
+        roots.append(("the repository", vcs_root))
     return roots
-
-
-def repository_root(project_dir: Path, home: Path) -> Path | None:
-    """The repository holding `project_dir`, as the configuration loader finds it.
-
-    The nearest directory, at or above it, with a `.git` (a directory, or a
-    file in a worktree or submodule) or `.hg`; the home directory and those
-    above it don't count.
-    """
-    real_home = Path(os.path.realpath(home))
-    start = Path(os.path.realpath(project_dir))
-    for directory in [start, *start.parents]:
-        if real_home.is_relative_to(directory):
-            return None
-        if (directory / ".git").exists() or (directory / ".hg").is_dir():
-            return directory
-    return None
 
 
 def _inside(path: Path, roots: Sequence[tuple[str, Path]]) -> str | None:

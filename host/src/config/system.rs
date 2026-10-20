@@ -103,10 +103,14 @@ pub const CWD: &str = "cwd";
 /// the setup files, not the tool; it decides what a project may do, so it
 /// must be absolute and outside the project.
 pub const VERIFIED_DIR: &str = "verified-dir";
+/// The root of the repository holding the project, found by `scoter` from
+/// the setup's VCS sections and given to the generator (`--vcs-root`).
+pub const VCS_ROOT: &str = "vcs-root";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 9] = [
+const TOOL_ONLY_KEYS: [&str; 10] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
+    VCS_ROOT,
     DEV_CONTAINER_PATH,
     DEV_CONTAINER_WORKSPACE_DIR,
     DEV_CONTAINER_SETTINGS_DIR,
@@ -369,6 +373,8 @@ pub struct SetupOptions<'a> {
     pub project_dir: Option<&'a Path>,
     /// The project file in effect: `scoter:project-config`.
     pub project_config: Option<&'a Path>,
+    /// The root of the repository holding the project: `scoter:vcs-root`.
+    pub vcs_root: Option<&'a Path>,
     /// The dev container's mounts: `scoter:dev-container-workspace-dir` and
     /// `scoter:dev-container-settings-dir`.
     pub dev_container_workspace_dir: Option<&'a Path>,
@@ -383,8 +389,13 @@ pub struct SetupOptions<'a> {
     pub no_search: bool,
     /// Setup already worked out.  Its files aren't read again.
     pub base: Option<SetupBase<'a>>,
-    /// The project file given this time, to record.
-    pub given_project_config: Option<&'a Path>,
+    /// Work out `scoter:project-config`, the project file, from
+    /// `project_dir` and the setup's names for the project files directory and
+    /// the file, unless `project_config` gives it.
+    pub find_project_config: bool,
+    /// Record the project file in the history: a project directory was
+    /// given this time.
+    pub record_project: bool,
 }
 
 /// A section's merged keys.
@@ -495,19 +506,15 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         inputs.distribution_dir = Some(path_text(dir));
         history.distribution_dir.insert(0, path_text(dir));
     }
-    if let Some(project) = options.given_project_config {
-        history.project_config.insert(0, path_text(project));
-    }
 
-    // Setup files found in the project.  Where the project is depends on the
-    // project files directory being named right, which the setup files say;
-    // until that's checked, these are kept aside (see the end).
+    // Setup files found in the project, reported after the setup's own
+    // problems.
     let mut location_errors = Vec::new();
     // `SURF_SCOTER_HOME` can be set by the project itself (say, through a
     // `.envrc` that runs when you enter its directory), so it's checked
     // whenever the project is known, whether or not it's searched this time.
     let home_in_project = if let Some(home) = env.scoter_home.as_deref().map(super::absolute)
-        && let Some(name) = in_project(&home, options, &env)
+        && let Some(name) = in_project(&home, options)
     {
         location_errors.push(ConfigError::new(
             Some(&home),
@@ -555,6 +562,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     let mut add = |key, value: Option<String>| tool_values.extend(value.map(|v| (key, v)));
     add(PROJECT_CONFIG, options.project_config.map(path_text));
     add(PROJECT_DIR, options.project_dir.map(path_text));
+    add(VCS_ROOT, options.vcs_root.map(path_text));
     add(
         DEV_CONTAINER_WORKSPACE_DIR,
         options.dev_container_workspace_dir.map(path_text),
@@ -605,7 +613,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         let problem = distribution_dir
             .as_deref()
             .filter(|_| !given)
-            .and_then(|dir| untrusted_setup_dir(dir, options, &env));
+            .and_then(|dir| untrusted_setup_dir(dir, options));
         if let Some(problem) = problem {
             location_errors.push(ConfigError::new(None, "", problem));
         } else if let Some(dir) = distribution_dir {
@@ -644,7 +652,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
         .filter(|f| f.source == Source::User && !home_in_project)
     {
         let dir = file.path.parent().unwrap_or(Path::new(""));
-        if let Some(name) = in_project(dir, options, &env) {
+        if let Some(name) = in_project(dir, options) {
             location_errors.push(ConfigError::new(
                 Some(&file.path),
                 "",
@@ -658,7 +666,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     if inputs.distribution_dir.is_none() {
         for file in files.iter().filter(|f| f.source == Source::Distribution) {
             let dir = file.path.parent().unwrap_or(Path::new(""));
-            if let Some(problem) = untrusted_setup_dir(dir, options, &env) {
+            if let Some(problem) = untrusted_setup_dir(dir, options) {
                 location_errors.push(ConfigError::new(Some(&file.path), "", problem));
             }
         }
@@ -673,7 +681,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
                 "",
                 format!("{setting} must be an absolute path"),
             ));
-        } else if let Some(name) = in_project(&dir, options, &env) {
+        } else if let Some(name) = in_project(&dir, options) {
             location_errors.push(ConfigError::new(
                 None,
                 "",
@@ -683,15 +691,23 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             ));
         }
     }
-    // With the project file in the wrong place, the project directory used
-    // above isn't the project's, so that's the only problem to report.  The
-    // load fails either way, so nothing from a file found there is used.
-    match options
-        .project_config
-        .map(|path| check_project_files_dir(&config, path))
-    {
-        Some(Err(e)) => errors.push(e),
-        _ => errors.extend(location_errors),
+    errors.extend(location_errors);
+    // The project file is in the project directory's files directory, as the
+    // setup names them.  (A universal file made earlier gives it as it was.)
+    if let (true, None, Some(project_dir)) = (
+        options.find_project_config,
+        options.project_config,
+        options.project_dir,
+    ) {
+        match project_file_path(&config, project_dir) {
+            Ok(path) => {
+                if options.record_project {
+                    history.project_config.insert(0, path_text(&path));
+                }
+                config.set_location(PROJECT_CONFIG, path_text(&path));
+            }
+            Err(e) => errors.push(e),
+        }
     }
 
     errors.extend(kind_changes(&files));
@@ -716,51 +732,50 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
 }
 
 /// The `scoter` section's `values` key naming the project files directory:
-/// the directory the project file must be in, which also holds the project's
-/// dev containers.
+/// the directory, in the project directory, holding the project file and the
+/// project's dev containers.
 pub const PROJECT_FILES_DIR: &str = "project-files-dir";
 
-/// Check that the project file at `path` is directly inside the directory the
-/// `scoter` `values: project-files-dir` names.
-fn check_project_files_dir(config: &SystemConfig, path: &Path) -> Result<(), ConfigError> {
-    let name = match config.value(SCOTER_SECTION, PROJECT_FILES_DIR) {
-        Some(ScalarValue::String(name)) => name,
-        Some(_) => {
+/// The `scoter` section's `values` key naming the project file, in the
+/// project files directory.
+pub const PROJECT_FILE_NAME: &str = "project-file-name";
+
+/// The project file for `project_dir`: `PROJECT_FILES_DIR/PROJECT_FILE_NAME`
+/// in it, as the setup names them, each a single name.
+fn project_file_path(config: &SystemConfig, project_dir: &Path) -> Result<PathBuf, ConfigError> {
+    let name = |key: &str, what: &str| -> Result<String, ConfigError> {
+        let setting = format!("the system configuration's `{SCOTER_SECTION}` `values: {key}`");
+        let name = match config.value(SCOTER_SECTION, key) {
+            Some(ScalarValue::String(name)) => name,
+            Some(_) => {
+                return Err(ConfigError::new(
+                    None,
+                    "",
+                    format!("{setting} must be text"),
+                ));
+            }
+            None => {
+                return Err(ConfigError::new(
+                    None,
+                    "",
+                    format!(
+                        "the system configuration sets no `{SCOTER_SECTION}` `values: {key}`, {what}"
+                    ),
+                ));
+            }
+        };
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
             return Err(ConfigError::new(
                 None,
                 "",
-                format!(
-                    "the system configuration's `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}` must be text"
-                ),
+                format!("{setting} ('{name}') must be a single name, without '/' or '\\'"),
             ));
         }
-        None => {
-            return Err(ConfigError::new(
-                Some(path),
-                "",
-                format!(
-                    "the system configuration sets no `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}`, the directory the project file must be in"
-                ),
-            ));
-        }
+        Ok(name)
     };
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        return Err(ConfigError::new(
-            None,
-            "",
-            format!(
-                "the system configuration's `{SCOTER_SECTION}` `values: {PROJECT_FILES_DIR}` ('{name}') must be a directory name, without '/' or '\\'"
-            ),
-        ));
-    }
-    if !super::project::in_files_dir(path, &name) {
-        return Err(ConfigError::new(
-            Some(path),
-            "",
-            format!("the project file must be in a `{name}` directory"),
-        ));
-    }
-    Ok(())
+    let files_dir = name(PROJECT_FILES_DIR, "the directory holding the project file")?;
+    let file = name(PROJECT_FILE_NAME, "the project file's name")?;
+    Ok(project_dir.join(files_dir).join(file))
 }
 
 /// Why the tools can't read a setup file they found by themselves in `dir`,
@@ -768,14 +783,14 @@ fn check_project_files_dir(config: &SystemConfig, path: &Path) -> Result<(), Con
 /// relative (to the directory the tool runs in, likely the project), or in
 /// the project.  A setup file can run any program, so it's never taken from
 /// the project.
-fn untrusted_setup_dir(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
+fn untrusted_setup_dir(dir: &Path, options: &SetupOptions) -> Option<String> {
     let setting = format!("`{SCOTER_SECTION}:{DISTRIBUTION_DIR}` {}", dir.display());
     if !dir.is_absolute() {
         return Some(format!(
             "{setting} must be absolute to find a setup file in it; give `--distribution-dir` instead"
         ));
     }
-    in_project(dir, options, env).map(|name| {
+    in_project(dir, options).map(|name| {
         format!("{setting} is in the project (`{name}`); setup files are never read from a project")
     })
 }
@@ -783,8 +798,8 @@ fn untrusted_setup_dir(dir: &Path, options: &SetupOptions, env: &Env) -> Option<
 /// The name of the project location `dir` is in, once symlinks are
 /// resolved, if it's in one: the project directory, the project files
 /// directory, the dev container's workspace, or the repository holding the
-/// project (see `repository_root`).
-fn in_project(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
+/// project (`scoter:vcs-root`).
+fn in_project(dir: &Path, options: &SetupOptions) -> Option<String> {
     let canonical = resolve_partly;
     let dir = canonical(dir);
     let project_dir = options.project_dir.or_else(|| {
@@ -793,7 +808,6 @@ fn in_project(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
             .and_then(Path::parent)
             .and_then(Path::parent)
     });
-    let repository = project_dir.and_then(|p| repository_root(p, env));
     let locations = [
         (
             format!("{SCOTER_SECTION}:{PROJECT_DIR}"),
@@ -810,7 +824,10 @@ fn in_project(dir: &Path, options: &SetupOptions, env: &Env) -> Option<String> {
             format!("{SCOTER_SECTION}:{DEV_CONTAINER_WORKSPACE_DIR}"),
             options.dev_container_workspace_dir.map(Path::to_path_buf),
         ),
-        ("the repository".to_string(), repository),
+        (
+            format!("{SCOTER_SECTION}:{VCS_ROOT}"),
+            options.vcs_root.map(Path::to_path_buf),
+        ),
     ];
     locations.into_iter().find_map(|(name, root)| {
         root.filter(|root| dir.starts_with(canonical(root)))
@@ -864,28 +881,6 @@ fn resolve_partly(path: &Path) -> PathBuf {
         }
     }
     resolved
-}
-
-/// The repository holding `project_dir`: the nearest directory, at or above
-/// it, with a `.git` (a directory, or a file in a worktree or submodule) or
-/// `.hg`.  The home directory and those above it don't count, so a home
-/// directory kept in a repository doesn't make every user file "in the
-/// project".
-// TODO: replace with the VCS root detection (docs/contributors/projects-v1.md, step 3).
-fn repository_root(project_dir: &Path, env: &Env) -> Option<PathBuf> {
-    let home = env.home.as_deref().and_then(|h| h.canonicalize().ok());
-    let start = resolve_partly(project_dir);
-    for dir in start.ancestors() {
-        if let Some(home) = &home
-            && home.starts_with(dir)
-        {
-            return None;
-        }
-        if dir.join(".git").exists() || dir.join(".hg").is_dir() {
-            return Some(dir.to_path_buf());
-        }
-    }
-    None
 }
 
 /// The user's setup file, and the user directory it's in (when it's in one).
@@ -1671,34 +1666,61 @@ impl SystemConfig {
         let path_keys = keys_of(self.path_keys(name).collect(), defaults.paths);
         let program_keys = keys_of(self.program_keys(name).collect(), defaults.programs);
 
+        // Every program is found on the `PATH`, this section's and the
+        // others', so a reference to any of them gives the program found.
         let mut overrides = Values::new();
         let mut missing = Missing::new();
         let mut missing_programs = BTreeMap::new();
         let mut programs = BTreeMap::new();
         let no_values = Values::new();
         let no_missing = Missing::new();
-        for key in &program_keys {
-            let key = key.as_str();
-            let program = self
-                .expander(&no_values, &fallbacks, &no_missing)
-                .resolve(name, key, &None, &mut Vec::new())
-                .map_err(|f| failure(f, PROGRAMS, key))?;
-            let program = match program {
-                Resolved::Text(parts) => command::render_parts(&parts),
-                Resolved::List(_) => unreachable!("programs are text"),
+        let others = self
+            .sections
+            .keys()
+            .filter(|other| *other != name)
+            .flat_map(|other| {
+                self.program_keys(other)
+                    .map(move |key| (other.clone(), key.to_string()))
+            });
+        let all: Vec<(String, String)> = program_keys
+            .iter()
+            .map(|key| (name.to_string(), key.clone()))
+            .chain(others)
+            .collect();
+        for (section_name, key) in all {
+            let own = section_name == name;
+            let program = match self.expander(&no_values, &fallbacks, &no_missing).resolve(
+                &section_name,
+                &key,
+                &None,
+                &mut Vec::new(),
+            ) {
+                Ok(Resolved::Text(parts)) => command::render_parts(&parts),
+                Ok(Resolved::List(_)) => unreachable!("programs are text"),
+                Err(f) if own => return Err(failure(f, PROGRAMS, &key)),
+                // Another section's problem is reported with that section;
+                // here, it has no value.
+                Err(_) => {
+                    missing.insert((section_name, key));
+                    continue;
+                }
             };
-            let id = (name.to_string(), key.to_string());
             let found = self.find_program(&program);
+            let id = (section_name, key.clone());
             match &found {
                 Some(found) => {
                     overrides.insert(id, path_text(found));
                 }
                 None => {
                     missing.insert(id);
-                    missing_programs.insert(key.to_string(), program);
+                    if own {
+                        missing_programs.insert(key.clone(), program);
+                    }
                 }
             }
-            programs.insert(key.to_string(), found);
+            if own {
+                programs.insert(key, found);
+            }
         }
         let expander = self.expander(&overrides, &fallbacks, &missing);
         // `None` when the value needs a program that isn't there.
@@ -2281,7 +2303,7 @@ mod tests {
             dir.write(
                 "setup.yaml",
                 &format!(
-                    "scoter:\n  paths:\n    distribution-dir: {setting}\n  values:\n    project-files-dir: .surf-scoter.d\n"
+                    "scoter:\n  paths:\n    distribution-dir: {setting}\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n"
                 ),
             );
             let options = SetupOptions {
@@ -2333,19 +2355,21 @@ mod tests {
     }
 
     /// The setup for a project file in `.surf-scoter.d`, with nothing else.
-    const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n";
+    const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n";
 
     #[test]
     fn no_user_setup_from_the_project() {
         let dir = TempDir::new();
         // A repository, with the project in `client`.
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
+        let repo = dir.path().join("repo");
         let project_dir = dir.path().join("repo/client");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
         let workspace = dir.path().join("ws");
         let options = SetupOptions {
             project_dir: Some(project_dir.as_path()),
             project_config: Some(project_config.as_path()),
+            vcs_root: Some(repo.as_path()),
             dev_container_workspace_dir: Some(workspace.as_path()),
             ..SetupOptions::default()
         };
@@ -2361,8 +2385,8 @@ mod tests {
         for (home, location) in [
             ("repo/client/conf", "scoter:project-dir"),
             ("repo/client/.surf-scoter.d", "scoter:project-dir"),
-            ("repo/server/conf", "the repository"),
-            ("repo", "the repository"),
+            ("repo/server/conf", "scoter:vcs-root"),
+            ("repo", "scoter:vcs-root"),
             ("ws/conf", "scoter:dev-container-workspace-dir"),
         ] {
             assert_eq!(
@@ -2403,7 +2427,7 @@ mod tests {
         let errors = load_with(&options, env).map_err(messages).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
-            errors[0].contains("is in the project (`the repository`)"),
+            errors[0].contains("is in the project (`scoter:vcs-root`)"),
             "{errors:?}"
         );
     }
@@ -2440,11 +2464,13 @@ mod tests {
     fn verified_dir_outside_the_project() {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
+        let repo = dir.path().join("repo");
         let project_dir = dir.path().join("repo/client");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
         let options = SetupOptions {
             project_dir: Some(project_dir.as_path()),
             project_config: Some(project_config.as_path()),
+            vcs_root: Some(repo.as_path()),
             ..SetupOptions::default()
         };
         let load_with_verified = |verified: &str| {
@@ -2467,7 +2493,7 @@ mod tests {
         );
         for (verified, location) in [
             ("./verified", "scoter:project-dir"),
-            ("${scoter:project-dir}/../server/v", "the repository"),
+            ("${scoter:project-dir}/../server/v", "scoter:vcs-root"),
         ] {
             let errors = load_with_verified(verified).unwrap_err();
             assert_eq!(errors.len(), 1, "{verified}: {errors:?}");
@@ -2503,58 +2529,6 @@ mod tests {
             std::os::unix::fs::symlink(at("repo"), at("link")).unwrap();
             assert_eq!(resolve_partly(&at("link/new/v")), at("repo/new/v"));
         }
-    }
-
-    #[test]
-    fn repository_root_stops_below_home() {
-        let dir = TempDir::new();
-        // A home directory kept in a repository.
-        std::fs::create_dir_all(dir.path().join("me/.git")).unwrap();
-        std::fs::create_dir_all(dir.path().join("me/work/proj")).unwrap();
-        let env = Env {
-            home: Some(dir.path().join("me")),
-            ..Env::default()
-        };
-        assert_eq!(
-            repository_root(&dir.path().join("me/work/proj"), &env),
-            None
-        );
-        // A repository of its own, below home, counts; `.git` may be a file.
-        dir.write("me/work/.git", "gitdir: /elsewhere\n");
-        assert_eq!(
-            repository_root(&dir.path().join("me/work/proj"), &env),
-            Some(dir.path().join("me/work"))
-        );
-        // As does a Mercurial one.
-        std::fs::create_dir_all(dir.path().join("other/.hg")).unwrap();
-        std::fs::create_dir_all(dir.path().join("other/proj")).unwrap();
-        assert_eq!(
-            repository_root(&dir.path().join("other/proj"), &env),
-            Some(dir.path().join("other"))
-        );
-    }
-
-    #[test]
-    fn misnamed_project_files_dir_is_the_only_problem() {
-        // In the wrong directory, the project directory used for the other
-        // checks is wrong too: here, it would hold `SURF_SCOTER_HOME`.
-        let dir = TempDir::new();
-        let project_dir = dir.path().to_path_buf();
-        let project_config = dir.path().join("proj/project.yaml");
-        dir.write("home/setup.yaml", PROJECT_FILES_SETUP);
-        let options = SetupOptions {
-            project_dir: Some(project_dir.as_path()),
-            project_config: Some(project_config.as_path()),
-            ..SetupOptions::default()
-        };
-        let env = Env {
-            scoter_home: Some(dir.path().join("home")),
-            ..Env::default()
-        };
-        assert_eq!(
-            load_with(&options, env).map_err(messages).unwrap_err(),
-            [": the project file must be in a `.surf-scoter.d` directory"]
-        );
     }
 
     #[test]
@@ -2624,7 +2598,7 @@ mod tests {
         let dir = TempDir::new();
         let setup = dir.write(
             "setup.yaml",
-            "a:\n  paths:\n    p: ${scoter:project-dir}/p\n    c: ${scoter:project-config}\n    w: ${scoter:cwd}/w\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n",
+            "a:\n  paths:\n    p: ${scoter:project-dir}/p\n    c: ${scoter:project-config}\n    w: ${scoter:cwd}/w\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
         );
         let options = SetupOptions {
             project_dir: Some(Path::new("/proj")),
@@ -3344,6 +3318,50 @@ mod tests {
             other.missing,
             BTreeMap::from([("helper".to_string(), "no-such-helper".to_string())])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn section_refers_to_other_sections_programs() {
+        let dir = TempDir::new();
+        let python = tool(&dir, "bin/python3");
+        let file = dir.write(
+            "setup.yaml",
+            concat!(
+                "python:\n  programs:\n    exec: python3\n    gone: no-such-tool\n",
+                "vcs:\n",
+                "  runs:\n",
+                "    find-root: ['${python:exec}', -E, script.py, '{x:start}']\n",
+                "    broken: ${python:gone} x\n",
+                "    plain: tool x\n",
+            ),
+        );
+        let env = Env {
+            path: Some(dir.path().join("bin").into_os_string()),
+            ..Env::default()
+        };
+        let config = load_setup(&file, None, None, env).unwrap();
+        let section = config.section("vcs", &SectionDefaults::default()).unwrap();
+        // Another section's program is the program found, as its own are.
+        assert_eq!(
+            section.runs["find-root"]
+                .as_ref()
+                .unwrap()
+                .render(&HashMap::from([("start", "/s")]))
+                .unwrap(),
+            [
+                python.display().to_string(),
+                "-E".into(),
+                "script.py".into(),
+                "/s".into()
+            ]
+        );
+        // One that isn't there has no value, nor has what refers to it; the
+        // section's own `missing` only lists its own programs.
+        assert_eq!(section.runs["broken"], None);
+        assert!(section.runs["plain"].is_some());
+        assert!(section.missing.is_empty());
+        assert!(section.programs.is_empty());
     }
 
     #[test]

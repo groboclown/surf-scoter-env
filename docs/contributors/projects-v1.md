@@ -256,7 +256,7 @@ The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second 
 * [Host bridge attack vectors](../security/host-bridge-attack-vectors.md): BRIDGE-11 (closed by absolute paths), and shims as a new vector.
 * [Configuration weaknesses](../security/configuration-weaknesses.md): the accepted file replaces fingerprint-only authorization.
 * [The developer environment Dockerfile](../project-dockerfile.md): `parents: dir` limited to `.surf-scoter.d` and the installation directory.
-* [The system configuration file](../system-config-file.md): the new `project-file-search` and `dev-containers-search` paths.
+* [The system configuration file](../system-config-file.md): the new `project-files-dir`, `project-file-name` and `dev-containers-search` settings.
 
 
 # Implementation Plan
@@ -267,18 +267,18 @@ For each step, the documentation and tests should correspondingly have updates. 
 
 Update the [defaults/setup.yaml](../../defaults/setup.yaml) file to now have the one place for the project file.
 
-* `project-file-search` only looks for `.surf-scoter.d/project.yaml`.  Remove the `.surf-scoter.yaml`, `.surf-scoter.yml` and `.surf-scoter/container.y*ml` entries.  The project file must be in a directory named `.surf-scoter.d` (even when given with `--project-config`), and the project directory is the one holding it.
+* The tools take a project *directory*, never a project file: `scoter --project-dir` (where to start looking) and `gen-scoter-uc --project-dir` (the project).  The project file is `values: project-file-name` (default `project.yaml`) in the project directory's `values: project-files-dir` (default `.surf-scoter.d`), both single names from the setup.  `scoter --project-config`, `gen-scoter-uc --config` and the `project-file-search` path list are gone.
 * `dev-containers-search` only looks in `.surf-scoter.d` and the installation's `containers` directory.  Remove `${scoter:project-dir}`, `containers/` and `.surf-scoter/`.
 * The dev container, and every `parents` `dir` and `file` entry in a `dev-env.yaml`, must resolve (following symlinks) inside the project's `.surf-scoter.d` or one of the `dev-containers-search` directories.  The search list comes only from the user's and the installation's setup files, so it's user-trusted; the setup file warns against listing directories a project controls.
 * Decide whether the installation's own container directories (such as `dev-env`) are fingerprinted, or trusted as part of the installation.
 * Open the project file without following symlinks (`O_NOFOLLOW`), check with `fstat` that it's a regular file, and read it with a size limit.
 * The `allowed-domains` setup entry stays until the gateway step (step 9) replaces it.  It still reads `.surf-scoter/allowed-domains.txt`, so a project that keeps its list in `.surf-scoter.d` (as this repository does) gets an empty allowlist until then; see step 9.
 
-Discovery walks up from the current directory to find `.surf-scoter.d`.  Until the VCS root detection exists (step 3), it stops at the current directory or `--project-dir`; after that, it stops at the VCS root.  A given `--project-dir` replaces the current directory (it's the `${scoter:cwd}` value), so the search never falls back to the directory the tool ran in.
+Discovery walks up from the current directory to find `.surf-scoter.d`, stopping at the VCS root (step 3); outside any repository, it only looks in the current directory or `--project-dir`.  A given `--project-dir` replaces the current directory (it's the `${scoter:cwd}` value), so the search never falls back to the directory the tool ran in.
 
 Double check that the [SUC generator](../../host/src/bin/gen-scoter-uc.rs) follows those paths.
 
-**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository (once discovery walks up, in step 3).
+**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository (tested with step 3's search).
 
 ## 2. Register Python as a program
 
@@ -294,33 +294,25 @@ Still open: that's a check the user runs, not one the tools enforce.  `scoter ru
 
 ## 3. Change VCS to discover the root directory.
 
-Add a new VCS program to find the project root directory.  If the VCS doesn't have it out-of-the-box, then this means adding a new [script file](../../scripts/) to handle it (the name would be something like `(name)-vcs-find-root.py`).
+Find the root of the repository holding the project, so the whole repository is cloned, and the setup file checks know where the repository ends.
 
-Root detection rules:
+Done:
 
-* Walk up from `.surf-scoter.d`, and parse the files directly.  Don't run commands such as `git rev-parse --show-toplevel`, which read the repository's configuration.
-* In Git, `.git` can be a file (`gitdir: ...`) in worktrees and submodules.  Decide whether a submodule counts as a root.
-* Stop at the user's home directory or a file system boundary.
-* Ignore `GIT_DIR` and `GIT_WORK_TREE` from the environment.
-* A `root` value from the project may only name an ancestor of `.surf-scoter.d`.
+* **Extensible, in separate scripts.**  Each `NAME-vcs` setup section that can find its root has a `runs: find-root` command, given `{x:start}`, that prints the root (or nothing).  The distribution has a script for each kind of search, [`vcs_root_nearest.py`](../../scripts/vcs_root_nearest.py) (Git `.git`, Mercurial `.hg`, Subversion `.svn`) and [`vcs_root_outermost.py`](../../scripts/vcs_root_outermost.py) (CVS's `CVS` directories, one in every directory of a checkout), both given the marker's name; they share [`vcs_root.py`](../../scripts/surf_scoter_lib/vcs_root.py).  Adding a VCS is a setup change.  The VCS is never run (no `git rev-parse --show-toplevel`, which reads the repository's configuration), no environment variable (such as `GIT_DIR`) is used, and the search stops below the home directory and at a file system boundary.  [defaults/setup.yaml](../../defaults/setup.yaml) gives Git's.
+* **Found by `scoter`, given to the generator.**  [`scoter.py`](../../scoter.py) finds the root during its two-phase loading: phase 1 loads the setup alone; `scoter` then runs every VCS section's `find-root` from the search's start (the current directory, or `--project-dir`), and the nearest root wins.  Phase 2 passes the project directory and the root as `gen-scoter-uc --project-dir` and `--vcs-root`; the generator checks that the root holds the project directory and records it as `${scoter:vcs-root}`.
+* **Submodules.**  A Git submodule's `.git` file is a marker, so running a command inside the submodule puts you in its context; above it, you're in the owning repository's.
+* **Project search.**  The project directory is looked for in the search's start and each directory above it up to the root, never above it, so a `.surf-scoter.d` planted above the repository isn't found.  Outside any repository, only the start is searched.
+* **The project's `vcs` must match.**  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (`file`) can be anywhere.
+* **One answer for the repository.**  The setup file checks (`SURF_SCOTER_HOME`, the user's setup file, `distribution-dir`, `verified-dir`) and [`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py) use `${scoter:vcs-root}`; the interim walk-up in `system.rs` is gone.
+* **Cloning.**  `git-vcs`'s `local-clone` clones `${scoter:vcs-root}`; `file-vcs` still copies the project directory, as it has no repository.
 
-The setup file checks already need the repository root: `SURF_SCOTER_HOME`, the user's setup file and a `distribution-dir` from the setup files must be outside it.  Until this step, `repository_root` in [`system.rs`](../../host/src/config/system.rs) stands in, walking up from the project directory to the nearest `.git` or `.hg` (stopping below the home directory).  Replace it with this step's detection, so both agree on where the repository is.
+Remaining:
 
-`${scoter:project-dir}` currently means both the directory to clone and the place for `.dev-env`.  Split it into two values:
+* The container's starting directory in the workspace should be the project directory's path relative to the VCS root.
+* The VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with.  A project can set `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*` when you enter its directory (say, through a `.envrc`), which would redirect them.  Run them without the VCS's own environment variables; the VCS section could list the ones to drop.
+* If the project file gets a `root` setting (step 7), it may only name a directory between the project directory and the root found here.
 
-* the VCS root, which `local-clone`, `show-fetch-changes` and `merge-changes` use;
-* the project directory, the parent of `.surf-scoter.d`, which the environment is keyed by.
-
-The container's starting directory in the workspace is the project directory's path relative to the VCS root.
-
-With more than one `.surf-scoter.d` in a repository, anything named after the project directory needs to be named per environment, not per repository.  Give each environment an id: the project directory's name plus a short hash of its canonical absolute path.  The id needs no stored state, so the same value works at run time and in the verified storage (step 5).  Use it for:
-
-* the container names;
-* the workspace path.
-
-Keep `--no-local --depth 4` on the Git clone, and add a test that the new workspace has a `.git/shallow` file and shares no files with the project (`find .git -links +1`).  Make the depth and the branch choice user settings.
-
-**Tests:** `.git` as a file; `GIT_DIR` set in the environment; a `root` that isn't an ancestor; a repository nested inside another one; two environments in one repository, running at the same time.
+**Tests:** in [`test_vcs_root.py`](../../scripts/tests/s_lib/test_vcs_root.py): `.git` as a directory and as a submodule's file; the `outermost` search, with directories not yet added and gaps; the home directory stop.  In [`test_scoter.py`](../../scripts/tests/test_scoter.py), running the scripts as `find-root`: the nearest root of several VCS; a submodule; two VCS with one root; failing or unusable `find-root` commands; the project directory found above the start but not above the root, with the setup's names; the project's `vcs` against the root's.  In [`config.rs`](../../host/src/config.rs): a `--vcs-root` that doesn't hold the project directory, or doesn't exist; the project file found with the setup's names.  Still to add: the starting directory in the workspace, and `GIT_DIR` set when the VCS commands run.
 
 ## 4. Add programs and files to prohibit or warn to the default settings
 
@@ -344,7 +336,13 @@ The verified storage lives in the directory the setup files name as `scoter: pat
 
 `running-env-config` and `running-env-config-lock` have the same gap: [defaults/setup.yaml](../../defaults/setup.yaml) puts them under `${scoter:user-dir}`, so they have no value without a user directory.  Give them a dedicated `scoter: paths` setting of their own (say, `state-dir`, default `~/.config/surf-scoter.d/state`), checked the same way as `verified-dir`, as they hold the ports and names of the running environments.
 
-These should be stored in JSON formats so that Python can easily read it.  In order to allow for multiple project directories, I recommend an index file that points the local directory to the stored directory.  The stored directory is named by the environment id from step 3, so two directories with the same name don't collide and need no conflict resolution.  The directory here is *always* the parent of the `.surf-scoter.d` directory, not the VCS root; this allows for multi-project repositories.  The index maps the full canonical path to the id, which also makes it easy to list and revoke acceptances.
+With more than one `.surf-scoter.d` in a repository, anything named after the project directory needs to be named per environment, not per repository.  Give each environment an id: the project directory's name plus a short hash of its canonical absolute path.  The id needs no stored state, so the same value works at run time and in the verified storage.  Use it for:
+
+* the container names;
+* the workspace path;
+* the verified storage directory (below).
+
+These should be stored in JSON formats so that Python can easily read it.  In order to allow for multiple project directories, I recommend an index file that points the local directory to the stored directory.  The stored directory is named by the environment id above, so two directories with the same name don't collide and need no conflict resolution.  The directory here is *always* the parent of the `.surf-scoter.d` directory, not the VCS root; this allows for multi-project repositories.  The index maps the full canonical path to the id, which also makes it easy to list and revoke acceptances.
 
 For the fingerprinting and diff'ing of files, this implies keeping the full text of the project setup file and all used container directories (following the dev-env.yaml file parent DAG).  I recommend a tar.gz store.
 
@@ -397,7 +395,7 @@ The schema enforces:
 
 * `program` is a name only: no `/` or `\`, no `.`, `..` or empty names, no control or non-ASCII characters, no leading `-`, no drive or stream syntax (`C:aws`, `aws:stream`), and no Windows device names.
 * `egress` entries are structured (`host`, `port`, `protocol`, optional `methods`).  `methods` is only allowed with `protocol: http`.  A bare `*` and wildcards on public suffixes are refused.  Hostnames are stored and shown in their `xn--` (punycode) form.
-* `root`, when given, is relative and names an ancestor (checked in step 3).
+* `root`, when given, is relative and names a directory between the project directory and the VCS root step 3 finds.
 * No newlines in fields that don't need them.
 
 The YAML parsing refuses anchors and aliases, merge keys (`<<`), explicit tags and duplicate keys, and applies a size limit.  Check how the Rust YAML library handles duplicate keys; libraries differ.

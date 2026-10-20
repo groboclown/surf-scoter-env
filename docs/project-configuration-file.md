@@ -2,7 +2,7 @@
 
 Surf Scoter stores its configuration in a YAML formatted file, `project.yaml`, in a `.surf-scoter.d` directory.  Everything Surf Scoter reads from your project lives in `.surf-scoter.d`: this file, and your development container directories.  The *project directory* is the one holding `.surf-scoter.d`; it's usually the root of your repository, but needn't be.  The directory's name comes from the [system configuration](system-config-file.md)'s `scoter` `values: project-files-dir`; `.surf-scoter.d` is the default, and the name these pages use.
 
-The `scoter` tool looks for `.surf-scoter.d/project.yaml` in the current directory, then in the project directory given with `--project-dir`.  You can also name the file with `--project-config`, but it must still be directly inside a directory with that name.
+The `scoter` tool looks for a project directory, one holding `.surf-scoter.d/project.yaml`, from the current directory (or the one given with `--project-dir`) up to the root of the repository it's in, never above it (see [Version control roots](system-config-file.md#version-control-roots)).  The file's name comes from the system configuration's `values: project-file-name`; `project.yaml` is the default.
 
 For safety, the tools refuse to read the project file when it, or its `.surf-scoter.d` directory, is a symlink, or when the file isn't a regular file (a FIFO or device, say).
 

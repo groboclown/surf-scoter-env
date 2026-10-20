@@ -526,7 +526,7 @@ mod tests {
                 ),
                 setup: write(
                     "home/setup.yaml",
-                    "docker:\n  programs:\n    exec: /bin/sh\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n",
+                    "docker:\n  programs:\n    exec: /bin/sh\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
                 ),
             }
         }
@@ -534,7 +534,10 @@ mod tests {
         /// The universal configuration file, as `gen-scoter-uc` would write it.
         fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
             let options = LoadOptions {
-                project: with_project.then(|| self.project.clone()),
+                project_dir: with_project
+                    .then(|| self.project.parent().and_then(Path::parent))
+                    .flatten()
+                    .map(Path::to_path_buf),
                 dev_container_workspace_dir: workspace.map(Path::to_path_buf),
                 ..LoadOptions::default()
             };

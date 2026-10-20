@@ -31,8 +31,7 @@ mkdir -p "${workdir}/bin"
 # Set up the bin directory
 cp "${base}/host/${target_dir}/scoter-host${ext}" "${workdir}/bin/."
 cp "${base}/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
-cp "${base}/scripts/"main_*.py "${workdir}/bin/."
-cp "${base}/scripts/__init__.py" "${workdir}/bin/."
+cp "${base}/scripts/"*.py "${workdir}/bin/."
 mkdir -p "${workdir}/bin/surf_scoter_lib"
 cp "${base}/scripts/surf_scoter_lib"/*.py "${workdir}/bin/surf_scoter_lib/."
 

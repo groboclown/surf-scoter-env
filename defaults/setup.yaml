@@ -70,6 +70,24 @@ workspace:
 # The scoter tool will reference this by using the project's `vcs` value,
 # with a `-vcs` suffix.
 # Not all VCS provide these commands.
+#
+# A VCS section can say how to find the root of a repository, with
+# `runs: find-root`: a command that prints the root of the repository holding
+# `{x:start}`, or nothing when it isn't in one.  scoter runs every VCS
+# section's `find-root`, and the nearest root wins, so a Git submodule, with its
+# own `.git` file, is its own repository when you're inside it.
+#
+# SECURITY: find the root from the repository's files alone.  Don't run the VCS
+# itself (`git rev-parse --show-toplevel` reads the repository's configuration,
+# which the project controls).  The distribution's two scripts do this, given
+# the file or directory that marks a checkout:
+#   vcs_root_nearest.py MARKER START: the nearest directory, at or above
+#       START, holding MARKER: `.git` (a directory, or a file in a worktree or
+#       submodule), `.hg` or `.svn`.
+#   vcs_root_outermost.py MARKER START: the highest directory of the unbroken
+#       run holding MARKER, for a VCS that keeps a directory in every directory
+#       of a checkout (CVS, with `CVS`).
+# Both stop below your home directory, and at a file system boundary.
 git-vcs:
     programs:
         exec: git
@@ -80,7 +98,7 @@ git-vcs:
         # mapping), and could rewrite objects in your real repository behind
         # already-reviewed hashes.  See FILE-2 in
         # docs/security/files-attack-vectors.md.
-        local-clone: ${exec} clone --no-local --depth 4 ${scoter:project-dir} {x:workspace-dir}
+        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:workspace-dir}
         fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
         fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
@@ -89,6 +107,14 @@ git-vcs:
         # But it's potentially dangerous because it makes those workspace
         # files active.
         merge-changes: ${exec} merge {x:branch}
+
+        find-root:
+            - ${python:exec}
+            - -E
+            - -s
+            - ${scoter:distribution-bin-dir}/vcs_root_nearest.py
+            - .git
+            - '{x:start}'
     values:
         ignore-file: .gitignore
 
@@ -149,13 +175,16 @@ scoter:
     #
     # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
     # these after they've loaded would be a lie.
-    #    project-config: set to the project configuration file.
-    #    project-dir: set to the project directory (--project-dir, or the directory holding the
-    #        project file's `project-files-dir`).
+    #    project-config: set to the project configuration file: `project-file-name` in the
+    #        project directory's `project-files-dir`.
+    #    project-dir: set to the project directory, which holds the `project-files-dir`.
+    #        scoter finds it, searching up from where it runs (or --project-dir) to the root
+    #        of the repository holding it.
+    #    vcs-root: set to the root of the repository holding the project (see the VCS sections).
     #    dev-container-path: set to the project's dev container directory.
     #    user-setup-file: set to the user's scoter configuration file.
     #    user-dir: set to the user's scoter configuration directory.
-    #    cwd: set to the directory the tool ran in, or the --project-dir when given.
+    #    cwd: set to the directory the tool ran in.
     paths:
         # Where your accepted (verified) project settings are kept.  They decide what each
         # project may do, so this must be an absolute path outside any project, its workspace
@@ -163,11 +192,6 @@ scoter:
         verified-dir: ~/.config/surf-scoter.d/verified
 
     path-lists:
-        # Where to find the project file.  It must be in a `project-files-dir` directory.
-        project-file-search:
-            - ${scoter:cwd}/${scoter:project-files-dir}/project.yaml
-            - ${scoter:project-dir}/${scoter:project-files-dir}/project.yaml
-
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
         # SECURITY: a dev container, and every parent it builds on, must be inside
         # the project's `project-files-dir` or one of these directories.  Don't add
@@ -183,4 +207,6 @@ scoter:
         # project's dev containers.  Everything the tools read from a project lives there.
         # It must be a single directory name.
         project-files-dir: .surf-scoter.d
+        # The project file, in the `project-files-dir`.  It must be a single file name.
+        project-file-name: project.yaml
         backup-file-extension: .backup

@@ -62,6 +62,9 @@ pub struct ActiveConfigLocations {
     /// The project directory: `--project-dir`, or the project file's.
     #[serde(default)]
     pub project_dir: Option<String>,
+    /// The root of the repository holding the project (`--vcs-root`).
+    #[serde(default)]
+    pub vcs_root: Option<String>,
     /// The project's dev container directory.
     #[serde(default)]
     pub dev_container_path: Option<String>,
@@ -191,6 +194,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
         active_config_locations: ActiveConfigLocations {
             project_config: location(system::PROJECT_CONFIG),
             project_dir: location(system::PROJECT_DIR),
+            vcs_root: location(system::VCS_ROOT),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
             dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
             dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
@@ -313,7 +317,10 @@ mod tests {
 
     fn load(dir: &TempDir, project: Option<&str>, setup: &str) -> FullConfig {
         let options = LoadOptions {
-            project: project.map(|p| dir.write("proj/.surf-scoter.d/project.yaml", p)),
+            project_dir: project.map(|p| {
+                dir.write("proj/.surf-scoter.d/project.yaml", p);
+                dir.path().join("proj")
+            }),
             ..LoadOptions::default()
         };
         dir.write("home/setup.yaml", setup);
@@ -352,7 +359,7 @@ mod tests {
                 "  values:\n    port: 22022\n    ratio: 0.5\n    debug: false\n    unset: null\n    note: '${config-file} {x:keep}'\n",
                 "scoter:\n  paths:\n    distribution-dir: /opt/scoter\n    note: ${ssh:config-file}\n",
                 "  path-lists:\n    compose: [./compose, /etc/compose]\n",
-                "  values:\n    project-files-dir: .surf-scoter.d\n",
+                "  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
             ),
         );
         let universal = build(&config).unwrap();
@@ -431,10 +438,16 @@ mod tests {
                                 "/etc/compose".to_string()
                             ]),
                         )]),
-                        values: BTreeMap::from([(
-                            "project-files-dir".to_string(),
-                            ScalarValue::String(".surf-scoter.d".to_string()),
-                        )]),
+                        values: BTreeMap::from([
+                            (
+                                "project-file-name".to_string(),
+                                ScalarValue::String("project.yaml".to_string()),
+                            ),
+                            (
+                                "project-files-dir".to_string(),
+                                ScalarValue::String(".surf-scoter.d".to_string()),
+                            ),
+                        ]),
                         ..section(
                             &[
                                 (
@@ -482,7 +495,7 @@ mod tests {
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
         // The locations are also the `scoter` section's paths.
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 10);
+        assert_eq!(active.len(), 11);
         for (key, value) in active {
             let path = &json["resolved"]["scoter"]["paths"][key];
             if value.is_null() {

@@ -84,8 +84,9 @@ Referring to a key that isn't set anywhere is an error (except for the `scoter` 
 
 The `scoter` section is special, in that the tool fills in the `paths` that say where the configuration came from, so you can refer to them from other places.  These are the same values as the universal configuration file's `active-config-locations` (see [The Universal Configuration File](contributors/universal-configuration-file.md)):
 
-* `project-config` - the project configuration file.  Not set without one.
-* `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)).  This is the directory holding the project files directory (`values: project-files-dir`, below) the project configuration file is in, unless `gen-scoter-uc --project-dir` gives another.  Not set without either.
+* `project-config` - the project configuration file: `values: project-file-name` in the project directory's `values: project-files-dir` (below).  Not set without a project.
+* `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)): the directory holding the project files directory.  `scoter` finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --project-dir`.  Not set without a project.
+* `vcs-root` - the root of the repository holding the project.  The `scoter` tool finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --vcs-root`; it must hold the project directory.  Not set without a project, or when the project isn't in a repository.  Setup files can't be read from inside it.
 * `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers-search` (see below), so that list can't refer to it.
 * `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
 * `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
@@ -93,7 +94,20 @@ The `scoter` section is special, in that the tool fills in the `paths` that say 
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
 * `distribution-dir` - the Surf Scoter distribution directory, as described [above](#where-to-find-the-system-configuration-files): `--distribution-dir`, or else the highest priority setup file's `distribution-dir`.  Not set without either.
 * `distribution-bin-dir` - the distribution's programs: `${scoter:distribution-dir}/bin`.  A program working with the universal configuration file may change it there, and a later `gen-scoter-uc --universal` keeps the change while the distribution directory stays the same.  Not set without a distribution directory.
-* `cwd` - the directory the tool was run in, or the project directory when `--project-dir` gives one.  The project configuration file search uses it, so `--project-dir` decides where to look, never the directory you happen to be in.
+* `cwd` - the directory the tool was run in.
+
+### Version control roots
+
+The `scoter` tool finds the repository holding your project with the setup's VCS sections (`NAME-vcs`).  A section that can find its root has a `runs: find-root` command: given `{x:start}`, it prints the root of the repository holding it, or nothing when it isn't in one.  It should find the root from the repository's files alone; running the VCS itself (such as `git rev-parse --show-toplevel`) reads the repository's configuration, which the project controls.  The distribution has two scripts for this, in its `bin` directory, each given the name of the file or directory that marks a checkout:
+
+* `vcs_root_nearest.py MARKER START`: the nearest directory, at or above `START`, holding `MARKER`.  For `.git` (a directory, or a file in a Git worktree or submodule), `.hg` or `.svn`.
+* `vcs_root_outermost.py MARKER START`: the highest directory of the unbroken run, from the nearest one up, holding `MARKER`.  For a VCS that keeps a directory in every directory of a checkout, such as CVS with its `CVS` directories.
+
+Both stop below your home directory (so a home directory kept in a repository doesn't count) and at a file system boundary, and use no environment variables (such as `GIT_DIR`).  The `git-vcs` section runs the first with `.git`, using the `python` section's interpreter.
+
+`scoter` runs every VCS section's `find-root` from where the search starts: the current directory, or `--project-dir`.  The nearest root wins, so a Git submodule, with its own `.git` file, is its own repository when you run the tool inside it; above it, you're in the owning repository.
+
+The project directory is then looked for in the search's start, and each directory above it up to the repository root, never above it: a project planted above the repository isn't found.  Outside any repository, only the start is searched.  A project directory is one holding `values: project-files-dir`, with `values: project-file-name` in it.  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (such as `file`) can be anywhere.
 
 All of them are absolute paths.
 
@@ -171,7 +185,8 @@ The tools use these sections:
 * `scoter`: the tool's own settings.
     * `paths`: where the configuration came from, set by the tool (except that you can set `distribution-dir`), as described in [The `scoter:` section](#the-scoter-section).
     * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.  A dev container, and every parent it builds on, must be inside the project files directory or one of these directories, so don't list directories a project controls, such as `${scoter:project-dir}` itself.  The default is `${scoter:project-dir}/${scoter:project-files-dir}` and the distribution's `containers` directory.
-    * `values: project-files-dir`: the name of the project files directory, which holds the project configuration file and the project's dev containers.  The project configuration file must be directly inside a directory of this name, and the project directory is the one holding it.  It must be a single directory name; the default is `.surf-scoter.d`.
+    * `values: project-files-dir`: the name of the project files directory, which holds the project configuration file and the project's dev containers.  The project directory is the one holding it.  It must be a single directory name; the default is `.surf-scoter.d`.
+    * `values: project-file-name`: the name of the project configuration file, in the project files directory.  It must be a single file name; the default is `project.yaml`.
     * `paths: verified-dir`: where your accepted (verified) project settings are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.

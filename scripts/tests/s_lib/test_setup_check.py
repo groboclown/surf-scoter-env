@@ -53,7 +53,7 @@ class CheckProgramsTest(unittest.TestCase):
         """The problems' keys and the start of their reasons."""
         return [
             f"{problem.key}: {problem.reason.split(',')[0].split(';')[0]}"
-            for problem in setup_check.check_programs(config, path_env, self.home)
+            for problem in setup_check.check_programs(config, path_env)
         ]
 
     def test_fine(self) -> None:
@@ -83,9 +83,9 @@ class CheckProgramsTest(unittest.TestCase):
 
     def test_found_inside_the_project(self) -> None:
         """A program found inside the project, or its repository, is reported."""
-        (self.dir / "repo/.git").mkdir(parents=True)
         (self.dir / "repo/client/.surf-scoter.d").mkdir(parents=True)
         locations = {
+            "vcs-root": str(self.dir / "repo"),
             "project-dir": str(self.dir / "repo/client"),
             "project-config": str(self.dir / "repo/client/.surf-scoter.d/project.yaml"),
             "dev-container-workspace-dir": str(self.dir / "ws"),
@@ -108,17 +108,6 @@ class CheckProgramsTest(unittest.TestCase):
             "t.programs.c: is inside the project (the workspace)",
             "t.programs.d: is inside the project (the project directory)",
         ])
-
-    def test_repository_stops_below_home(self) -> None:
-        """A home directory kept in a repository doesn't make it the project's."""
-        (self.home / ".git").mkdir()
-        (self.home / "work/proj").mkdir(parents=True)
-        self.assertIsNone(setup_check.repository_root(self.home / "work/proj", self.home))
-        (self.home / "work/.git").write_text("gitdir: /elsewhere\n")
-        self.assertEqual(
-            setup_check.repository_root(self.home / "work/proj", self.home),
-            self.home / "work",
-        )
 
     def test_relative_path_entries(self) -> None:
         """An empty or relative PATH entry is reported."""

@@ -1,10 +1,11 @@
 //! The project configuration file, shared by everyone working on the project.
 //!
 //! It lives in the project's files directory (the system configuration's
-//! `scoter` `values: project-files-dir`, normally `.surf-scoter.d`), with the
-//! project's dev containers.  The project directory is the one holding that
-//! directory.  Checking the directory's name needs the system configuration,
-//! so `config::load_all` does it.
+//! `scoter` `values: project-files-dir`, normally `.surf-scoter.d`), as
+//! `values: project-file-name` (normally `project.yaml`), with the project's
+//! dev containers.  The project directory is the one holding that directory;
+//! the tools are given the project directory, and the system configuration
+//! says where the file is in it.
 //!
 //! The host bypass exists so the container can perform an action that needs
 //! privileges the container doesn't have (credentials, the Docker daemon, and
@@ -118,20 +119,6 @@ use super::environment::{EnvPlan, EnvRules};
 use super::pattern::WorkspacePattern;
 use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
-
-/// The project directory for the project file at `path`: the directory
-/// holding the project files directory the file is in.
-pub fn project_dir_of(path: &Path) -> Option<&Path> {
-    path.parent()?.parent()
-}
-
-/// Whether the project file at `path` is directly inside a directory named
-/// `files_dir_name` (the system configuration's `project-files-dir`).
-pub fn in_files_dir(path: &Path, files_dir_name: &str) -> bool {
-    path.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == files_dir_name)
-}
 
 /// The project configuration file.
 #[derive(Debug, PartialEq, Eq)]
@@ -806,10 +793,6 @@ mod tests {
         let project = load(&path).unwrap();
         assert_eq!(project.path, path);
         assert_eq!(project.dir(), dir.path().join("proj/.surf-scoter.d"));
-        assert_eq!(
-            project_dir_of(&path),
-            Some(dir.path().join("proj").as_path())
-        );
     }
 
     #[test]
@@ -823,20 +806,6 @@ mod tests {
             "{}",
             errors[0]
         );
-    }
-
-    #[test]
-    fn project_files_dir_name() {
-        let path = Path::new("/proj/.surf-scoter.d/project.yaml");
-        assert!(in_files_dir(path, ".surf-scoter.d"));
-        assert!(!in_files_dir(path, ".other"));
-        assert!(!in_files_dir(
-            Path::new("/proj/project.yaml"),
-            ".surf-scoter.d"
-        ));
-        assert!(!in_files_dir(Path::new("project.yaml"), ".surf-scoter.d"));
-        assert_eq!(project_dir_of(path), Some(Path::new("/proj")));
-        assert_eq!(project_dir_of(Path::new("project.yaml")), None);
     }
 
     #[cfg(unix)]

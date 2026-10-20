@@ -7,16 +7,17 @@ Because the tooling brings configuration settings from many different places, it
 The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, with the same configuration code that `scoter-host` uses):
 
 ```
-gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] [--dev-container-workspace-dir DIR]
+gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
+              [--dev-container-workspace-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search] [--output FILE]
 ```
 
-* `--config`: the project configuration file.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir` and `dev-container-path`, `project`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings one along.
-* `--project-dir`: the project directory, where the setup files' `./` locations start, in place of the directory holding the project configuration file's `.surf-scoter.d`.  It must exist.  It doesn't change where the project configuration file's own relative paths (such as `dev-container-path`) start.
+* `--vcs-root`: the root of the repository holding the project, which `scoter` finds from the setup's VCS sections (see [Version control roots](../system-config-file.md#version-control-roots)).  It must exist and hold the project directory.  It's the `scoter` location `vcs-root`; setup files can't be read from inside it.  Without a `--project-dir` this time, a `--universal` file's carries over.
+* `--project-dir`: the project: the directory holding the project files directory, with the project file in it (`scoter: values: project-files-dir` and `project-file-name` in the setup say where).  It must exist, and the setup files' `./` locations start there.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir`, `vcs-root` and `dev-container-path`, `project`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings them along.
 * `--dev-container-workspace-dir` and `--dev-container-settings-dir`: the directories mounted in the launched dev container: the project workspace (writable), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.
 * `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  It wins over a `scoter: paths: distribution-dir` in the setup files.  The other setup file is the user's, found through `$SURF_SCOTER_HOME` or `~/.config`; no setup file is ever read from a project.
-* `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others; a `--config` without `--project-dir` uses the directory holding that file's `.surf-scoter.d`.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
+* `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
 * `--output`: the file to write; without it, the JSON goes to stdout.
 
@@ -24,12 +25,13 @@ If the configuration has problems, the program writes all of them to stderr, one
 
 ### Building up the configuration in steps
 
-The `scoter` program, when it isn't told which project file to use, needs the system setup to find it.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` twice:
+The `scoter` program needs the system setup to find the project.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` twice:
 
 ```shell
 gen-scoter-uc --output first.json
-# ... read first.json to find the project file ...
-gen-scoter-uc --universal first.json --no-setup-search --config PROJECT.yaml
+# ... run first.json's VCS `find-root` commands, then look for the project
+#     directory up to the root ...
+gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT
 ```
 
 The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.
@@ -39,7 +41,7 @@ The second run doesn't read the setup files again, but it does expand their sett
 `scoter-host` takes only a universal configuration file and the dev container's name:
 
 ```shell
-gen-scoter-uc --config PROJECT.yaml --dev-container-workspace-dir WORKSPACE --output universal.json
+gen-scoter-uc --project-dir DIR --dev-container-workspace-dir WORKSPACE --output universal.json
 scoter-host --universal universal.json CONTAINER_NAME
 ```
 
@@ -75,6 +77,7 @@ The general layout:
         // directory holding the project file's .surf-scoter.d) and the project's dev container.
         "project-config": "/home/user/my-project/.surf-scoter.d/project.yaml",
         "project-dir": "/home/user/my-project",
+        "vcs-root": "/home/user/my-project",
         "dev-container-path": "/home/user/my-project/.surf-scoter.d/dev-env",
         // The host directories mounted in the dev container:
         //   --dev-container-workspace-dir - the cloned project workspace
@@ -240,7 +243,7 @@ The general layout:
         "user-dir": ["/home/user/.config/surf-scoter.d"],
         // The --distribution-dir values.
         "distribution-dir": ["/home/user/.local/share/surf-scoter"],
-        // The --config project files.
+        // The project files of the --project-dir projects.
         "project-config": [
             "/home/user/my-project/.surf-scoter.d/project.yaml",
             "/home/user/other-project/.surf-scoter.d/project.yaml"
