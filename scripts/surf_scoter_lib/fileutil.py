@@ -1,12 +1,15 @@
 #SPDX:MIT
 """File helper utilities."""
+import contextlib
 import os
 import platform
 import shutil
+import time
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from . import log
-from .err import SurfScoterErr
+from .err import LockTimeoutErr, SurfScoterErr
 
 # ---------------------------------------------------------------------
 # Basic file operations
@@ -58,6 +61,7 @@ def restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
 
 MODE_USER_RW = 0o600
 MODE_USER_R_ONLY = 0o400
+MODE_USER_RWX = 0o700
 
 
 def touch(file: Path, mode: int) -> None:
@@ -144,3 +148,85 @@ def require_exe(name: str | Path) -> Path:
 def is_windows() -> bool:
     """Check if the user is running on Windows."""
     return platform.system() == "Windows"
+
+
+# ---------------------------------------------------------------------
+# Locking
+
+# Flags for opening a file without following a symlink, where the platform can.
+O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
+O_BINARY: int = getattr(os, "O_BINARY", 0)
+
+
+@contextlib.contextmanager
+def exclusive_lock(
+    path: Path,
+    *,
+    timeout: float = 30.0,
+    poll: float = 0.2,
+    on_wait: Callable[[], None] | None = None,
+    check: Callable[[int], None] | None = None,
+) -> Generator[None]:
+    """Hold an operating system lock on `path` (created if needed) while in the block.
+
+    The operating system lets the lock go when the process ends, however it
+    ends, so a crashed run never leaves it held.  POSIX uses `flock`, which
+    locks the open file: two opens conflict, even in one process.  Windows
+    locks the file's first byte with `msvcrt.locking`.
+
+    It doesn't block: it tries every `poll` seconds, calling `on_wait` once
+    the first time it has to wait, and raises LockTimeoutErr after `timeout`
+    seconds.  `check` is given the open file's descriptor before locking, to
+    check its owner and mode.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | O_NOFOLLOW | O_BINARY, MODE_USER_RW)
+    try:
+        if check:
+            check(fd)
+        deadline = time.monotonic() + timeout
+        waited = False
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise LockTimeoutErr(
+                    f"{path}: another Surf Scoter command held the lock for more than "
+                    f"{timeout:g} seconds"
+                )
+            if not waited and on_wait:
+                on_wait()
+            waited = True
+            time.sleep(poll)
+        try:
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
+if is_windows():
+    import msvcrt  # Windows only.
+
+    def _try_lock(fd: int) -> bool:
+        """Take the lock on the open file without waiting; False if another holds it."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        except OSError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+else:
+    import fcntl  # POSIX only.
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)

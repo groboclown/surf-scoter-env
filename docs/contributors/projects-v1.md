@@ -548,6 +548,171 @@ I would prefer that the management of the validated projects within the user dir
 
 **Tests:** an archive member that's a symlink or has `..` in its name; a storage file with the wrong owner or mode; two runs updating the index at once.
 
+### Design: the environment id
+
+`NAME-HASH`, where `NAME` is the project directory's name, lower-cased, with each run of characters outside `[a-z0-9-]` turned into one `-`, cut to 32 characters, without a leading or trailing `-` (and `project` if nothing is left), and `HASH` is the first 12 hex digits of the SHA-256 of the project directory's canonical absolute path (as bytes).  For example, `client-3f9a0c17b2e4`.  It's valid as a container name, a host name part and a file name everywhere.
+
+For now only the verified storage uses it, so the Python code works it out.  Using it for the container names and the workspace path is a future task, and moves the calculation into the generator (see [Future Tasks](#naming-by-the-environment-id)).
+
+Case-insensitive file systems (macOS, Windows) can give two spellings of one path, and the canonical path doesn't always fix the case.  The first cut doesn't fold the case; two spellings get two environments, and the user reviews twice.
+
+### Design: the layout
+
+```
+verified-dir/                     0700
+    index.json                    0600  canonical project directory -> environment id
+    lock                          0600  held while anything below changes
+    blobs/                        0700  file contents, by SHA-256, shared by every environment
+        3f/3f9a...                0600
+    ENV-ID/                       0700
+        environment.json          0600  the environment's acceptances
+        acceptances/
+            ACCEPTANCE-ID/        0700
+                accepted.json     0600  the canonical accepted settings
+                suggestion.json   0600  the parsed project file and dev container it was reviewed from
+                review.yaml       0600  the user's verification file, as they left it (step 12)
+```
+
+**Snapshots are a manifest plus blobs.**  A snapshot of the project's files is a manifest: each file's path (relative to `.surf-scoter.d`), its SHA-256, its size, whether it's executable, and for some files a canonical hash (below).  The contents go in `blobs/`, named by their hash.
+
+* Nothing is ever extracted from an archive, so the archive member attacks (`..`, absolute names, links, devices, duplicate names) can't happen; what's left is checking each manifest path before it's used, which is one function.
+* Branch switching keeps many snapshots that differ in a file or two.  Blobs are shared, so each costs one copy of what changed.
+* The manifest's own hash (over its canonical JSON) is the snapshot's id: the lookup key for an earlier acceptance.
+* Restoring a snapshot (step 16 builds from it) copies blobs into a private staging directory, checking each blob's hash as it's read.
+
+**Disk space.**  The store grows with each acceptance: a copy of every project file that changed since the last one.  Container directories can hold large files copied into the image, so this matters.  The tools keep it bounded:
+
+* removing an acceptance removes the blobs nothing else refers to;
+* every write to an environment prunes it: expired acceptances beyond `scoter: values: verified-keep` (default 10) go, oldest first;
+* `scoter` lists the store's size with the accepted projects (step 20), and can prune or revoke them.
+
+[The system configuration file](../system-config-file.md) says where the space goes, and how to reclaim it.
+
+### Design: what's in a snapshot
+
+The project file, and every container directory the dev container builds from, following `parent-builds`, that's inside `.surf-scoter.d`.  Building one:
+
+* reads every file with `O_NOFOLLOW`, checks it with `fstat`, and refuses symlinks, hard links and special files in container directories (the step 1 rules; a hard-linked project file only warns);
+* limits each file and the whole snapshot with `scoter: values: verified-max-file-size` and `verified-max-snapshot-size` (defaults 16 MB and 256 MB).
+
+Container directories outside `.surf-scoter.d` come from `dev-containers-search`, which the user's setup controls, such as the distribution's `containers`.  They're trusted by default, as part of the installation.  `scoter: path-lists: dev-containers-verified` (empty by default) names `dev-containers-search` directories whose containers are snapshotted and reviewed like the project's, for setups that need tighter control.
+
+### Design: telling noise from changes
+
+Hashing bytes means a new comment or blank line asks for a review, and reviews that change nothing train the user to accept without reading.  So each manifest entry has two hashes:
+
+* `sha256`, of the bytes: the blob's name, and what a restore checks.  The snapshot id is made from these, so an exact match is cheap.
+* `canonical`, of the file's meaning, for formats the tools understand.  Comments, blank lines and trailing whitespace don't count.
+
+When no acceptance matches exactly, the lookup tries again on meaning: same paths, same executable bits, and for each file the same `canonical` hash (or `sha256`, for files without one).  A match on meaning carries the acceptance forward: a new acceptance pointing at the new snapshot, with `kind: carried`, the acceptance it came from, and that acceptance's expiry (carrying forward never extends it).  The user gets one line saying so, rather than a review.
+
+The canonical forms:
+
+* **Dockerfiles** (`Dockerfile`, `*.Dockerfile`, `Dockerfile.*`): comment lines and blank lines dropped, and trailing whitespace stripped, except inside heredocs (`RUN <<EOF`), which are kept as written, as their lines are the script.  Parser directives at the top (`# syntax=`, `# escape=`) are kept, and `escape` sets the continuation character.  Indentation is kept: inside a quoted string that spans lines, it's part of the string.
+* **JSON**: parsed and written back with sorted keys and no spaces.  A file with duplicate keys has no canonical hash.
+* **The project file and `dev-env.yaml` files**: Python has no YAML parser, and the tools shouldn't add one.  The generator has already parsed them: the SUC's `project` and `dev-container`.  Their canonical hash is of that data, as canonical JSON.  The snapshot is read after the generator parsed them, so the build (step 16) must check that the snapshot it builds from parses to the same data: run the generator against the staged copy, and compare.
+* **Everything else**: bytes only.
+
+### Design: `environment.json`
+
+```json
+{
+    "$schema": "surf-scoter-verified-environment-1",
+    "id": "client-3f9a0c17b2e4",
+    "project-dir": "/home/user/mono/client",
+    "acceptances": [
+        {
+            "id": "20261020T150405Z-7c1e",
+            "kind": "reviewed",
+            "from": null,
+            "accepted-at": "2026-10-20T15:04:05Z",
+            "expires-at": "2026-11-19T15:04:05Z",
+            "exempt-until": null,
+            "branch": "main",
+            "suggestion": {
+                "id": "sha256:91b0...",
+                "files": {
+                    "project.yaml": {"sha256": "5d1c...", "size": 812, "executable": false, "canonical": "sha256:0aa1..."},
+                    "dev-env/Dockerfile": {"sha256": "aa07...", "size": 2310, "executable": false, "canonical": "sha256:77e2..."},
+                    "dev-env/entry.sh": {"sha256": "c3d9...", "size": 140, "executable": true, "canonical": null}
+                }
+            },
+            "setup": {
+                "id": "sha256:e2f4...",
+                "values": {
+                    "project-files-dir": ".surf-scoter.d",
+                    "dev-containers-search": ["/home/user/mono/client/.surf-scoter.d", "/opt/surf-scoter/containers"],
+                    "dev-containers-verified": [],
+                    "vcs-runs": {"local-clone": ["git", "clone", "..."]},
+                    "gateway": null,
+                    "verified-dir": "/home/user/.config/surf-scoter.d/verified",
+                    "host-command-checks": {}
+                }
+            }
+        }
+    ]
+}
+```
+
+* **The three versions** are `accepted.json` (what the user accepted), the `suggestion` and `suggestion.json` (the project files, and their parsed form, that the user reviewed), and the project's files now, which aren't stored until the next review.  "The project changed X" is a diff of `suggestion` against now; "you changed Y" is a diff of `accepted.json` against the settings worked out from `suggestion.json`.  A denied review stores nothing, so "the last suggestion the user saw" is the last one they accepted.
+* **`setup`** is the step 5 list of setup boundaries, resolved, plus step 4's `host-command-checks` with the lower priority versions the user's checks hide, and the snapshots of `dev-containers-verified` containers.  Its `id` is the hash of `values`' canonical JSON.  A run looks for an acceptance whose `setup.id` matches, and whose `suggestion` matches exactly or on meaning.  For the first cut, any change to these asks for a new review.  Some changes don't affect a project's security, and could be told apart later, though fewer than it seems (a program a check names can be relinked, say).
+* **`kind`** is `reviewed`, `carried` (above) or `blanket`.  A blanket acceptance has no `suggestion` and no `accepted.json`: each run works the settings out from the project's files as they are, and still runs the refusals (step 4) and the setup check, so a gateway change still asks again.
+* **Expiry**: `scoter: values: verified-expiry-days` (default 30) sets a new acceptance's `expires-at`, which the review file can change (step 12).
+* **Several acceptances** cover branch switching.  The newest valid match wins.
+* **`branch`** is a note for the user, read from the project directory, never the workspace.  It isn't part of the match.
+
+`index.json`:
+
+```json
+{
+    "$schema": "surf-scoter-verified-index-1",
+    "environments": {
+        "/home/user/mono/client": {"id": "client-3f9a0c17b2e4"}
+    }
+}
+```
+
+The id comes from the path, so the index is for listing and revoking, and a cross-check: loading an environment checks that the index, the directory name and `environment.json`'s `project-dir` all agree, so a renamed or swapped directory is refused.
+
+### Design: protecting it
+
+* Every directory is `0700` and every file `0600`, owned by the user; every read checks both, with `O_NOFOLLOW` and `fstat`, and refuses a symlink anywhere below `verified-dir`.  On Windows, which has no mode bits, the check is that the files are under the user's profile, and the rest is left to its ACLs.
+* Writes go to a temporary file in the same directory (`mkstemp`), are flushed with `fsync`, and replace the old file with `os.replace`.
+* Every JSON file has a `$schema`, and a size limit when read.
+
+**The lock** is an operating system lock on `verified-dir/lock`, held while anything in the store changes.  The operating system lets it go when the process ends, however it ends, so a crashed run never leaves the store locked, unlike a lock file that exists or doesn't (as `active_env.py` does, which also checks and then writes, so two runs can interleave).  In Python, without a library:
+
+* Open the lock file with `os.open(path, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)`, and check it with `fstat` like any other store file.
+* **POSIX:** `fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)`.  It locks the open file, so two opens of the file conflict even in one process (which makes it testable).  `fcntl.lockf` is the other choice; avoid it, as POSIX record locks are dropped when *any* descriptor for the file closes in the process.
+* **Windows:** `msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)` locks the file's first byte, which works on an empty file.  Unlock it with `msvcrt.LK_UNLCK` before closing.
+* Both, non-blocking, in a loop with a short sleep and a time limit (say 30 seconds), printing once that another `scoter` is updating the store.  Past the limit, fail rather than wait forever.
+* Wrapped as one context manager in `fileutil`, which `active_env.py` should move to too (step 18).
+
+`flock` on a network file system (an NFS home directory) may be emulated, or may only lock against this computer.  The store is per user, so that only matters for one user on two computers at once; the docs mention it.
+
+### Design: the code
+
+A new `surf_scoter_lib/verified` package, in place of `project_auth` (unused so far, and it has bugs: `RecordWindow.from_json_v1` calls `jdata.req_str` without its data, and `ProjectSet.match` throws away its `sorted`):
+
+* `store.py`: the directory, its checks, atomic writes, the index, the blobs;
+* `snapshot.py`: building a manifest from the project's files, the canonical forms, restoring into a staging directory;
+* `records.py`: `environment.json` and acceptances, their validity windows (`RecordWindow`'s logic carries over), the lookup, pruning;
+* `fileutil.exclusive_lock`: the lock.
+
+The generator adds the `scoter: paths: state-dir`, with the same checks as `verified-dir`, and `running-env-config` moves under it.  Nothing calls the store yet; the review (steps 12 to 16) does.
+
+### Completed
+
+* **The package.**  [`verified/store.py`](../../scripts/surf_scoter_lib/verified/store.py) (the environment id, the store's checks, atomic writes, the index, the blobs), [`verified/snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py) (manifests, the canonical forms, taking and restoring snapshots) and [`verified/records.py`](../../scripts/surf_scoter_lib/verified/records.py) (acceptances, the lookup, carrying forward, pruning, the setup values from the SUC).  `project_auth` is gone.
+* **The lock.**  `fileutil.exclusive_lock`, as described above, with `LockTimeoutErr`.
+* **Settings.**  [defaults/setup.yaml](../../defaults/setup.yaml) has `scoter: paths: state-dir` (and `running-env-config` under it), `path-lists: dev-containers-verified`, and `values: verified-expiry-days`, `verified-keep`, `verified-max-file-size` and `verified-max-snapshot-size`.  The generator checks `state-dir` as it does `verified-dir` ([`system.rs`](../../host/src/config/system.rs)).
+* **Docs.**  [The system configuration file](../system-config-file.md#the-verified-store) has the settings, and what the store holds, how much space it takes, and how it's kept bounded.
+* `setup_values` also records the project's `vcs` section name, so a project switching VCS asks again.
+
+The acceptance files (`accepted.json`, `suggestion.json` and `review.yaml`) are only named here: the store writes any file, and steps 12 to 15 decide what goes in them.
+
+**Tests:** in [`s_lib/verified/`](../../scripts/tests/s_lib/verified/), a test file for each module, with a shared `helper.py`; the lock's in [`test_fileutil.py`](../../scripts/tests/s_lib/test_fileutil.py).  The environment id; the lock (a second holder in the same process waits, then gives up; a symlinked lock file); the store (private modes on what it writes, a file or directory with the wrong mode or owner, symlinked files and directories, the size limit, names with `..`, blobs checked on read and removed when unused, the index, two threads registering at once); the canonical forms (Dockerfile comments, continuations, heredocs and directives, JSON with duplicate keys); snapshots (what's in one, noise against changes, symlinks, hard links and FIFOs in a container directory, a symlinked or hard-linked project file, the limits, restoring, manifest paths with `..`, a tampered manifest id); records (validity windows, the lookup order, carrying forward keeping the expiry, pruning, JSON round trips, saving and loading with the cross-checks, the setup values).  In `system.rs`: `state-dir` relative, and in the project.
+
 ## 6. Add dev container parents found by name
 
 A dev container's `parents` can only name a `dir` or `file` by path.  A project's container that builds on one from the installation (such as `dev-env`) can't reach it: a path from `.surf-scoter.d` into the installation isn't portable, and a path to the checkout's own `containers/` is refused unless the checkout is the distribution.  Add a parent found by name through `dev-containers-search`, for example `parents: [{name: dev-env, tag: local-surf-scoter-env/dev-env:build}]`: the first search directory holding `NAME/Dockerfile` (and, when it has one, `NAME/dev-env.yaml`), with the same confinement as the other parents.  This repository's own `.surf-scoter.d/dev-env-container/dev-env.yaml` needs it to run with the self-host copy (see [CONTRIBUTORS.md](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
@@ -706,10 +871,16 @@ Things left dangling because of dependency ordering.  These may be tackled earli
 - Step 4:
   - The checks are only validated and combined.  Nothing applies them to the project's commands yet: that's step 11, and `host-brokered` still finds each command's `program` on the `PATH` rather than through the checks' `command-map` (steps 7, 8 and 10).
   - The project files (secret-looking files) and egress host lists are drafted above, as kinds of their own, for steps 11 and 9.
-  - Step 5 must record, with each acceptance, the lower priority versions of the checks a setup file replaces or removes, so an upgrade that changes one asks for a new review.
   - On Windows, matching `name-patterns` against the real file's name drops its extension, whatever it is, rather than only a `PATHEXT` one.  Revisit with step 10's Windows name decisions.
   - `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
   - The notices only show in `scoter user-setup`.  Decide whether the review (step 14) shows them too.
+- Step 5:
+  - `active_env.py`'s lock checks and then writes, which two runs can interleave, and a crashed run leaves it held.  Move it to `fileutil.exclusive_lock`.
+  - Step 16 builds from a restored snapshot; it must check that the staged copy parses to the same `project` and `dev-container` as the SUC that gave the YAML files their canonical hashes (run the generator against the staged copy and compare).
+  - Step 17 decides when a match on meaning carries an acceptance forward (`EnvironmentRecord.carry_forward`), and how the user is told.
+  - On Windows, the store's owner and mode checks are skipped; the design's "under the user's profile" check isn't written yet.
+  - Case-insensitive file systems: the environment id doesn't fold the path's case.
+  - Any change to the setup values asks for a new review.  Some don't affect a project's security; telling them apart is for step 19.
 
 ## 19. Review the settings format
 
@@ -721,10 +892,13 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 
 ## 20. Put a bow on it
 
-* Allow a timed exemption for working on a project.
-* Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
-* Allow a user to revoke a project's acceptance.
-* Allow a user to list accepted projects, with their expiry and exemptions.
+- Allow a timed exemption for working on a project.
+- Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
+- Allow a user to revoke a project's acceptance.
+- Allow a user to list accepted projects, with their expiry and exemptions.
+- Add a user cache cleanup step.
+- Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
+- Clean up the code to remove references to steps from this document.
 
 
 # Future Tasks
@@ -735,7 +909,16 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 
 Instead of reading another setup file, let the user choose, for a project run, which setup section to use for those parts, from sections their own setup files (or the distribution's) define.  The choice is the user's, recorded with the project's accepted settings, never the project's.
 
-This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.
+This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.  This also applies to the host command blocking rules.
+
+## Naming by the environment id
+
+Step 5 gives each environment an id (the project directory's name and a hash of its canonical path), and uses it for the verified storage.  Use it for the rest of what's named per environment, so more than one `.surf-scoter.d` in a repository can run at once:
+
+* the container names, in place of the `ssh: values: host-prefix` and a reserved suffix;
+* the workspace path, which then moves out of the project, as `${scoter:state-dir}/workspaces/${scoter:environment-id}` (FILE-9).
+
+That needs the generator to work out the id, as a tool-set `${scoter:environment-id}`, with exactly the same result as step 5's Python code (or the Python code to read it from the SUC).  It changes `scoter run`, and the running environments file.
 
 ## Additional declarative prohibitions to include project files and egress hosts
 

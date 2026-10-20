@@ -376,8 +376,8 @@ dev-env:
     paths:
         # Stores the running docker-compose configurations, so that
         # parallel runs can understand how to deal with resource contention.
-        running-env-config: ${scoter:user-dir}/running-env.json
-        running-env-config-lock: ${scoter:user-dir}/running-env.json.lock
+        running-env-config: ${scoter:state-dir}/running-env.json
+        running-env-config-lock: ${scoter:state-dir}/running-env.json.lock
 
         firewall-router: ${scoter:distribution-dir}/containers/firewall-router
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway
@@ -424,6 +424,9 @@ scoter:
         # project may do, so this must be an absolute path outside any project, its workspace
         # and its repository.
         verified-dir: ~/.config/surf-scoter.d/verified
+        # Where the tools keep their own state, such as the running environments.
+        # Like `verified-dir`, an absolute path outside any project.
+        state-dir: ~/.config/surf-scoter.d/state
 
     path-lists:
         # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
@@ -435,6 +438,12 @@ scoter:
         dev-containers-search:
             - ${scoter:project-dir}/${scoter:project-files-dir}
             - ${scoter:distribution-dir}/containers
+        # The `dev-containers-search` directories whose containers are reviewed
+        # like a project's own: copied into `verified-dir` with each acceptance,
+        # and a change to one asks for a new review.  Others are trusted as part
+        # of your installation.  Add `${scoter:distribution-dir}/containers` to
+        # review the distribution's too.
+        dev-containers-verified: []
 
     values:
         # The directory, inside the project directory, that holds the project file and the
@@ -443,4 +452,13 @@ scoter:
         project-files-dir: .surf-scoter.d
         # The project file, in the `project-files-dir`.  It must be a single file name.
         project-file-name: project.yaml
+        # How long an accepted project's settings stay accepted, in days.
+        verified-expiry-days: 30
+        # How many expired acceptances to keep for each project (they let a
+        # review show what changed since); older ones are removed.
+        verified-keep: 10
+        # The largest project file, and the most for all of a project's files,
+        # copied into `verified-dir` with each acceptance, in bytes.
+        verified-max-file-size: 16777216
+        verified-max-snapshot-size: 268435456
         backup-file-extension: .backup

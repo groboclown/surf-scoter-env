@@ -192,7 +192,12 @@ The tools use these sections:
     * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.  A dev container, and every parent it builds on, must be inside the project files directory or one of these directories, so don't list directories a project controls, such as `${scoter:project-dir}` itself.  The default is `${scoter:project-dir}/${scoter:project-files-dir}` and the distribution's `containers` directory.
     * `values: project-files-dir`: the name of the project files directory, which holds the project configuration file and the project's dev containers.  The project directory is the one holding it.  It must be a single directory name; the default is `.surf-scoter.d`.
     * `values: project-file-name`: the name of the project configuration file, in the project files directory.  It must be a single file name; the default is `project.yaml`.
-    * `paths: verified-dir`: where your accepted (verified) project settings are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
+    * `paths: verified-dir`: where your accepted (verified) project settings are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.  See [The verified store](#the-verified-store).
+    * `paths: state-dir`: where the tools keep their own state, such as the running environments (`dev-env: paths: running-env-config`).  It has the same rules as `verified-dir`.  The default is `~/.config/surf-scoter.d/state`.
+    * `path-lists: dev-containers-verified`: the `dev-containers-search` directories whose containers are reviewed like a project's own.  The others (such as the distribution's `containers`) are trusted as part of your installation.  Empty by default; add `${scoter:distribution-dir}/containers` to review the distribution's containers too.
+    * `values: verified-expiry-days`: how long an accepted project's settings stay accepted, in days.  The default is 30.
+    * `values: verified-keep`: how many expired acceptances to keep for each project; older ones are removed.  The default is 10.
+    * `values: verified-max-file-size` and `verified-max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the verified store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.
 
@@ -307,4 +312,17 @@ For `ksh`, this check's `warn` takes the place of `host-bridge: shells`' `refuse
 * A check can only override checks from its own setup file or a lower priority one: the distribution's can't override yours.
 * It can only override checks without `overrides` of their own.
 * Two checks can't override the same check for the same command (or, with `options` or `env`, for the same option or variable): only one can say what the check becomes.  `gen-scoter-uc` reports it as an error, as it does the two above.
+
+## The Verified Store
+
+`scoter: paths: verified-dir` holds the project settings you've accepted, and a copy of the project files you accepted them from: the project file, and the project's container directories (with `dev-containers-verified`, some of the installation's too).  The tools build and run a project from that copy, so what runs is what you reviewed.
+
+The copies take disk space.  Each file is kept once, however many acceptances share it, so each new acceptance costs a copy of the files that changed since the last one; but container directories can hold large files copied into the image.  To keep it bounded:
+
+* Each acceptance expires after `verified-expiry-days`.  Expired acceptances are kept for a while, so a review can show what changed since; past `verified-keep` of them, the oldest are removed, with the files nothing else uses.
+* `verified-max-file-size` and `verified-max-snapshot-size` limit what one acceptance can copy.
+
+Everything in it must belong to you, with no access for anyone else (directories `0700`, files `0600`), and contain no symlinks; the tools refuse to read it otherwise.  On Windows, which has no file modes, that's left to your user profile's permissions.
+
+The tools lock the store while they change it, so two `scoter` commands can't interleave their changes.  If `verified-dir` is on a network file system (such as an NFS home directory), the lock may only work between commands on the same computer.
 

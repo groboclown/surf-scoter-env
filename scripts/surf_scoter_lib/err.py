@@ -17,5 +17,9 @@ class ActiveEnvErr(ConfigErr):
     """The active environment file has an issue."""
 
 
-class ProjectAuthorizationFormatErr(ConfigErr):
-    """The authorized project format file had an error."""
+class VerifiedStoreErr(ConfigErr):
+    """The verified (accepted) project settings store has a problem."""
+
+
+class LockTimeoutErr(SurfScoterErr):
+    """Another command held a lock for too long."""

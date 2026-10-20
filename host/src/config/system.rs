@@ -104,6 +104,9 @@ pub const CWD: &str = "cwd";
 /// the setup files, not the tool; it decides what a project may do, so it
 /// must be absolute and outside the project.
 pub const VERIFIED_DIR: &str = "verified-dir";
+/// Where the tools keep their own state, such as the running environments.
+/// Like `verified-dir`, it must be absolute and outside the project.
+pub const STATE_DIR: &str = "state-dir";
 /// The root of the repository holding the project, found by `scoter` from
 /// the setup's VCS sections and given to the generator (`--vcs-root`).
 pub const VCS_ROOT: &str = "vcs-root";
@@ -681,10 +684,17 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             }
         }
     }
-    // The accepted project settings decide what a project may do, so they
-    // can't be kept where the project, or the container, could change them.
-    if let Some(dir) = config.get_path(SCOTER_SECTION, VERIFIED_DIR) {
-        let setting = format!("`{SCOTER_SECTION}:{VERIFIED_DIR}` {}", dir.display());
+    // The accepted project settings decide what a project may do, and the
+    // state says which environments run where, so neither can be kept where
+    // the project, or the container, could change them.
+    for (key, what) in [
+        (VERIFIED_DIR, "the accepted project settings are"),
+        (STATE_DIR, "the tools' state is"),
+    ] {
+        let Some(dir) = config.get_path(SCOTER_SECTION, key) else {
+            continue;
+        };
+        let setting = format!("`{SCOTER_SECTION}:{key}` {}", dir.display());
         if !dir.is_absolute() {
             errors.push(ConfigError::new(
                 None,
@@ -695,9 +705,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             location_errors.push(ConfigError::new(
                 None,
                 "",
-                format!(
-                    "{setting} is in the project (`{name}`); the accepted project settings are never kept in a project"
-                ),
+                format!("{setting} is in the project (`{name}`); {what} never kept in a project"),
             ));
         }
     }
@@ -2689,6 +2697,31 @@ mod tests {
         assert_eq!(
             errors,
             [": `scoter:verified-dir` relative/v must be an absolute path"]
+        );
+
+        // The state directory is checked the same way.
+        let load_with_state = |state: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!("{PROJECT_FILES_SETUP}  paths:\n    state-dir: {state}\n"),
+            );
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_with(&options, env).map_err(messages)
+        };
+        assert!(load_with_state(&outside).is_ok());
+        assert_eq!(
+            load_with_state("./state").unwrap_err(),
+            [format!(
+                ": `scoter:state-dir` {} is in the project (`scoter:project-dir`); the tools' state is never kept in a project",
+                project_dir.join("state").display()
+            )]
+        );
+        assert_eq!(
+            load_with_state("relative/s").unwrap_err(),
+            [": `scoter:state-dir` relative/s must be an absolute path"]
         );
     }
 
