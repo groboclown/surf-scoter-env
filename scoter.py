@@ -1,4 +1,4 @@
-#!/usr/sbin/env python3
+#!/usr/bin/env python3
 """The surf-scoter user front-end.
 
 This parses the configuration setting arguments, processes them through the
@@ -322,6 +322,37 @@ def list_sub_commands(config: DictJsonData, script_dir: str | None) -> list[str]
     return ret
 
 
+def sub_command_prefix(config: DictJsonData, cmd_file: Path) -> list[str]:
+    """The start of the command line that runs the sub-command script 'cmd_file'.
+
+    It's the setup's `python` `runs: sub-command`, with its `{x:script}` the
+    script.  The universal configuration file and the sub-command name and
+    arguments go after it.  The interpreter is the setup's `python`
+    `programs: exec`, as found when the configuration was made.
+    """
+    template = _opt_lookup(config, "resolved", "python", "runs", "sub-command")
+    if template is None:
+        raise ConfigErr(
+            "No Python interpreter to run the sub-command with: the setup's "
+            "`python` `runs: sub-command` has no value.  Check that `python` "
+            "`programs: exec` names an interpreter that's installed."
+        )
+    if not isinstance(template, list):
+        raise ConfigErr("Required python/runs/sub-command to be a command in the configuration.")
+    parts = [part for part in template if isinstance(part, str)]
+    if not parts or len(parts) != len(template):
+        raise ConfigErr("Required python/runs/sub-command to be a command in the configuration.")
+    if "{x:script}" not in parts:
+        raise ConfigErr("The setup's `python` `runs: sub-command` must include `{x:script}`.")
+    cmd = [str(cmd_file) if part == "{x:script}" else part for part in parts]
+    if not os.path.isabs(cmd[0]):
+        raise ConfigErr(
+            "The setup's `python` `runs: sub-command` must start with the interpreter "
+            f"as an absolute path; found '{cmd[0]}'."
+        )
+    return cmd
+
+
 def run_sub_command(
     config: DictJsonData,
     argv: Sequence[str],
@@ -338,14 +369,14 @@ def run_sub_command(
         print("Run with 'help' for a full list of commands.", file=sys.stderr)
         return 1
 
+    # Checked before the configuration is saved, so a problem leaves no file.
+    prefix = sub_command_prefix(config, cmd_file)
     config_file = save_to_tmp(config)
-
-    py_exe = sys.executable
+    cmd_args = [*prefix, config_file, *argv]
 
     # Change execution over the sub-command.
-    cmd_args = [py_exe, str(cmd_file), config_file, *argv]
-    print(cmd_args)
-    os.execv(py_exe, cmd_args)  # nosec: B606  # We vetted the command and arguments.
+    # print(cmd_args)  # for debugging
+    os.execv(cmd_args[0], cmd_args)  # nosec: B606  # We vetted the command and arguments.
     print(f"Failed to start sub-command {argv[0]} at {cmd_file}.", file=sys.stderr)
     return 127
 
@@ -449,7 +480,11 @@ def main(argv: Sequence[str]) -> int:
         json.dump(config, sys.stdout)
         return 0
 
-    return run_sub_command(config, [sub_cmd, *sub_cmd_args], args.sub_cmd_dir)
+    try:
+        return run_sub_command(config, [sub_cmd, *sub_cmd_args], args.sub_cmd_dir)
+    except ConfigErr as err:
+        print(f"Configuration error: {err}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

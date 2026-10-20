@@ -272,20 +272,25 @@ Update the [defaults/setup.yaml](../../defaults/setup.yaml) file to now have the
 * The dev container, and every `parents` `dir` and `file` entry in a `dev-env.yaml`, must resolve (following symlinks) inside the project's `.surf-scoter.d` or one of the `dev-containers-search` directories.  The search list comes only from the user's and the installation's setup files, so it's user-trusted; the setup file warns against listing directories a project controls.
 * Decide whether the installation's own container directories (such as `dev-env`) are fingerprinted, or trusted as part of the installation.
 * Open the project file without following symlinks (`O_NOFOLLOW`), check with `fstat` that it's a regular file, and read it with a size limit.
-* The `allowed-domains` setup entry stays until the gateway step (step 8) replaces it.  It still reads `.surf-scoter/allowed-domains.txt`, so a project that keeps its list in `.surf-scoter.d` (as this repository does) gets an empty allowlist until then; see step 8.
-* **Remaining:** a dev container's `parents` can only name a `dir` or `file` by path.  A project's container that builds on one from the installation (such as `dev-env`) can't reach it: a path from `.surf-scoter.d` into the installation isn't portable, and a path to the checkout's own `containers/` is refused unless the checkout is the distribution.  Add a parent found by name through `dev-containers-search`, for example `parents: [{name: dev-env, tag: local-surf-scoter-env/dev-env:build}]`: the first search directory holding `NAME/Dockerfile` (and, when it has one, `NAME/dev-env.yaml`), with the same confinement as the other parents.  This repository's own `.surf-scoter.d/dev-env-container/dev-env.yaml` needs it to run with the self-host copy (see [CONTRIBUTORS.md](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
+* The `allowed-domains` setup entry stays until the gateway step (step 9) replaces it.  It still reads `.surf-scoter/allowed-domains.txt`, so a project that keeps its list in `.surf-scoter.d` (as this repository does) gets an empty allowlist until then; see step 9.
 
 Discovery walks up from the current directory to find `.surf-scoter.d`.  Until the VCS root detection exists (step 3), it stops at the current directory or `--project-dir`; after that, it stops at the VCS root.  A given `--project-dir` replaces the current directory (it's the `${scoter:cwd}` value), so the search never falls back to the directory the tool ran in.
 
 Double check that the [SUC generator](../../host/src/bin/gen-scoter-uc.rs) follows those paths.
 
-**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository; a `name` parent found in the second search directory, missing from all of them, or found through a symlink that leads outside them.
+**Tests:** a symlink or FIFO in place of the project file; a `parents: dir` that points outside `.surf-scoter.d`; a `.surf-scoter.d` planted in a directory above the repository (once discovery walks up, in step 3).
 
 ## 2. Register Python as a program
 
 The setup file needs to register the Python executable as a runnable program.
 
-This will allow adding the distribution script directory files as part of the execution path.  It means rethinking how the [scoter script](../../scoter.py) find the Python executable - what's there works and is fine, but maybe it should instead pull from the registered python executable; this will allow for a `.venv` directory with installed libraries for the `main_*.py` scripts, if we think they need them.
+This will allow adding the distribution script directory files as part of the execution path.  with this, the [scoter script](../../scoter.py) finds the Python executable through this path, rather than reusing the default Python interpreter.
+
+Done: [defaults/setup.yaml](../../defaults/setup.yaml) has a `python` section, with `programs: exec` (default `python3`) and `runs: sub-command` (default `${exec} -E -s {x:script}`).  [`scoter.py`](../../scoter.py) starts sub-commands with that command, not `sys.executable`, and stops with an error when the interpreter isn't found.  `-E` keeps a project's `PYTHONPATH` (say, from a `.envrc`) and other `PYTHON*` variables away from the scripts, and `-s` the user's site-packages.
+
+The interpreter is a program the setup files name, so a `./` value (relative to the project directory) or one inside the project would run project-controlled code on the host.  The same holds for every `programs` entry.  `scoter user-setup` now checks for this ([`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py)): it reports, and fails on, any `programs` value written as `./...`, referring to a project location (`${scoter:project-dir}`, `${scoter:cwd}` and the like), or a relative path with a directory in it; any program found inside the project directory, the project files directory, the workspace or the repository; and any relative or empty `PATH` entry.
+
+Still open: that's a check the user runs, not one the tools enforce.  `scoter run` should run the same check before it starts anything, and step 11's path checks for host commands (directories others can write to, version manager shims) should cover the setup's programs too.
 
 ## 3. Change VCS to discover the root directory.
 
@@ -344,7 +349,7 @@ These should be stored in JSON formats so that Python can easily read it.  In or
 For the fingerprinting and diff'ing of files, this implies keeping the full text of the project setup file and all used container directories (following the dev-env.yaml file parent DAG).  I recommend a tar.gz store.
 
 * Refuse symlinks, hard links and special files when building the archive.  Never extract it with the default `tarfile` behavior; use `filter="data"`, or read members without extracting.
-* Store three versions: the accepted data, the last project suggestion the user saw, and the current suggestion.  The diff step (step 16) needs all three.
+* Store three versions: the accepted data, the last project suggestion the user saw, and the current suggestion.  The diff step (step 17) needs all three.
 
 I started a little of the implementation in the [auth_project_file.py](../../scripts/surf_scoter_lib/project_auth/auth_project_file.py) file, but it needs improvements.  I also wonder about the need to store fingerprints if the whole files are stored, though fingerprinting the Dockerfiles and the setup file by looking at the content rather than the whole file may be helpful.  Fingerprints still earn their place as a lookup key: storing several accepted snapshots keyed by the fingerprint of the suggestion lets a branch switch find an earlier acceptance without reading every archive.
 
@@ -357,7 +362,7 @@ Record the setup the review was made under.  The accepted data is only right for
 * `scoter: values: project-files-dir`;
 * `scoter: path-lists: dev-containers-search`;
 * the VCS section's `runs` for the project's `vcs` (`local-clone`, `fetch-changes-into`, `show-fetch-changes`, `merge-changes`);
-* the gateway the egress rules were accepted for (step 8);
+* the gateway the egress rules were accepted for (step 9);
 * `scoter: paths: verified-dir` itself, so a moved store can't quietly start empty, or be swapped for another.
 
 Protect the storage:
@@ -367,20 +372,26 @@ Protect the storage:
 
 To keep in mind:
 
-1. The user may want to blanket authorize the directory, regardless of changes (they'd still need to perform the "git fetch" process manually).  This would cover use cases where the user creates a private project that never gets contributions from others.  A blanket authorization skips the review only: path resolution, the refused lists (step 4) and a new review on a gateway change (step 8) still apply.
+1. The user may want to blanket authorize the directory, regardless of changes (they'd still need to perform the "git fetch" process manually).  This would cover use cases where the user creates a private project that never gets contributions from others.  A blanket authorization skips the review only: path resolution, the refused lists (step 4) and a new review on a gateway change (step 9) still apply.
 2. The user may switch between branches that have different project setups.  This may mean each branch has its own separate user configuration, or the user has just one.  In either case, this shouldn't mean the user needs to re-authorize changes when they change branches, if the branch hasn't made changes.  The fingerprint-keyed snapshots above handle this, limited by each snapshot's expiry.
 
 I would prefer that the management of the validated projects within the user directory remain in the Python code.  I may revisit this decision later.
 
 **Tests:** an archive member that's a symlink or has `..` in its name; a storage file with the wrong owner or mode; two runs updating the index at once.
 
-## 6. Update the project file format
+## 6. Add dev container parents found by name
+
+A dev container's `parents` can only name a `dir` or `file` by path.  A project's container that builds on one from the installation (such as `dev-env`) can't reach it: a path from `.surf-scoter.d` into the installation isn't portable, and a path to the checkout's own `containers/` is refused unless the checkout is the distribution.  Add a parent found by name through `dev-containers-search`, for example `parents: [{name: dev-env, tag: local-surf-scoter-env/dev-env:build}]`: the first search directory holding `NAME/Dockerfile` (and, when it has one, `NAME/dev-env.yaml`), with the same confinement as the other parents.  This repository's own `.surf-scoter.d/dev-env-container/dev-env.yaml` needs it to run with the self-host copy (see [CONTRIBUTORS.md](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
+
+**Tests:** a `name` parent found in the second search directory; one missing from all of them; one found through a symlink that leads outside them; a `name` parent alongside `dir` and `file` parents, in build order.
+
+## 7. Update the project file format
 
 Change around the project file format schema to include the new features - egress registration and VCS details.
 
 This will affect the schema, the [universal file document](universal-configuration-file.md), and the SUC generator.  The generator will include this file's contents in a new wrapped area, "current-project-setup", and it will no longer directly be used to construct the "host-brokered" section.
 
-Land this step together with step 7, or keep the old way of building "host-brokered" behind a flag until step 7 is done, so the main branch always works.
+Land this step together with step 8, or keep the old way of building "host-brokered" behind a flag until step 8 is done, so the main branch always works.
 
 The schema enforces:
 
@@ -395,7 +406,7 @@ Decide whether `${section:key}` and `@NAME@` references are frozen at acceptance
 
 **Tests:** duplicate keys; an alias bomb; a `program` with each refused form; `methods` on a `tls` rule; a non-ASCII hostname.
 
-## 7. Update the SUC generator to also pull in the user's verified project settings
+## 8. Update the SUC generator to also pull in the user's verified project settings
 
 Add another CLI option to the SUC generator to read from the user's verified project settings, and integrate the results into the SUC file.  At this point, the "host-brokered" section will become valid again.
 
@@ -409,7 +420,7 @@ From this step on, the SUC is security-critical: whoever can write it decides wh
 * Pass sub-commands its path, never its contents through the environment, and remove it when the run ends.
 * Decide what `scoter-host` checks again when it loads the SUC.  At least: the file's owner and mode, that its project and dev container locations are still where the accepted settings say, and that the accepted settings it carries match the ones in `verified-dir` (by fingerprint), so an old or edited SUC can't stand in for a review.
 
-## 8. Add a default section for the network gateway settings
+## 9. Add a default section for the network gateway settings
 
 With the addition of the egress setup, the network gateway translation of those settings to the one used by the container become important.  Most likely, this will fork off to a script in the scripts directory that will manage the implementation-specific translation.  The settings will also need to include a list of mount mappings for the generated file (would need to be ingested by the docker-compose section).  First cut will limit the output to a single file.
 
@@ -423,7 +434,7 @@ This will also need a method to read those settings and report on what it can an
 
 **Tests:** `methods` on a `tls` rule; a rule for port 22; a listed hostname that resolves to `169.254.169.254` or a private address; a gateway change after acceptance.
 
-## 9. Update `scoter-host` to run accepted executables
+## 10. Update `scoter-host` to run accepted executables
 
 The host bridge (Rust) needs to change to match:
 
@@ -433,7 +444,7 @@ The host bridge (Rust) needs to change to match:
 
 **Tests:** a handshake name that isn't accepted; a relative `PATH` entry on the host; an executable removed after acceptance.
 
-## 10. Add the verification checks library
+## 11. Add the verification checks library
 
 A Python library, used by the verify and run scripts, that runs the checks from the design using the lists from step 4:
 
@@ -447,7 +458,7 @@ Each finding carries a severity (refuse or warn) and an explanation for the gene
 
 **Tests:** `mytool -> /usr/bin/env`; a shim; a program in a directory others can write to; a symlink in a container directory; a `.env` file in a container directory.
 
-## 11. Establish a user verification file format
+## 12. Establish a user verification file format
 
 When verifying a project directory, the user will need an easy to use file format.  As the rest of the scoter files use YAML, I think this should also be in YAML format.
 
@@ -465,15 +476,15 @@ Ideas:
 - Include the gateway the egress rules are accepted for.
 - Generated comments start with a fixed prefix (for example `#scoter:`), so they can be regenerated and kept apart from the user's own notes.  This means storing the user's version of this file, and not just keep the parsed data as JSON.
 
-## 12. Add the user verification file format parser
+## 13. Add the user verification file format parser
 
 Parsing the user verification file requires YAML parsing, which we currently only parse through the SUC generator.  It makes sense to allow this to be an additional input file passed to the SUC generator as another input file format.  It would output into the SUC in the same way as the verified project settings.
 
-The same parsing rules as step 6 apply.  After parsing, the checks library (step 10) runs on the result before anything is stored: paths the user typed get the same path checks as resolved ones, and the refused lists still apply.
+The same parsing rules as step 7 apply.  After parsing, the checks library (step 11) runs on the result before anything is stored: paths the user typed get the same path checks as resolved ones, and the refused lists still apply.
 
 A missing piece here is the fingerprint parts of the project directory.  However, that may not be included in the file, based on its design in part 5 above.
 
-## 13. Add the main_verify.py script
+## 14. Add the main_verify.py script
 
 Add in a script that can process the user-directory verified storage and construct the items for the user to verify.
 
@@ -485,19 +496,19 @@ The code that constructs the pieces for verification should go into a library fo
 
 **Tests:** a value containing a newline and `# reviewed: safe`; bidirectional override and zero-width characters; terminal escape sequences.
 
-## 14. Add the use / deny / edit prompt
+## 15. Add the use / deny / edit prompt
 
 `main_verify.py` presents the verification file and asks the user to use it as-is, deny it, or edit it.
 
 * Create the file with `mkstemp` in a directory only the user can read.  After editing, open it without following symlinks and read it once.
 * Use `VISUAL`, then `EDITOR`, started with the temporary directory as its working directory, not the project.
-* After the editor exits, parse and check the file again (step 12) and ask again.  Never store a file that fails.
+* After the editor exits, parse and check the file again (step 13) and ask again.  Never store a file that fails.
 * Pressing Enter without a choice denies.
 * Without a terminal, refuse to prompt and fail.
 
 **Tests:** the temporary file replaced by a symlink while the editor is open; an edit that adds a refused program; no terminal.
 
-## 15. Add verification handling in main_run.py
+## 16. Add verification handling in main_run.py
 
 The main_run.py script should then consume the verification section from the SUC, and use the above library to determine if the verification applies to the current settings.
 
@@ -507,13 +518,13 @@ In the first cut, the run script will not allow re-validation, but instead will 
 
 **Tests:** a change to `.surf-scoter.d` after verification and before the build; an expired acceptance.
 
-## 16. Add diff verify to main_verify.py script
+## 17. Add diff verify to main_verify.py script
 
 Add in the capability for the main_verify.py script to perform a diff if the directory changed.
 
 Use the three stored versions (step 5) to show what the project changed separately from what the user changed, and show only those differences in the verification file.
 
-## 17. Final bow
+## 18. Final bow
 
 - Allow a timed exemption for working on a project.
 - Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
@@ -529,4 +540,4 @@ Use the three stored versions (step 5) to show what the project changed separate
 
 Instead of reading another setup file, let the user choose, for a project run, which setup section to use for those parts, from sections their own setup files (or the distribution's) define.  The choice is the user's, recorded with the project's accepted settings, never the project's.
 
-This also bears on the accepted egress rules: they were reviewed for one gateway (step 8), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.
+This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.

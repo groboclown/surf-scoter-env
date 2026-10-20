@@ -86,10 +86,25 @@ class UserConfig:
         return self.__req_str("resolved", section, "values", key)
 
     def active_location(self, name: str) -> Path | None:
-        """Read an active location path."""
-        val = self.__opt_str("active-config-locations", name)
+        """Read an active location path; None when it isn't set.
+
+        The generator writes every location, with null for the ones not set.
+        """
+        locations = self._config.get("active-config-locations")
+        if locations is None:
+            return None
+        if not isinstance(locations, dict):
+            raise ConfigErr(
+                "bad universal configuration file: active-config-locations: expected a mapping"
+            )
+        val = locations.get(name)
         if val is None:
             return None
+        if not isinstance(val, str):
+            raise ConfigErr(
+                f"bad universal configuration file: active-config-locations / {name}: "
+                f"expected string, found {type(val)}"
+            )
         return Path(val)
 
     def require_active_location(self, name: str) -> Path:
@@ -193,6 +208,38 @@ class UserConfig:
         for path in self.__req_list_keys("project", "commands"):
             ret.append(self.__req_str(*path, "command"))
         return ret
+
+    def setup_programs(self) -> list[tuple[str, str, str, str]]:
+        """Every setup file's `programs` entries, as written.
+
+        Each is (file, section, key, value), highest priority file first.
+        """
+        ret: list[tuple[str, str, str, str]] = []
+        for file_path in self.__req_list_keys("setup", "files"):
+            file = self.__req_str(*file_path, "file")
+            for section_path in self.__req_dict_keys(*file_path, "sections"):
+                section = str(section_path[-1])
+                for key_path in self.__req_dict_keys(*section_path, "programs"):
+                    value = self.__req_str(*key_path)
+                    ret.append((file, section, str(key_path[-1]), value))
+        return ret
+
+    def resolved_program(self, section: str, key: str) -> str | None:
+        """The program found for a `programs` entry; None if it wasn't found.
+
+        The generator writes null for a program it didn't find.
+        """
+        val: jdata.JsonData = self._config
+        for part in ("resolved", section, "programs", key):
+            if not isinstance(val, dict):
+                return None
+            val = val.get(part)
+        if val is None or isinstance(val, str):
+            return val
+        raise ConfigErr(
+            f"bad universal configuration file: resolved / {section} / programs / {key}: "
+            f"expected string, found {type(val)}"
+        )
 
     def save(self, outfile: str | Path) -> None:
         """Save the current configuration to the given file."""

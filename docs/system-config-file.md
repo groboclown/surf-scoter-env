@@ -160,6 +160,9 @@ The tools use these sections:
 * `docker`: the container tool.
     * `programs: exec`: the program; defaults to `docker`.
     * `runs: broker`: how `scoter-host` starts the broker inside the development container.  It defaults to `${exec} exec -i {x:container} {x:broker}`, where `{x:container}` is the container name and `{x:broker}` is the `broker-bin` from the container's `dev-env.yaml`.  It must not ask for a TTY.
+* `python`: the interpreter that runs the tool's sub-commands (the distribution's `bin/main_*.py` scripts).
+    * `programs: exec`: the interpreter, normally `python3`.  Point it at a virtual environment's interpreter, such as `${scoter:distribution-dir}/.venv/bin/python`, to give the scripts installed libraries.  It runs on your computer with your privileges, so never point it into a project.
+    * `runs: sub-command`: how the tool starts a sub-command script: normally `${exec} -E -s {x:script}`.  `{x:script}` is the script, and the tool adds the universal configuration file, the sub-command name and its arguments after it.  It must start with the interpreter; `-E` ignores the `PYTHON*` environment variables (which a project could set when you enter its directory) and `-s` your user site-packages.
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
     * `paths: home`: your SSH directory, normally `~/.ssh`.

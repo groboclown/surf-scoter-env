@@ -41,6 +41,22 @@ docker:
         image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
 
+# The Python interpreter that runs the sub-command scripts (the distribution's
+# `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
+# virtual environment's interpreter, such as
+# `${scoter:distribution-dir}/.venv/bin/python`.
+# SECURITY: the interpreter runs on your host with your privileges; never point
+# it into a project.
+python:
+    programs:
+        exec: python3
+    runs:
+        # How scoter starts a sub-command script; scoter adds the universal
+        # configuration file, the sub-command name and its arguments after it.
+        # `-E` ignores the PYTHON* environment variables (a project's `.envrc`
+        # could set PYTHONPATH, say), and `-s` ignores your user site-packages.
+        sub-command: ${exec} -E -s {x:script}
+
 # Information for the workspace clone.
 workspace:
     paths:
