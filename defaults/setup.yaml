@@ -64,7 +64,7 @@ git-vcs:
         # mapping), and could rewrite objects in your real repository behind
         # already-reviewed hashes.  See FILE-2 in
         # docs/security/files-attack-vectors.md.
-        local-clone: ${exec} clone --no-local ${scoter:project-dir} {x:workspace-dir}
+        local-clone: ${exec} clone --no-local --depth 4 ${scoter:project-dir} {x:workspace-dir}
         fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
         fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
@@ -80,7 +80,7 @@ git-vcs:
 # Default for no vcs - stored as simple files.
 # TODO create a "file vcs" python script in the install directory to handle these mechanisms.
 #      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
-#      support easier.
+#      support easier.  It also leads to allowing an ignore-file.
 file-vcs:
     programs:
         cp: cp
