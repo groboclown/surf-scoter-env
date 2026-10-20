@@ -263,6 +263,58 @@ fn name_problem(name: &str, pattern: bool) -> Option<String> {
     if pattern && !pattern_is_closed(name) {
         return Some(format!("'{name}' has a `[` without its `]`"));
     }
+    if !pattern && let Some(problem) = windows_name_problem(name) {
+        return Some(problem);
+    }
+    None
+}
+
+/// Why `name` can't be a command name, if it can't: the rules for a
+/// project's `command` and `program`, which name a program rather than
+/// give its path.  Not empty, `.` or `..`; no `/` or `\`; ASCII without
+/// spaces or control characters; no leading `-`; and nothing Windows reads
+/// as more than a file name (see `windows_name_problem`).
+pub(crate) fn command_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Some(format!("'{name}' is not a command name"));
+    }
+    if name.contains(['/', '\\']) {
+        return Some(format!(
+            "'{name}' is a path; give the program's name, which the host finds by name (through your setup's `command-map`, or the `PATH`)"
+        ));
+    }
+    if name.starts_with('-') {
+        return Some(format!("'{name}' can't start with `-`"));
+    }
+    if !plain_ascii(name) {
+        return Some(format!(
+            "'{name}' must be ASCII, without spaces or control characters"
+        ));
+    }
+    windows_name_problem(name)
+}
+
+/// The Windows device names: a file name that is one of these, with or
+/// without an extension, names the device instead.
+const WINDOWS_DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+
+/// Why Windows would read `name` as more than a file name, if it would: a
+/// `:` (a drive, as in `C:aws`, or a stream, as in `aws:stream`), or a
+/// device name (`NUL`, `COM1`, `nul.txt` and the like, in any case).
+fn windows_name_problem(name: &str) -> Option<String> {
+    if name.contains(':') {
+        return Some(format!(
+            "'{name}' can't have a `:`; Windows reads it as a drive or a stream"
+        ));
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered = ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    });
+    if numbered || WINDOWS_DEVICES.contains(&stem.as_str()) {
+        return Some(format!("'{name}' is a Windows device name"));
+    }
     None
 }
 
@@ -1070,6 +1122,35 @@ mod tests {
         assert!(!pattern_matches("python*", "Python"));
         assert!(pattern_is_closed("a[bc]d"));
         assert!(!pattern_is_closed("a[bc"));
+    }
+
+    #[test]
+    fn command_names() {
+        for good in ["aws", "aws-build", "python3.12", "a_b", "x.exe"] {
+            assert_eq!(command_name_problem(good), None, "{good}");
+        }
+        let problem = |name: &str| command_name_problem(name).unwrap();
+        assert!(problem("").contains("is not a command name"));
+        assert!(problem(".").contains("is not a command name"));
+        assert!(problem("..").contains("is not a command name"));
+        assert!(problem("/usr/bin/aws").contains("is a path"));
+        assert!(problem("bin\\aws").contains("is a path"));
+        assert!(problem("-rf").contains("can't start with `-`"));
+        assert!(problem("a b").contains("must be ASCII"));
+        assert!(problem("caf\u{e9}").contains("must be ASCII"));
+        assert!(problem("a\tb").contains("must be ASCII"));
+        assert!(problem("C:aws").contains("can't have a `:`"));
+        assert!(problem("aws:stream").contains("can't have a `:`"));
+        for device in ["NUL", "nul", "con.txt", "COM1", "lpt9.exe", "AUX", "CONIN$"] {
+            assert!(
+                problem(device).contains("is a Windows device name"),
+                "{device}"
+            );
+        }
+        // Not devices: longer names, and COM without a digit.
+        for good in ["console", "COM", "COM10", "nullable", "auxiliary"] {
+            assert_eq!(command_name_problem(good), None, "{good}");
+        }
     }
 
     #[test]

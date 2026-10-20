@@ -23,6 +23,12 @@ container:
   dev-container-path: ./dev-env
   # Or, instead, the name of one found in the system configuration's `scoter` `path-lists: dev-containers-search`.
   # dev-container: dev-env
+# optional; the network destinations the container needs (see "Egress")
+egress:
+  - host: registry.npmjs.org
+    protocol: tls
+  - host: '*.pkg.dev'
+    protocol: tls
 # optional; the environment of every host command (see "Host command environment")
 env:
   set:
@@ -31,9 +37,9 @@ env:
 commands:
   - command: aws
     args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd}}]
-  - command: aws
-    # optional; the executable to run on the host (default: `command`, found on the PATH)
-    program: /usr/local/bin/aws
+  - command: aws-build
+    # optional; the name of the program to run on the host (default: `command`)
+    program: aws
     args: [codebuild, start-build, --project-name, {any: {}}]
     # optional; added to the top-level `env`
     env:
@@ -66,9 +72,21 @@ The container directory, and every parent its `dev-env.yaml` builds on, must be 
 
 The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 
+## Egress
+
+`egress` lists the network destinations the development container needs.  The rules say what's needed, not how a gateway provides it; the gateway enforces what it can of each rule, and refuses to start with a rule it can't enforce.  Each rule has:
+
+* `host` (required): a host name, such as `registry.npmjs.org`, or `*.` and a host name for its subdomains (`*.pkg.dev` allows `us.pkg.dev`, not `pkg.dev` itself).  Lower-case letters, digits and `-`, in at least two parts.  No IP addresses.  Write a name with non-ASCII letters in its `xn--` form, so the file says exactly what the review shows (a Cyrillic `а` in `github.com` can't hide).  A bare `*` is refused, and so is `*.` on a top-level domain (`*.com`), or on a domain where anyone can have a name (`*.github.io`, `*.co.uk`; the system configuration's `scoter: value-lists: egress-refused-wildcards`).
+* `protocol` (required):
+    * `tls`: a TLS connection, such as HTTPS, that the gateway sees only the host name of.
+    * `https`: HTTP over TLS that the gateway looks inside, so it can enforce `methods`.  It needs a gateway that does that; the standard one doesn't.
+    * `http`: plain HTTP.  Anyone between you and the host can read and change it, downloads included, so prefer `tls`.
+* `port` (optional): 443 for `tls` and `https`, 80 for `http`, by default.
+* `methods` (optional, `http` and `https` only): the HTTP methods allowed, in upper case, such as `[GET, HEAD]`.  A `GET` still carries data in its address and headers, so this limits what the container can do (no uploads, say); it doesn't stop it sending data out.
+
 ## Host commands
 
-`command` is the name the client was run as in the container.  A request is allowed by the first entry with that command whose `args` match (and whose current working directory (`cwd`) allows the client's directory, when the entry has one).
+`command` is the name the client was run as in the container.  `program` is the name of the program the host runs (by default, the same as `command`).  Both are names, never paths: the host finds the program by its name, through your system configuration's [`command-map`](system-config-file.md#host-command-checks), or else on its `PATH`.  A name is ASCII without spaces or control characters, doesn't start with `-`, and has no `/`, `\` or `:`, and isn't a Windows device name (such as `NUL` or `COM1`).  A request is allowed by the first entry with that command whose `args` match (and whose current working directory (`cwd`) allows the client's directory, when the entry has one).
 
 Without `cwd`, the process runs in a new temporary directory.  With `cwd`, it runs in the host directory matching the client's working directory.  That directory must be inside the workspace once symlinks are resolved, and its resolved path must match one of the `allowed-workspace-dirs` patterns:
 
@@ -131,8 +149,10 @@ A command's `env` adds its `allow`, `drop` and `error` patterns to the top-level
 * `NAME` is letters, digits, `_`, `(` and `)`.  Any other `@` is kept as it is (so `me@example.com` is fine), and `@@` stands for `@`.
 * YAML can't start a plain value with `@`, so quote such values: `HOME: '@HOME@'`.
 
-So a command that needs the host's `HOME` or `PATH` must be given them with `set`, as in the example above.  The command itself is still found on the host's `PATH`, whatever its environment says.
+So a command that needs the host's `HOME` or `PATH` must be given them with `set`, as in the example above.  The command's program is found by its name on the host (see [Host commands](#host-commands)), whatever its environment says.
 
 ## Keys
 
 Keys are kebab-case.  Unknown keys are rejected, so typos don't silently fall back to defaults.
+
+No key or value can have a control character, such as a newline or a tab: none of them needs one, and a newline in a value could look like another line when you review the file.  Duplicate keys are refused, and so are YAML merge keys (`<<`), which the tools don't apply.  YAML aliases (`*name`) are expanded, within a limit, so a file can't grow into something huge.

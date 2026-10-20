@@ -25,6 +25,8 @@ DictJsonData = dict[str, JsonData]
 DISTRIBUTION_BIN_DIR = "bin"
 SCOTER_HOST_EXEC = "scoter-host"
 GEN_SCOTER_UC_EXEC = "gen-scoter-uc"
+# The SUC's record of the project file, as written.
+CURRENT_PROJECT_SETUP = "current-project-setup"
 SUB_CMD_PREFIX = "main_"
 SUB_CMD_SUFFIX = ".py"
 VCS_SECTION_SUFFIX = "-vcs"
@@ -72,6 +74,7 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
             settings,
         )
         check_project_vcs(settings, vcs_root)
+        warn_unreviewed_commands(settings)
 
     # Overwrite the bin dir if it was explicitly set.
     active_locs = settings["active-config-locations"]
@@ -180,7 +183,7 @@ def check_project_vcs(settings: DictJsonData, vcs_root: tuple[Path, str] | None)
     A VCS with a `runs: find-root` must be the one whose root was found.
     One without (such as `file`) can be used anywhere.
     """
-    vcs = _opt_lookup(settings, "project", "vcs")
+    vcs = _opt_lookup(settings, CURRENT_PROJECT_SETUP, "vcs")
     if not isinstance(vcs, str):
         return
     rooted = {name for name, _ in vcs_find_root_commands(settings)}
@@ -195,6 +198,26 @@ def check_project_vcs(settings: DictJsonData, vcs_root: tuple[Path, str] | None)
             f"The project's `vcs` is '{vcs}', but it's in a {vcs_root[1]} "
             f"repository ({vcs_root[0]})."
         )
+
+
+def warn_unreviewed_commands(settings: DictJsonData) -> None:
+    """Warn that the project's host commands run without a review.
+
+    Until the review of a project's settings exists (steps 8 to 16 of
+    docs/contributors/projects-v1.md), the generator builds the commands
+    from the project file as it is (`--unreviewed-project-commands`).
+    """
+    commands = settings.get("host-brokered")
+    if not isinstance(commands, list) or not commands:
+        return
+    names = sorted({str(c.get("command")) for c in commands if isinstance(c, dict)})
+    print(
+        "Warning: the project's host commands ("
+        + ", ".join(names)
+        + ") come straight from its project file; Surf Scoter can't review them yet.  "
+        "Read the file's `commands` before you run it.",
+        file=sys.stderr,
+    )
 
 
 def reprocess_config(
@@ -330,6 +353,9 @@ def generate_config(
         args.extend(("--universal", universal_file))
     if no_setup_search:
         args.append("--no-setup-search")
+    # Until the accepted settings feed `host-brokered` (step 8), it comes from
+    # the project file, unreviewed; see `warn_unreviewed_commands`.
+    args.append("--unreviewed-project-commands")
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,

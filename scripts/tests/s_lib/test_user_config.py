@@ -33,3 +33,16 @@ class UserConfigTest(unittest.TestCase):
             self.assertEqual("some-vcs", config.get_vcs_section_for("some"))
         finally:
             os.unlink(file)
+
+    def test_project(self) -> None:
+        """The project file is read from `current-project-setup`, the commands from `host-brokered`."""
+        config = user_config.UserConfig({
+            "current-project-setup": {"vcs": "git", "commands": [{"command": "ignored"}]},
+            "host-brokered": [{"command": "aws"}, {"command": "git"}, {"command": "aws"}],
+        })
+        self.assertEqual(config.project_str("vcs"), "git")
+        self.assertEqual(config.project_bridge_commands(), ["aws", "git"])
+        empty = user_config.UserConfig({"current-project-setup": None, "host-brokered": []})
+        self.assertIsNone(empty.project_str("vcs"))
+        self.assertEqual(empty.project_bridge_commands(), [])
+

@@ -38,7 +38,7 @@
 //!     args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd}}]
 //!   - command: aws
 //!     # optional; the executable to run on the host (default: `command`, found on the PATH)
-//!     program: /usr/local/bin/aws
+//!     program: aws
 //!     args: [codebuild, start-build, --project-name, {any: {}}]
 //!     # optional; added to the project's `env`
 //!     env:
@@ -115,7 +115,9 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use yaml_serde::Value;
 
+use super::egress::{self, EgressRule};
 use super::environment::{EnvPlan, EnvRules};
+use super::host_commands::command_name_problem;
 use super::pattern::WorkspacePattern;
 use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
@@ -129,6 +131,8 @@ pub struct ProjectConfig {
     /// How the project's files are kept, for the `scoter` script: any
     /// non-empty text.
     pub vcs: Option<String>,
+    /// The network destinations the dev container needs.
+    pub egress: Vec<EgressRule>,
     /// The environment rules for every command.
     pub env: EnvRules,
     /// The allowed forms of commands, in match order.  Anything not listed is refused.
@@ -176,7 +180,9 @@ pub(crate) type ParsedCommands = (Commands, Vec<Value>);
 pub struct CommandRule {
     /// The name the client was run as.
     pub command: String,
-    /// The host executable; defaults to `command`, found on the host's PATH.
+    /// The host program's name; defaults to `command`.  In the project file
+    /// it's a name the host looks up; in the universal configuration file's
+    /// `host-brokered`, the executable found.
     #[serde(default)]
     pub program: Option<String>,
     /// One token per argument.
@@ -360,6 +366,8 @@ fn parse_checked(
             None,
         );
     }
+    let mut problems: Vec<(String, String)> = Vec::new();
+    text_problems(&value, "", &mut problems);
     let raw = value.clone();
     let map = match value {
         Value::Mapping(map) => map,
@@ -383,11 +391,11 @@ fn parse_checked(
         }
     };
 
-    let mut problems: Vec<(String, String)> = Vec::new();
     let mut container = None;
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
     let mut env = EnvRules::default();
+    let mut egress_rules = Vec::new();
     let mut vcs = None;
     let mut has_container = false;
     for (key, value) in map {
@@ -397,8 +405,10 @@ fn parse_checked(
                 container = parse_container(value, &mut problems);
             }
             Some("commands") => {
-                (commands, raw_commands) = parse_commands(value, "commands", &mut problems)
+                (commands, raw_commands) = parse_commands(value, "commands", &mut problems);
+                check_names(&commands, &mut problems);
             }
+            Some("egress") => egress_rules = egress::parse(value, &mut problems),
             Some("env") => env = parse_env(value, &mut problems),
             Some("vcs") => match value {
                 Value::String(text) if !text.is_empty() => vcs = Some(text),
@@ -419,6 +429,7 @@ fn parse_checked(
             path: path.to_path_buf(),
             container: container.clone(),
             vcs,
+            egress: egress_rules,
             env,
             commands,
             raw_commands,
@@ -430,6 +441,84 @@ fn parse_checked(
             .collect()),
     };
     (result, container)
+}
+
+/// Every string and key in the file without control characters (none of
+/// the fields needs one, and a newline in a value could look like more
+/// lines on the review), and no `<<` keys: YAML merge keys, which the tools
+/// don't apply, so they'd only mislead.
+fn text_problems(value: &Value, key: &str, problems: &mut Vec<(String, String)>) {
+    let control = |text: &str| text.chars().any(char::is_control);
+    match value {
+        Value::String(text) if control(text) => problems.push((
+            key.to_string(),
+            "has a control character, such as a newline; none of the fields needs one".to_string(),
+        )),
+        Value::Sequence(items) => {
+            for (i, item) in items.iter().enumerate() {
+                text_problems(item, &index_key(key, i), problems);
+            }
+        }
+        Value::Mapping(map) => {
+            for (name, item) in map {
+                let shown = name
+                    .as_str()
+                    .map_or_else(|| format!("{name:?}"), str::to_string);
+                let at = child_key(key, &shown);
+                match name.as_str() {
+                    Some("<<") => problems.push((
+                        at,
+                        "is a YAML merge key, which isn't supported; write the values out"
+                            .to_string(),
+                    )),
+                    Some(name) if control(name) => problems.push((
+                        at,
+                        "the key has a control character, such as a newline".to_string(),
+                    )),
+                    _ => text_problems(item, &at, problems),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Each command's `command` and `program` are names, never paths.
+fn check_names(commands: &Commands, problems: &mut Vec<(String, String)>) {
+    for (i, rule) in commands.iter().enumerate() {
+        let key = index_key("commands", i);
+        if let Some(problem) = command_name_problem(&rule.command) {
+            problems.push((child_key(&key, "command"), problem));
+        }
+        if let Some(problem) = rule.program.as_deref().and_then(command_name_problem) {
+            problems.push((child_key(&key, "program"), problem));
+        }
+    }
+}
+
+impl ProjectConfig {
+    /// The `egress` rules whose wildcard is on one of `refused` (the setup's
+    /// `scoter: value-lists: egress-refused-wildcards`: public suffixes and
+    /// shared hosting, where `*.` would allow names anyone can register).
+    pub fn wildcard_problems(&self, refused: &[String]) -> Vec<ConfigError> {
+        self.egress
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rule)| {
+                let domain = rule.wildcard_domain()?;
+                refused.iter().any(|r| r == domain).then(|| {
+                    ConfigError::new(
+                        Some(&self.path),
+                        &format!("{}.host", index_key("egress", i)),
+                        format!(
+                            "'{}' would allow every name under `{domain}`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)",
+                            rule.host
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option<ContainerRef> {
@@ -670,6 +759,7 @@ mod tests {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
                 vcs: None,
+                egress: Vec::new(),
                 env: EnvRules::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
@@ -910,7 +1000,7 @@ mod tests {
             "  - command: aws\n",
             "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd}}]\n",
             "  - command: aws\n",
-            "    program: /usr/local/bin/aws\n",
+            "    program: aws2\n",
             "    args: [codebuild, start-build, --project-name, {any: {}}]\n",
         ))
         .unwrap();
@@ -933,7 +1023,7 @@ mod tests {
                 },
                 CommandRule {
                     command: "aws".to_string(),
-                    program: Some("/usr/local/bin/aws".to_string()),
+                    program: Some("aws2".to_string()),
                     args: vec![
                         lit("codebuild"),
                         lit("start-build"),
@@ -1087,8 +1177,135 @@ mod tests {
         let text =
             format!("{CONTAINER}commands:\n  - command: aws\n    program: ''\n    args: []\n");
         assert_eq!(error(&text), "commands[0]: program must not be empty");
-        // Any non-empty program is accepted, including Windows paths.
-        parse_text(&format!("{CONTAINER}commands:\n  - command: aws\n    program: 'C:\\aws\\aws.exe'\n    args: []\n")).unwrap();
+        // A name, never a path.
+        let with = |program: &str| {
+            format!(
+                "{CONTAINER}commands:\n  - command: aws\n    program: '{program}'\n    args: []\n"
+            )
+        };
+        parse_text(&with("aws2")).unwrap();
+        for path in [
+            "/usr/local/bin/aws",
+            "C:\\aws\\aws.exe",
+            "./aws",
+            "C:aws",
+            "NUL",
+        ] {
+            let message = error(&with(path));
+            assert!(
+                message.starts_with("commands[0].program: "),
+                "{path}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_command_name_rules() {
+        let with = |command: &str| {
+            format!("{CONTAINER}commands:\n  - command: '{command}'\n    args: []\n")
+        };
+        for (command, problem) in [
+            ("-x", "can't start with `-`"),
+            ("a b", "must be ASCII"),
+            ("caf\u{e9}", "must be ASCII"),
+            ("aws:stream", "can't have a `:`"),
+            ("con.exe", "is a Windows device name"),
+        ] {
+            let message = error(&with(command));
+            assert!(
+                message.starts_with("commands[0].command: ") && message.contains(problem),
+                "{command}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_without_control_characters() {
+        let text =
+            format!("{CONTAINER}vcs: \"git\\n# reviewed: safe\"\nenv:\n  set:\n    \"A\\tB\": x\n");
+        let errors = parse_text(&text).unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                "vcs: has a control character, such as a newline; none of the fields needs one",
+                "env.set.A\tB: the key has a control character, such as a newline",
+            ]
+        );
+    }
+
+    #[test]
+    fn yaml_hazards() {
+        // Merge keys aren't applied, so they're refused rather than misread.
+        let merged =
+            format!("{CONTAINER}x-base: &base {{HOME: /h}}\nenv:\n  set:\n    <<: *base\n");
+        let errors = parse_text(&merged).unwrap_err();
+        assert!(
+            errors.contains(
+                &"env.set.<<: is a YAML merge key, which isn't supported; write the values out"
+                    .to_string()
+            ),
+            "{errors:?}"
+        );
+        // Duplicate keys, at any depth.
+        let errors = parse_text(&format!("{CONTAINER}vcs: git\nvcs: hg\n")).unwrap_err();
+        assert!(
+            errors[0].contains("duplicate entry with key \"vcs\""),
+            "{errors:?}"
+        );
+        let errors =
+            parse_text(&format!("{CONTAINER}env:\n  set:\n    A: x\n    A: y\n")).unwrap_err();
+        assert!(
+            errors[0].contains("duplicate entry with key \"A\""),
+            "{errors:?}"
+        );
+        // An alias bomb stops at the library's expansion limit.
+        let mut bomb = String::from("a: &a [x, x, x, x, x, x, x, x, x]\n");
+        for (name, prev) in [
+            ("b", "a"),
+            ("c", "b"),
+            ("d", "c"),
+            ("e", "d"),
+            ("f", "e"),
+            ("g", "f"),
+        ] {
+            let refs = vec![format!("*{prev}"); 9].join(", ");
+            bomb.push_str(&format!("{name}: &{name} [{refs}]\n"));
+        }
+        let errors = parse_text(&format!("{CONTAINER}{bomb}")).unwrap_err();
+        assert!(
+            errors[0].contains("repetition limit exceeded"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn parse_egress() {
+        let config = parse_text(&format!(
+            "{CONTAINER}egress:\n  - {{host: '*.pkg.dev', protocol: tls}}\n  - {{host: a.example.com, protocol: https, methods: [GET]}}\n"
+        ))
+        .unwrap();
+        assert_eq!(config.egress.len(), 2);
+        let refused = |list: &[&str]| -> Vec<String> {
+            config
+                .wildcard_problems(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .into_iter()
+                .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
+                .collect()
+        };
+        assert!(refused(&["github.io"]).is_empty());
+        assert_eq!(
+            refused(&["github.io", "pkg.dev"]),
+            [
+                "egress[0].host: '*.pkg.dev' would allow every name under `pkg.dev`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+            ]
+        );
+        let errors = parse_text(&format!(
+            "{CONTAINER}egress:\n  - {{host: '*.com', protocol: tls}}\n  - {{host: x.example.com, protocol: tls, methods: [GET]}}\n"
+        ))
+        .unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with("egress[0].host: "), "{errors:?}");
+        assert!(errors[1].starts_with("egress[1].methods: "), "{errors:?}");
     }
 
     // ---- cwd ----

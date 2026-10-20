@@ -133,6 +133,8 @@ pub const PROGRAMS: &str = "programs";
 pub const RUNS: &str = "runs";
 /// A section's lists of file locations.
 pub const PATH_LISTS: &str = "path-lists";
+/// A section's lists of plain values.
+pub const VALUE_LISTS: &str = "value-lists";
 /// A section's plain values.
 pub const VALUES: &str = "values";
 /// A section's checks on the project's host commands.
@@ -245,6 +247,7 @@ enum Entry {
     Program(String),
     Run(RunValue),
     PathList(Vec<String>),
+    ValueList(Vec<String>),
     Value(ScalarValue),
     /// A `host-commands` check; `None` (null) removes a lower priority one.
     HostCommand(Option<CheckRecord>),
@@ -258,6 +261,7 @@ impl Entry {
             Entry::Program(_) => PROGRAMS,
             Entry::Run(_) => RUNS,
             Entry::PathList(_) => PATH_LISTS,
+            Entry::ValueList(_) => VALUE_LISTS,
             Entry::Value(_) => VALUES,
             Entry::HostCommand(_) => HOST_COMMANDS,
         }
@@ -370,6 +374,8 @@ pub struct SectionRecord {
     pub runs: BTreeMap<String, RunValue>,
     #[serde(default)]
     pub path_lists: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub value_lists: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub values: BTreeMap<String, ScalarValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -445,6 +451,8 @@ pub struct Section {
     pub runs: BTreeMap<String, Option<CommandTemplate>>,
     /// The lists of file locations.
     pub path_lists: BTreeMap<String, Option<Vec<PathBuf>>>,
+    /// The lists of plain values.
+    pub value_lists: BTreeMap<String, Option<Vec<String>>>,
     /// The plain values.
     pub values: BTreeMap<String, ScalarValue>,
     /// The `host-commands` checks; removed (null) ones aren't here.
@@ -1014,6 +1022,9 @@ impl SetupFile {
                     Entry::Run(run) => {
                         section.runs.insert(key, run.clone());
                     }
+                    Entry::ValueList(list) => {
+                        section.value_lists.insert(key, list.clone());
+                    }
                     Entry::PathList(list) => {
                         section.path_lists.insert(key, list.clone());
                     }
@@ -1062,6 +1073,12 @@ fn file_from_record(
                     .path_lists
                     .iter()
                     .map(|(k, v)| (k, Entry::PathList(v.clone()))),
+            )
+            .chain(
+                groups
+                    .value_lists
+                    .iter()
+                    .map(|(k, v)| (k, Entry::ValueList(v.clone()))),
             )
             .chain(
                 groups
@@ -1166,7 +1183,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
             _ => {
                 errors.push(error(
                     name,
-                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands` mappings"
+                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings"
                         .to_string(),
                 ));
                 continue;
@@ -1179,6 +1196,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                 Some(PROGRAMS) => PROGRAMS,
                 Some(RUNS) => RUNS,
                 Some(PATH_LISTS) => PATH_LISTS,
+                Some(VALUE_LISTS) => VALUE_LISTS,
                 Some(VALUES) => VALUES,
                 Some(HOST_COMMANDS) => HOST_COMMANDS,
                 _ => {
@@ -1187,7 +1205,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                         .map_or_else(|| format!("{group:?}"), str::to_string);
                     errors.push(error(
                         &child_key(name, &shown),
-                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`"
+                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
                             .to_string(),
                     ));
                     continue;
@@ -1241,6 +1259,22 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                     }
                     (PATH_LISTS, _) => {
                         errors.push(error(&at, "must be a list of paths".to_string()));
+                        continue;
+                    }
+                    (VALUE_LISTS, Value::Sequence(items)) => {
+                        let mut list = Vec::new();
+                        for (i, item) in items.iter().enumerate() {
+                            match scalar_text(item) {
+                                Ok(text) => list.push(text),
+                                Err(message) => {
+                                    errors.push(error(&index_key(&at, i), message.to_string()))
+                                }
+                            }
+                        }
+                        Entry::ValueList(list)
+                    }
+                    (VALUE_LISTS, _) => {
+                        errors.push(error(&at, "must be a list of values".to_string()));
                         continue;
                     }
                     (HOST_COMMANDS, _) => match host_commands::parse(value.clone(), &at) {
@@ -1486,6 +1520,17 @@ impl SystemConfig {
                             }
                         }
                     }
+                    Entry::ValueList(entries) => {
+                        for (i, entry) in entries.iter().enumerate() {
+                            let mut stack = vec![(name.clone(), key.clone())];
+                            if let Err(failure) =
+                                expander.value_list_entry(name, key, i, entry, &mut stack)
+                                && !failure.no_value()
+                            {
+                                add(self.failure_error(failure, file, &index_key(&at, i)));
+                            }
+                        }
+                    }
                     Entry::HostCommand(None) => {}
                     Entry::HostCommand(Some(check)) => {
                         if let Err(failure) = expander.check_locations(name, key, check)
@@ -1644,7 +1689,7 @@ impl SystemConfig {
         match self.entry(section, key) {
             None if is_location(section, key) => Err(unset_location(section, key)),
             None => Err(format!("unknown reference {reference}")),
-            Some(Entry::Run(_) | Entry::PathList(_)) => {
+            Some(Entry::Run(_) | Entry::PathList(_) | Entry::ValueList(_)) => {
                 Err(format!("{reference} is a list; it can't be used here"))
             }
             Some(Entry::HostCommand(_)) => Err(check_reference(section, key)),
@@ -1700,6 +1745,22 @@ impl SystemConfig {
                 .iter()
                 .map(|parts| PathBuf::from(command::render_parts(parts)))
                 .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A `value-lists` list, expanded; empty if unset or it has no value.
+    pub fn value_list(&self, section: &str, key: &str) -> Vec<String> {
+        if !matches!(self.entry(section, key), Some(Entry::ValueList(_))) {
+            return Vec::new();
+        }
+        let no_values = Values::new();
+        let no_missing = Missing::new();
+        match self
+            .expander(&no_values, &Fallbacks::new(), &no_missing)
+            .resolve(section, key, &None, &mut Vec::new())
+        {
+            Ok(Resolved::List(items)) => items.iter().map(|p| command::render_parts(p)).collect(),
             _ => Vec::new(),
         }
     }
@@ -1831,6 +1892,7 @@ impl SystemConfig {
             programs,
             runs: BTreeMap::new(),
             path_lists: BTreeMap::new(),
+            value_lists: BTreeMap::new(),
             values: BTreeMap::new(),
             host_commands: BTreeMap::new(),
             missing: missing_programs,
@@ -1860,6 +1922,15 @@ impl SystemConfig {
                         _ => None,
                     };
                     section.path_lists.insert(key.clone(), list);
+                }
+                Entry::ValueList(_) => {
+                    let list = match resolve(VALUE_LISTS, key)? {
+                        Some(Resolved::List(items)) => {
+                            Some(items.iter().map(|p| command::render_parts(p)).collect())
+                        }
+                        _ => None,
+                    };
+                    section.value_lists.insert(key.clone(), list);
                 }
                 Entry::Value(ScalarValue::String(_)) => {
                     let value = match resolve(VALUES, key)? {
@@ -2098,6 +2169,14 @@ impl Expander<'_> {
                 }
                 Ok(Resolved::List(paths))
             }
+            Entry::ValueList(entries) => {
+                let mut items = Vec::new();
+                for (i, entry) in entries.iter().enumerate() {
+                    let found = self.value_list_entry(section, key, i, entry, stack)?;
+                    items.extend(found.into_iter().map(|text| vec![Part::Text(text)]));
+                }
+                Ok(Resolved::List(items))
+            }
         }
     }
 
@@ -2138,6 +2217,39 @@ impl Expander<'_> {
             index_key(&group_key(PATH_LISTS, key), i),
         ));
         self.location_entry(section, &origin, entry, stack)
+    }
+
+    /// Entry `i` of `section:key`'s `value-lists` list: its values (more than
+    /// one when it's a whole reference to a list).  An entry that needs a
+    /// `scoter` location this run doesn't have is left out.
+    fn value_list_entry(
+        &self,
+        section: &str,
+        key: &str,
+        i: usize,
+        entry: &str,
+        stack: &mut Vec<(String, String)>,
+    ) -> Result<Vec<String>, Failure> {
+        let origin = Some((
+            section.to_string(),
+            index_key(&group_key(VALUE_LISTS, key), i),
+        ));
+        let words = match self.expand_word(section, entry, &origin, stack) {
+            Err(f) if f.kind == FailureKind::UnsetLocation => return Ok(Vec::new()),
+            words => words?,
+        };
+        let mut items = Vec::new();
+        for parts in words {
+            if parts.iter().any(|p| matches!(p, Part::External(_))) {
+                return Err(Failure {
+                    kind: FailureKind::Error,
+                    origin,
+                    message: "value lists can't use `{x:...}` values".to_string(),
+                });
+            }
+            items.push(command::render_parts(&parts));
+        }
+        Ok(items)
     }
 
     /// The `host-commands` check `section:key`'s `command-map` programs and
@@ -2273,7 +2385,7 @@ impl Expander<'_> {
                     Resolved::List(_) => {
                         return Err(here(format!(
                             "`${{{ref_section}:{ref_key}}}` is a list; use it as a whole argument \
-                             in `runs` or a whole entry in `path-lists`"
+                             in `runs` or a whole entry in `path-lists` or `value-lists`"
                         )));
                     }
                 }
@@ -2963,7 +3075,7 @@ mod tests {
                 "a.paths.map: must be a single value, not a list or mapping",
                 "a.paths.none: has no value",
                 "a.runs: must be a mapping of names to values",
-                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`",
+                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`",
                 "a.path-lists.c: must be a list of paths",
                 "a.path-lists.d[1]: must be a path",
                 "a.path-lists.d[2]: must be a path",
@@ -2971,7 +3083,7 @@ mod tests {
                 "a.values.map: must be a single value: text, a number, true/false or null",
                 "a.values.nan: must be a finite number",
                 "a.values.inf: must be a finite number",
-                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands` mappings",
+                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings",
                 "old-paths: must be a section; put lists of paths in a section's `path-lists`",
             ]
         );
@@ -2981,7 +3093,7 @@ mod tests {
     fn shape_old_flat_sections_are_refused() {
         assert_eq!(
             one_error("ssh:\n  home: ~/.ssh\n"),
-            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `values` and `host-commands`"
+            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
         );
     }
 
@@ -3274,9 +3386,9 @@ mod tests {
         assert_eq!(
             errors,
             [
-                "a.values.in-text: `${a:cmd}` is a list; use it as a whole argument in `runs` or a whole entry in `path-lists`",
+                "a.values.in-text: `${a:cmd}` is a list; use it as a whole argument in `runs` or a whole entry in `path-lists` or `value-lists`",
                 "a.runs.loop: values refer to each other in a loop: ${a:loop} -> ${a:loop-list} -> ${a:loop}",
-                "a.paths.p: `${a:dirs}` is a list; use it as a whole argument in `runs` or a whole entry in `path-lists`",
+                "a.paths.p: `${a:dirs}` is a list; use it as a whole argument in `runs` or a whole entry in `path-lists` or `value-lists`",
                 "a.runs.uses-null: `${a:nothing}` is null, so it can't be used here",
             ]
         );
@@ -4314,5 +4426,78 @@ mod tests {
         );
         assert_eq!(config.host_command_file("a", "kept"), Some(dist.as_path()));
         assert_eq!(config.host_command_file("a", "c"), Some(user.as_path()));
+    }
+
+    // ---- value-lists ----
+
+    #[test]
+    fn value_lists_expanded() {
+        let config = load_one(concat!(
+            "a:\n  values:\n    v: one\n  paths:\n    p: /p\n",
+            "  value-lists:\n",
+            "    base: ['${v}', two, 3, true]\n",
+            "    more: ['${base}', 'x-${a:p}', '$${kept}', '${scoter:project-dir}/gone']\n",
+            "    empty: []\n",
+        ))
+        .unwrap();
+        assert_eq!(config.value_list("a", "base"), ["one", "two", "3", "true"]);
+        // A whole reference splices the list in; a location this run
+        // doesn't have leaves its entry out.
+        assert_eq!(
+            config.value_list("a", "more"),
+            ["one", "two", "3", "true", "x-/p", "${kept}"]
+        );
+        assert!(config.value_list("a", "empty").is_empty());
+        assert!(config.value_list("a", "missing").is_empty());
+        let section = config.section("a", &SectionDefaults::default()).unwrap();
+        assert_eq!(
+            section.value_lists["base"].as_deref(),
+            Some(&["one", "two", "3", "true"].map(String::from)[..])
+        );
+    }
+
+    #[test]
+    fn value_lists_errors() {
+        let errors = load_one(concat!(
+            "a:\n  value-lists:\n",
+            "    not-list: text\n",
+            "    nested: [ok, [no], {m: 1}]\n",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                "a.value-lists.not-list: must be a list of values",
+                "a.value-lists.nested[1]: must be a single value, not a list or mapping",
+                "a.value-lists.nested[2]: must be a single value, not a list or mapping",
+            ]
+        );
+        assert_eq!(
+            one_error("a:\n  value-lists:\n    l: [ok, '{x:no}']\n"),
+            "a.value-lists.l[1]: value lists can't use `{x:...}` values"
+        );
+        assert_eq!(
+            one_error("a:\n  value-lists:\n    l: ['${a:nope}']\n"),
+            "a.value-lists.l[0]: unknown reference `${a:nope}`"
+        );
+        assert_eq!(
+            one_error("a:\n  value-lists:\n    l: [x]\n  values:\n    v: 'in ${l}'\n"),
+            "a.values.v: `${a:l}` is a list; use it as a whole argument in `runs` or a whole entry in `path-lists` or `value-lists`"
+        );
+    }
+
+    #[test]
+    fn value_lists_replace_whole() {
+        let dir = TempDir::new();
+        let dist = dir.write(
+            "dist/setup.yaml",
+            "a:\n  value-lists:\n    l: [d1, d2]\n    k: [k]\n",
+        );
+        let user = dir.write("home/setup.yaml", "a:\n  value-lists:\n    l: [u]\n");
+        let config = load_setup(&user, dist.parent(), None, Env::default()).unwrap();
+        assert_eq!(config.value_list("a", "l"), ["u"]);
+        assert_eq!(config.value_list("a", "k"), ["k"]);
+        let record = &config.setup_record().files[0].sections["a"];
+        assert_eq!(record.value_lists["l"], ["u"]);
     }
 }

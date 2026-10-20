@@ -63,6 +63,7 @@ ssh:
 * `programs`: executables, found on the `PATH` (see [Programs](#programs)).
 * `runs`: command patterns (see [Defining Executables](#defining-executables)).
 * `path-lists`: lists of file locations (see [Defining Path Lists](#defining-path-lists)).
+* `value-lists`: lists of plain text (see [Value Lists](#value-lists)).
 * `values`: plain values (see [Plain Values](#plain-values)).
 * `host-commands`: checks on the commands a project may run on your computer (see [Host Command Checks](#host-command-checks)).
 
@@ -78,7 +79,7 @@ What a reference gives depends on the kind of value it refers to:
 
 * `paths`, `programs` and `values` are text, and can be used anywhere.  A `null` value can't be used.  A reference to a program gives the program found (see [Programs](#programs)).
 * `host-commands` checks can't be referred to at all: `${host-bridge:shells}` is an error.
-* `runs` and `path-lists` are lists.  A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
+* `runs`, `path-lists` and `value-lists` are lists.  A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` or `value-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
 
 Referring to a key that isn't set anywhere is an error (except for the `scoter` locations the tool sets; see [below](#the-scoter-section)), as is a set of values that refer to each other in a loop.  You can escape a `${` expression by doubling up the dollars - `$${` becomes `${`; you don't need to double-up a `$` unless it's followed by a `{`.
 
@@ -194,6 +195,7 @@ The tools use these sections:
     * `values: project-file-name`: the name of the project configuration file, in the project files directory.  It must be a single file name; the default is `project.yaml`.
     * `paths: verified-dir`: where your accepted (verified) project settings are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.  See [The verified store](#the-verified-store).
     * `paths: state-dir`: where the tools keep their own state, such as the running environments (`dev-env: paths: running-env-config`).  It has the same rules as `verified-dir`.  The default is `~/.config/surf-scoter.d/state`.
+    * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
     * `path-lists: dev-containers-verified`: the `dev-containers-search` directories whose containers are reviewed like a project's own.  The others (such as the distribution's `containers`) are trusted as part of your installation.  Empty by default; add `${scoter:distribution-dir}/containers` to review the distribution's containers too.
     * `values: verified-expiry-days`: how long an accepted project's settings stay accepted, in days.  The default is 30.
     * `values: verified-keep`: how many expired acceptances to keep for each project; older ones are removed.  The default is 10.
@@ -214,6 +216,20 @@ docker:
             - ./.scoter/compose
             - ${scoter:user-dir}/compose
 ```
+
+## Value Lists
+
+A section's `value-lists` hold lists of plain text: names, patterns, domains.  Unlike `path-lists`, the entries aren't file locations, so `~` and `./` mean nothing special.  Each entry is expanded like a `values` text (`${...}` references, `$${` for `${`), and an entry that's a whole reference to another list puts its items in its place.  Numbers and `true`/`false` become text.  An entry that needs a `scoter` location this run doesn't have is left out, as for `path-lists`.
+
+```yaml
+scoter:
+    value-lists:
+        egress-refused-wildcards:
+            - ${my-lists:company-shared-domains}
+            - github.io
+```
+
+As with `path-lists`, a higher priority file's list replaces the whole list.
 
 ## Plain Values
 

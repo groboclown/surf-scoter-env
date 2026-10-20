@@ -19,6 +19,7 @@
 
 pub mod command;
 pub mod dev_env;
+pub mod egress;
 pub mod environment;
 pub mod host_commands;
 pub mod pattern;
@@ -40,6 +41,15 @@ use crate::universal::ActiveConfigLocations;
 
 /// The `scoter` section's `path-lists` key searched for a `dev-container: NAME`.
 pub const DEV_CONTAINERS_SEARCH: &str = "dev-containers-search";
+
+/// The `scoter` section's `value-lists` key listing the domains an egress
+/// wildcard (`*.`) can't be on.
+pub const EGRESS_REFUSED_WILDCARDS: &str = "egress-refused-wildcards";
+
+/// The project's egress wildcards on a domain the setup refuses them on.
+fn egress_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
+    project.wildcard_problems(&system.value_list(system::SCOTER_SECTION, EGRESS_REFUSED_WILDCARDS))
+}
 
 /// The `scoter` section's `values` key naming the project files directory.
 pub use system::PROJECT_FILES_DIR;
@@ -79,7 +89,7 @@ struct UniversalInput {
     /// The project file and `dev-env.yaml`, as written; only
     /// `load_universal` uses them.
     #[serde(default)]
-    project: Option<serde_json::Value>,
+    current_project_setup: Option<serde_json::Value>,
     #[serde(default)]
     dev_container: Option<serde_json::Value>,
     /// The commands, as they run.
@@ -163,13 +173,13 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     // JSON is YAML, so the contents are read as the files would be.
     let as_yaml = |contents: &serde_json::Value| read::parse_yaml(&contents.to_string());
 
-    let project = match (&universal.project, &active.project_config) {
+    let project = match (&universal.current_project_setup, &active.project_config) {
         (Some(contents), Some(file)) => project::parse(&contents.to_string(), Path::new(file))
             .map_err(|e| errors.extend(e))
             .ok(),
         (None, None) => None,
         _ => {
-            errors.push(mismatch("project", "project-config"));
+            errors.push(mismatch("current-project-setup", "project-config"));
             None
         }
     };
@@ -190,7 +200,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             None
         }
     };
-    if universal.project.is_some() && universal.dev_container.is_none() {
+    if universal.current_project_setup.is_some() && universal.dev_container.is_none() {
         errors.push(ConfigError::new(
             Some(&path),
             "dev-container",
@@ -238,13 +248,16 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         // Commands without any project; a project that's wrong is reported above.
         (None, Ok((commands, _)))
             if !commands.is_empty()
-                && universal.project.is_none()
+                && universal.current_project_setup.is_none()
                 && active.project_config.is_none() =>
         {
             errors.push(mismatch("host-brokered", "project-config"))
         }
         (None, Ok(_)) => {}
         (_, Err(e)) => errors.extend(e),
+    }
+    if let (Some(system), Some(project)) = (&system, &project) {
+        errors.extend(egress_problems(project, system));
     }
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
@@ -389,6 +402,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     // After the dev container, as `env` values can refer to it.
     if let (Some(system), Some(project)) = (&system, &mut project) {
         errors.extend(plan_environments(project, system));
+        errors.extend(egress_problems(project, system));
     }
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
@@ -913,7 +927,8 @@ mod tests {
         let first = load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap();
         assert!(first.project.is_none());
         assert_eq!(first.system.get("a", "local").as_deref(), Some("./here"));
-        let universal = crate::universal::build(&first).unwrap();
+        let universal =
+            crate::universal::build(&first, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
         // The second step adds the project found with the first's help.
@@ -936,7 +951,8 @@ mod tests {
         assert!(second.dev_container.is_some());
 
         // The project given is recorded, most recent first.
-        let universal = crate::universal::build(&second).unwrap();
+        let universal =
+            crate::universal::build(&second, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         assert_eq!(
             universal.loaded_from.project_config,
             [project.display().to_string()]
@@ -989,7 +1005,8 @@ mod tests {
             ..Env::default()
         };
         let first = load_all_with_env(&LoadOptions::default(), env.clone()).unwrap();
-        let universal = crate::universal::build(&first).unwrap();
+        let universal =
+            crate::universal::build(&first, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
         // The user file is gone, and isn't looked for: the record stands in.
@@ -1041,7 +1058,8 @@ mod tests {
         opts.vcs_root = Some(dir.path().join("repo/project/.."));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
-        let universal = crate::universal::build(&config).unwrap();
+        let universal =
+            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         assert_eq!(
             universal.active_config_locations.vcs_root,
             Some(dir.path().join("repo").display().to_string())
@@ -1055,7 +1073,10 @@ mod tests {
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         let first = dir.write(
             "first.json",
-            &crate::universal::to_json(&crate::universal::build(&config).unwrap()),
+            &crate::universal::to_json(
+                &crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED)
+                    .unwrap(),
+            ),
         );
         let again = LoadOptions {
             universal: Some(first.clone()),
@@ -1137,7 +1158,8 @@ mod tests {
         );
 
         // It carries over, unless another project is given.
-        let universal = crate::universal::build(&config).unwrap();
+        let universal =
+            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         let first = dir.write("first.json", &crate::universal::to_json(&universal));
         let again = LoadOptions {
             universal: Some(first.clone()),
@@ -1189,7 +1211,8 @@ mod tests {
             get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
             Some(settings.clone())
         );
-        let universal = crate::universal::build(&config).unwrap();
+        let universal =
+            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
         assert_eq!(
             universal.active_config_locations.dev_container_settings_dir,
             Some(settings.display().to_string())
@@ -1309,7 +1332,9 @@ mod tests {
         );
         let env = testing::home_env(&dir.path().join("home"), env);
         let config = load_all_with_env(&opts, env).unwrap();
-        let json = crate::universal::to_json(&crate::universal::build(&config).unwrap());
+        let json = crate::universal::to_json(
+            &crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap(),
+        );
         let sources = vec![
             dir.path().join("project/.surf-scoter.d/project.yaml"),
             dir.path().join("project/.surf-scoter.d/env/dev-env.yaml"),
@@ -1387,8 +1412,10 @@ mod tests {
             messages(load_universal_with_env(&file, Env::default()).unwrap_err())
         };
         assert_eq!(
-            edit(&|j| j["project"] = serde_json::Value::Null),
-            ["project: goes with `active-config-locations.project-config`, which doesn't match it"]
+            edit(&|j| j["current-project-setup"] = serde_json::Value::Null),
+            [
+                "current-project-setup: goes with `active-config-locations.project-config`, which doesn't match it"
+            ]
         );
         assert_eq!(
             edit(&|j| j["active-config-locations"]["dev-container-path"] = serde_json::Value::Null),
@@ -1399,7 +1426,7 @@ mod tests {
         // The contents are checked as the files would be.
         let errors = edit(&|j| j["dev-container"]["sshd-port"] = serde_json::json!("nope"));
         assert!(errors[0].starts_with("sshd-port: "), "{errors:?}");
-        let errors = edit(&|j| j["project"]["commands"] = serde_json::json!("nope"));
+        let errors = edit(&|j| j["current-project-setup"]["commands"] = serde_json::json!("nope"));
         assert_eq!(errors, ["commands: must be a list of entries"]);
 
         // Without a project, there's none, nor a dev container.
@@ -1409,6 +1436,7 @@ mod tests {
                 &crate::universal::to_json(
                     &crate::universal::build(
                         &load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap(),
+                        &crate::universal::BuildOptions::UNREVIEWED,
                     )
                     .unwrap(),
                 ),

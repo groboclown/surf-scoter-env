@@ -4,7 +4,7 @@
 //!
 //! `resolved` holds every section of the system configuration, `scoter`
 //! included, as its `paths` (file locations), its `programs` (found on the
-//! `PATH`), its `runs` commands, its `path-lists` and its `values`.  A
+//! `PATH`), its `runs` commands, its `path-lists`, `value-lists` and `values`.  A
 //! program that isn't there is `null`, as is every value referring to it.
 //!
 //! Each `runs` command is a list of arguments, the first being the program,
@@ -43,9 +43,13 @@ pub struct Universal {
     pub resolved: BTreeMap<String, UniversalSection>,
     /// Every section's `host-commands` checks, put together.
     pub host_command_checks: Combined,
-    /// The project configuration file, as written.
-    pub project: Option<Json>,
-    /// The project's `commands`, with `program` set to the executable found
+    /// The project configuration file, as written: only a record of the
+    /// project's suggestion, which the review is made from.
+    pub current_project_setup: Option<Json>,
+    /// The commands `scoter-host` runs.  Until the accepted settings feed it
+    /// (step 8 of `docs/contributors/projects-v1.md`), it's empty unless
+    /// `BuildOptions::unreviewed_project_commands` builds it from the
+    /// project's `commands`: each with `program` set to the executable found
     /// on the host, or `null`, and `env` set to the command's whole
     /// environment plan: the project's `env` with the command's added, its
     /// `${section:key}` references expanded.  `@NAME@` is left as written,
@@ -112,12 +116,29 @@ pub struct UniversalSection {
     pub runs: BTreeMap<String, Option<Vec<String>>>,
     /// Lists of file locations, by key.
     pub path_lists: BTreeMap<String, Option<Vec<String>>>,
+    /// Lists of plain values, by key.
+    pub value_lists: BTreeMap<String, Option<Vec<String>>>,
     /// Plain values, by key.
     pub values: BTreeMap<String, ScalarValue>,
 }
 
+/// How to build the universal configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuildOptions {
+    /// Build `host-brokered` from the project's `commands`, unreviewed.  A
+    /// stand-in until the accepted settings feed it (step 8).
+    pub unreviewed_project_commands: bool,
+}
+
+impl BuildOptions {
+    /// `host-brokered` from the project's commands, unreviewed.
+    pub const UNREVIEWED: BuildOptions = BuildOptions {
+        unreviewed_project_commands: true,
+    };
+}
+
 /// Gather the universal configuration from a loaded configuration.
-pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
+pub fn build(config: &FullConfig, options: &BuildOptions) -> Result<Universal, ConfigErrors> {
     let mut errors = Vec::new();
     let system = &config.system;
 
@@ -153,6 +174,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                         programs: found(&section.programs),
                         runs,
                         path_lists,
+                        value_lists: section.value_lists.clone(),
                         values: section.values.clone(),
                     },
                 );
@@ -166,7 +188,11 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
         .unwrap_or_default();
 
     let mut host_brokered = Vec::new();
-    if let Some(project) = &config.project {
+    if let Some(project) = config
+        .project
+        .as_ref()
+        .filter(|_| options.unreviewed_project_commands)
+    {
         for (i, (rule, raw)) in project
             .commands
             .iter()
@@ -190,7 +216,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
         }
     }
 
-    let project = config
+    let current_project_setup = config
         .project
         .as_ref()
         .map(|p| yaml_to_json(&p.raw, &p.path, "", &mut errors));
@@ -219,7 +245,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
         },
         resolved,
         host_command_checks,
-        project,
+        current_project_setup,
         host_brokered,
         dev_container,
         setup: system.setup_record().clone(),
@@ -364,7 +390,7 @@ mod tests {
                 "  - command: aws\n    args: [s3, ls, {any: {prefix: 's3://b/'}}]\n",
                 "    env:\n      allow: ['AWS_*']\n      drop: [AWS_SESSION_TOKEN]\n",
                 "      default: {AWS_REGION: us-east-1}\n",
-                "  - {command: deploy, program: /nonexistent/deploy, args: []}\n",
+                "  - {command: deploy, program: not-installed-deploy, args: []}\n",
             )),
             concat!(
                 "docker:\n  programs:\n    exec: podman\n  runs:\n    build: ${exec} build -t {x:tag} '{x:dir}/a b'\n",
@@ -376,7 +402,7 @@ mod tests {
                 "  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
             ),
         );
-        let universal = build(&config).unwrap();
+        let universal = build(&config, &BuildOptions::UNREVIEWED).unwrap();
         let p = |path: &PathBuf| path.display().to_string();
         assert_eq!(
             universal.active_config_locations.project_config,
@@ -406,6 +432,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect(),
                 path_lists: BTreeMap::new(),
+                value_lists: BTreeMap::new(),
                 values: BTreeMap::new(),
             }
         };
@@ -551,11 +578,14 @@ mod tests {
             json["setup"]
         );
         // The project file, as written, `vcs` included.
-        assert_eq!(json["project"]["vcs"], "git");
-        assert_eq!(json["project"]["container"]["dev-container-path"], "./env");
+        assert_eq!(json["current-project-setup"]["vcs"], "git");
         assert_eq!(
-            json["project"]["commands"][1]["program"],
-            "/nonexistent/deploy"
+            json["current-project-setup"]["container"]["dev-container-path"],
+            "./env"
+        );
+        assert_eq!(
+            json["current-project-setup"]["commands"][1]["program"],
+            "not-installed-deploy"
         );
         assert_eq!(json["host-brokered"][0]["command"], "aws");
         assert_eq!(json["host-brokered"][0]["program"], p(&aws));
@@ -588,7 +618,10 @@ mod tests {
             })
         );
         // The project file keeps them as written.
-        assert_eq!(json["project"]["env"]["set"]["CONF"], "${ssh:config-file}");
+        assert_eq!(
+            json["current-project-setup"]["env"]["set"]["CONF"],
+            "${ssh:config-file}"
+        );
         assert_eq!(
             json["dev-container"]["broker-bin"],
             "/usr/local/bin/scoter-container"
@@ -603,13 +636,16 @@ mod tests {
     fn without_project() {
         let dir = TempDir::new();
         let config = load(&dir, None, "ssh:\n  paths:\n    home: /h/.ssh\n");
-        let json: Json = serde_json::from_str(&to_json(&build(&config).unwrap())).unwrap();
+        let json: Json = serde_json::from_str(&to_json(
+            &build(&config, &BuildOptions::UNREVIEWED).unwrap(),
+        ))
+        .unwrap();
         let active = &json["active-config-locations"];
         assert_eq!(active["project-config"], Json::Null);
         assert!(json.get("project-config").is_none());
         // Kept, though it isn't there.
         assert_eq!(json["resolved"]["ssh"]["paths"]["home"], "/h/.ssh");
-        for group in ["programs", "runs", "path-lists", "values"] {
+        for group in ["programs", "runs", "path-lists", "value-lists", "values"] {
             assert_eq!(json["resolved"]["ssh"][group], Json::Object(Map::new()));
         }
         // Only where the user's setup file was found.
@@ -675,7 +711,7 @@ mod tests {
 
     fn combined(dir: &TempDir, user: &str, dist: &str) -> Result<Combined, Vec<String>> {
         let config = load_setups(dir, user, dist)?;
-        build(&config)
+        build(&config, &BuildOptions::UNREVIEWED)
             .map(|u| u.host_command_checks)
             .map_err(error_texts)
     }
@@ -921,7 +957,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            error_texts(build(&config).unwrap_err()),
+            error_texts(build(&config, &BuildOptions::UNREVIEWED).unwrap_err()),
             [format!(
                 "p.host-commands.c: `tool` runs {}, which is in the project (`scoter:project-dir`); a host command never runs a program from the project",
                 tool_path.display()
@@ -1003,7 +1039,7 @@ mod tests {
             "b:\n  host-commands:\n    d: {action: refuse, reason: r, commands: [sh]}\n    e: null\n",
         )
         .unwrap();
-        let first = build(&config).unwrap();
+        let first = build(&config, &BuildOptions::UNREVIEWED).unwrap();
         let file = dir.write("universal.json", &to_json(&first));
         let env = Env {
             path: Some(dir.path().join("bin").into_os_string()),
@@ -1011,9 +1047,66 @@ mod tests {
         };
         let again = crate::config::load_universal_with_env(&file, env).unwrap();
         assert_eq!(
-            build(&again).unwrap().host_command_checks,
+            build(&again, &BuildOptions::UNREVIEWED)
+                .unwrap()
+                .host_command_checks,
             first.host_command_checks
         );
         assert_eq!(first.setup, again.system.setup_record().clone());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_brokered_needs_the_unreviewed_flag() {
+        let dir = TempDir::new();
+        tool(&dir, "bin/aws");
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        let config = load(
+            &dir,
+            Some(
+                "container:\n  dev-container-path: ./env\ncommands:\n  - {command: aws, args: [s3, ls]}\n",
+            ),
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+        );
+        let reviewed = build(&config, &BuildOptions::default()).unwrap();
+        assert!(reviewed.host_brokered.is_empty());
+        // The project is still there, as a record.
+        assert_eq!(
+            reviewed.current_project_setup.as_ref().unwrap()["commands"][0]["command"],
+            "aws"
+        );
+        let unreviewed = build(&config, &BuildOptions::UNREVIEWED).unwrap();
+        assert_eq!(unreviewed.host_brokered.len(), 1);
+    }
+
+    #[test]
+    fn egress_wildcards_refused_by_the_setup() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\negress:\n  - {host: '*.github.io', protocol: tls}\n  - {host: '*.example.com', protocol: tls}\n",
+        );
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
+        );
+        let options = LoadOptions {
+            project_dir: Some(dir.path().join("proj")),
+            ..LoadOptions::default()
+        };
+        let env = Env {
+            scoter_home: Some(dir.path().join("home")),
+            ..Env::default()
+        };
+        let errors = error_texts(load_all_with_env(&options, env).unwrap_err());
+        assert_eq!(
+            errors,
+            [
+                "egress[0].host: '*.github.io' would allow every name under `github.io`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+            ]
+        );
     }
 }

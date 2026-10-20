@@ -6,7 +6,7 @@
 //!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
-//!                      [--output FILE]
+//!                      [--unreviewed-project-commands] [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
 //! `~/.config`) and the distribution directory's.  They can run any program,
@@ -33,7 +33,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use scoter_host::config::{self, LoadOptions, read};
-use scoter_host::universal;
+use scoter_host::universal::{self, BuildOptions};
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
@@ -42,7 +42,7 @@ const EXIT_USAGE: i32 = 2;
 const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] \
                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
-                     [--output FILE]";
+                     [--unreviewed-project-commands] [--output FILE]";
 
 fn main() {
     std::process::exit(run(std::env::args_os().skip(1)));
@@ -74,6 +74,9 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             println!(
                 "--no-setup-search skips looking for the user's and the install directory's setup files."
             );
+            println!(
+                "--unreviewed-project-commands builds host-brokered from the project's commands, which nobody has reviewed; without it, host-brokered is empty."
+            );
             println!("--output gives the file to write; otherwise, the JSON goes to stdout.");
             return EXIT_OK;
         }
@@ -83,7 +86,8 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let universal = config::load_all(&cli.options).and_then(|config| universal::build(&config));
+    let universal =
+        config::load_all(&cli.options).and_then(|config| universal::build(&config, &cli.build));
     let universal = match universal {
         Ok(u) => u,
         Err(errors) => {
@@ -124,6 +128,7 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
 #[derive(Debug, PartialEq, Eq)]
 struct Cli {
     options: LoadOptions,
+    build: BuildOptions,
     output: Option<PathBuf>,
 }
 
@@ -137,6 +142,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
     let mut no_setup_search = false;
+    let mut unreviewed_project_commands = false;
     let mut output: Option<OsString> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -151,6 +157,13 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
                 return Err(format!("{s} given more than once"));
             }
             no_setup_search = true;
+            continue;
+        }
+        if s == "--unreviewed-project-commands" {
+            if unreviewed_project_commands {
+                return Err(format!("{s} given more than once"));
+            }
+            unreviewed_project_commands = true;
             continue;
         }
         let (name, inline) = match s.split_once('=') {
@@ -189,6 +202,9 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             universal: universal.map(PathBuf::from),
             no_setup_search,
         },
+        build: BuildOptions {
+            unreviewed_project_commands,
+        },
         output: output.map(PathBuf::from),
     }))
 }
@@ -217,6 +233,7 @@ mod tests {
             parse_args(os_args(&[])),
             Ok(Some(Cli {
                 options: LoadOptions::default(),
+                build: BuildOptions::default(),
                 output: None
             })),
         );
@@ -231,6 +248,7 @@ mod tests {
             "/opt/scoter",
             "--universal=first.json",
             "--no-setup-search",
+            "--unreviewed-project-commands",
             "--output=out.json",
         ]));
         assert_eq!(
@@ -245,6 +263,7 @@ mod tests {
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
                 },
+                build: BuildOptions::UNREVIEWED,
                 output: Some(PathBuf::from("out.json")),
             })),
         );

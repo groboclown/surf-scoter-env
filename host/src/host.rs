@@ -547,8 +547,13 @@ mod tests {
                 ..config::system::Env::default()
             };
             let config = config::load_all_with_env(&options, env).unwrap();
-            let json =
-                scoter_host::universal::to_json(&scoter_host::universal::build(&config).unwrap());
+            let json = scoter_host::universal::to_json(
+                &scoter_host::universal::build(
+                    &config,
+                    &scoter_host::universal::BuildOptions::UNREVIEWED,
+                )
+                .unwrap(),
+            );
             let path = self.project.with_file_name(format!(
                 "universal-{with_project}-{}.json",
                 workspace.is_some()

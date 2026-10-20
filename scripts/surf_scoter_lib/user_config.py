@@ -11,6 +11,8 @@ from .err import ConfigErr
 
 # The few hard-coded items.
 VCS_SECTION_SUFFIX = "-vcs"
+# The SUC's record of the project file, as written.
+CURRENT_PROJECT_SETUP = "current-project-setup"
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
@@ -196,17 +198,21 @@ class UserConfig:
         return ret
 
     def project_str(self, *key: jdata.JsonPathPart) -> str | None:
-        """Get the project key."""
-        val = self.__opt_str("project", *key)
+        """Get a key of the project file, as written (the SUC's `current-project-setup`)."""
+        if self._config.get(CURRENT_PROJECT_SETUP) is None:
+            return None
+        val = self.__opt_str(CURRENT_PROJECT_SETUP, *key)
         if val is None:
             return None
         return str(val)
 
     def project_bridge_commands(self) -> list[str]:
-        """Get the list of bridge commands."""
+        """The names of the commands the host runs for the container (`host-brokered`), once each."""
         ret: list[str] = []
-        for path in self.__req_list_keys("project", "commands"):
-            ret.append(self.__req_str(*path, "command"))
+        for path in self.__req_list_keys("host-brokered"):
+            name = self.__req_str(*path, "command")
+            if name not in ret:
+                ret.append(name)
         return ret
 
     def setup_programs(self) -> list[tuple[str, str, str, str]]:
