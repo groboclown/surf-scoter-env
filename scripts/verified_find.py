@@ -13,6 +13,7 @@ import json
 import sys
 from collections.abc import Sequence
 
+from surf_scoter_lib import UserConfig
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import lookup
 
@@ -32,7 +33,7 @@ def main(argv: Sequence[str]) -> int:
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        found = lookup.find(suc)
+        found = lookup.find(UserConfig(suc))
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
         return 1

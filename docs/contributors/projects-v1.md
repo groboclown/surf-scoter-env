@@ -959,6 +959,18 @@ Each finding carries a severity (refuse or warn) and an explanation for the gene
 
 **Tests:** `mytool -> /usr/bin/env`; a shim; a program in a directory others can write to; a symlink in a container directory; a `.env` file in a container directory.
 
+Completed: [`checks.py`](../../scripts/surf_scoter_lib/checks.py), `check_project(config)` (a `UserConfig`, whose accessors read the universal file, with `jdata`'s typed lookups for the setup's combined checks; a badly formed file is a `ConfigErr`), giving a `Report`: how each command's program resolved, and the findings, each with a severity (`refuse`, `warn`, or `note` for what the review shows without judging), a key in the project file's terms (`commands[0].args[1]`, `egress[2]`, `env/Dockerfile`), an explanation, and the setup checks it came from.
+
+* **Program resolution:** each command's `program` (or `command`) through the setup's combined `command-map`, or else the `PATH`'s absolute entries.  A program that isn't there is refused.
+* **The `host-commands` checks** (step 4), from the SUC's `host-command-checks`: by name, by the file the program really is (so `mytool -> env` is `env`), and by `name-patterns` on the name or the real file's name; `options` when a value the container fills in follows the option (or is joined to it, `--eval=`); `env` entries against the project's and the command's `allow`, exactly; `paths` (version manager shims) against the real executable.  The most restrictive applies first, then the overrides, as step 4 says; each matching check is a finding with its own reason, and an override is a note naming what it replaced.  A command no check covers is a note.
+* **Path checks:** relative or empty `PATH` entries (a warning: the tools skip them); a program in the project, its repository or its workspace (refused); a program whose file or any parent directory belongs to another user, or anyone can write to (refused; a sticky directory, such as `/tmp`, is fine), or its group can write to (a warning).  Both the path found and its real target are checked; a symlink's own mode isn't.
+* **Egress:** plain `http` (a warning), and hosts anyone can upload to (a warning), from the new `scoter: value-lists: egress-data-out-hosts`.
+* **The project's files:** in container directories inside `.surf-scoter.d`, symlinks, hard links and special files are refused, every problem reported rather than the first; files that look like secrets warn, from the new `scoter: value-lists: secret-file-patterns`; a `FROM` without a digest warns (unless it's `scratch`, a local parent's tag, or an earlier stage), and one from a build argument warns that it can't be told.  A hard-linked project file warns.  Container directories outside it are trusted, as step 5 decided.
+
+The secret-looking files and the hosts that can carry data out are `value-lists` for now; the future task below would make them check kinds, with an action and a reason each.
+
+**Tests:** in [`test_checks.py`](../../scripts/tests/s_lib/test_checks.py): the step's five, and resolution (`command-map`, the `PATH`, a missing program, a relative `PATH` entry), name patterns, notes for allowed and unknown commands, overrides in two steps, options, `env`, a program in the project, a group-writable and a sticky directory, symlinks' modes ignored, `http` and data-out hosts (exactly and under a wildcard), hard links and FIFOs, container directories outside the project files directory, and `FROM` lines (stages, local tags, digests, build arguments, continuations).  Run against this repository's configuration, a pretend `sh -c {any}` is refused as a shell and warned about for `-c`.
+
 ## 12. Establish a user verification file format
 
 When verifying a project directory, the user will need an easy to use file format.  As the rest of the scoter files use YAML, I think this should also be in YAML format.
@@ -1061,6 +1073,10 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - The Squid gateway enforces only `tls` on 443.  `http` (with `methods`) needs port 80 in the firewall's rules and Squid's HTTP handling; other ports need firewall changes (N4); `https` needs a gateway that looks inside TLS.
   - Accepted settings with `"gateway": null` are accepted by any gateway; step 13 always writes the gateway the review was made for.
   - A test that runs the gateway containers, for the checks made by hand above.
+- Step 11:
+  - The path checks only cover the project's commands; step 2's note that they should cover the setup's own `programs` too still stands.
+  - On Windows, the owner and mode checks are skipped.
+  - A blanket acceptance (step 8) can now be checked on each run with `check_project`; the run (step 16) wires that in.
 
 ## 19. Review the settings format
 
@@ -1117,7 +1133,7 @@ Egress hosts (all warn; several, like `github.com`, are often needed, which is w
 | `webhooks` | `webhook.site`, `*.requestbin.com`, `*.pipedream.net`, `hooks.slack.com`, `discord.com`, `*.discord.com`, `api.telegram.org` |
 | `file-sharing` | `transfer.sh`, `file.io`, `wetransfer.com`, `*.dropbox.com`, `drive.google.com` |
 
-These should go into a similar "checks" structure as the host-bridge items.
+These should go into a similar "checks" structure as the host-bridge items.  Step 11 added both as `scoter: value-lists` (`secret-file-patterns`, `egress-data-out-hosts`), which only warn; check kinds would let a user make one refuse, or override one.
 
 ## Remove the `--bin-dir` and `--sub-cmd-dir` arguments
 

@@ -327,6 +327,93 @@ def optional(data: JsonData, *path: JsonPathPart) -> JsonData:
     return _as_optional(val, ok, fp, "value")
 
 
+# ---------------------------------------------------------------------
+# Lookups where "not there" is fine
+#
+# The `find_*` functions give None (or an empty list) when any part of the
+# path is missing or null: for values a file may leave out.  A value of the
+# wrong type is still a TypeError, as is a path that runs into a value that
+# can't hold the next part (a string where a mapping should be).
+
+
+def find(data: JsonData, *path: JsonPathPart) -> JsonData:
+    """The value at the path; None when any part of it is missing or null."""
+    curr: JsonData = data
+    followed: list[JsonPathPart] = []
+    for part in path:
+        followed.append(part)
+        if curr is None:
+            return None
+        if isinstance(curr, dict) and isinstance(part, str):
+            curr = curr.get(part)
+        elif isinstance(curr, list) and isinstance(part, int):
+            curr = curr[part] if 0 <= part < len(curr) else None
+        else:
+            raise _type_err(curr, followed[:-1], "map" if isinstance(part, str) else "list")
+    return curr
+
+
+def find_str(data: JsonData, *path: JsonPathPart) -> str | None:
+    """The text at the path; None when it's missing or null."""
+    val = find(data, *path)
+    if val is None or isinstance(val, str):
+        return val
+    raise _type_err(val, path, "string")
+
+
+def find_int(data: JsonData, *path: JsonPathPart) -> int | None:
+    """The integer at the path (not a boolean); None when it's missing or null."""
+    val = find(data, *path)
+    if val is None or (isinstance(val, int) and not isinstance(val, bool)):
+        return val
+    raise _type_err(val, path, "int")
+
+
+def find_bool(data: JsonData, *path: JsonPathPart) -> bool | None:
+    """The boolean at the path; None when it's missing or null."""
+    val = find(data, *path)
+    if val is None or isinstance(val, bool):
+        return val
+    raise _type_err(val, path, "bool")
+
+
+def find_dict(data: JsonData, *path: JsonPathPart) -> DictJsonData | None:
+    """The mapping at the path; None when it's missing or null."""
+    val = find(data, *path)
+    if val is None or isinstance(val, dict):
+        return val
+    raise _type_err(val, path, "map")
+
+
+def find_list(data: JsonData, *path: JsonPathPart) -> ListJsonData | None:
+    """The list at the path; None when it's missing or null."""
+    val = find(data, *path)
+    if val is None or isinstance(val, list):
+        return val
+    raise _type_err(val, path, "list")
+
+
+def find_str_list(data: JsonData, *path: JsonPathPart) -> list[str]:
+    """The list of text at the path; empty when it's missing or null."""
+    val = find_list(data, *path) or []
+    ret: list[str] = []
+    for i, item in enumerate(val):
+        if not isinstance(item, str):
+            raise _type_err(item, (*path, i), "string")
+        ret.append(item)
+    return ret
+
+
+def find_dict_keys(data: JsonData, *path: JsonPathPart) -> Sequence[JsonPath]:
+    """The paths under the mapping at the path; empty when it's missing or null."""
+    return [(*path, key) for key in find_dict(data, *path) or {}]
+
+
+def find_list_keys(data: JsonData, *path: JsonPathPart) -> Sequence[JsonPath]:
+    """The paths under the list at the path; empty when it's missing or null."""
+    return [(*path, i) for i in range(len(find_list(data, *path) or []))]
+
+
 def get_at(data: JsonData, *path: JsonPathPart) -> OptJsonPath:
     """Extract the value from the data at the given path.
     

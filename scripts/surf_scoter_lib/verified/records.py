@@ -21,8 +21,9 @@ from enum import StrEnum
 
 from .. import jdata
 from ..err import VerifiedStoreErr
+from ..user_config import UserConfig
 from .snapshot import Manifest
-from .store import VerifiedStore, json_id, nullable_dict, nullable_str
+from .store import VerifiedStore, json_id
 
 ENVIRONMENT_SCHEMA = "surf-scoter-verified-environment-1"
 ENVIRONMENT_FILE = "environment.json"
@@ -137,21 +138,21 @@ class Acceptance:
     def from_json(data: jdata.JsonData) -> "Acceptance":
         """From JSON data."""
         kind = Kind(jdata.req_str(data, "kind"))
-        suggestion_data = nullable_dict(data, "suggestion")
+        suggestion_data = jdata.find_dict(data, "suggestion")
         suggestion = None if suggestion_data is None else Manifest.from_json(suggestion_data)
         if (suggestion is None) != (kind == Kind.BLANKET):
             raise ValueError("suggestion: only a blanket acceptance has none")
-        exempt = nullable_str(data, "exempt-until")
+        exempt = jdata.find_str(data, "exempt-until")
         acceptance_id = jdata.req_str(data, "id")
         _check_id(acceptance_id)
         return Acceptance(
             id=acceptance_id,
             kind=kind,
-            from_id=nullable_str(data, "from"),
+            from_id=jdata.find_str(data, "from"),
             accepted_at=_time(jdata.req_str(data, "accepted-at")),
             expires_at=_time(jdata.req_str(data, "expires-at")),
             exempt_until=None if exempt is None else _time(exempt),
-            branch=nullable_str(data, "branch"),
+            branch=jdata.find_str(data, "branch"),
             suggestion=suggestion,
             setup=SetupRecord.from_json(jdata.req_dict(data, "setup")),
         )
@@ -351,66 +352,58 @@ def remove_unused_blobs(store: VerifiedStore) -> int:
 
 
 def setup_values(
-    suc: jdata.DictJsonData,
+    config: UserConfig,
     vcs_section: str | None,
     verified_containers: dict[str, str],
 ) -> jdata.DictJsonData:
-    """The setup values from the SUC that an acceptance holds for.
+    """The setup values from the universal configuration file that an acceptance holds for.
 
     A change to any of them asks for a new review: they're the boundaries
     the project was reviewed within, and they come from the setup files, not
-    the project.  `verified_containers` maps each `dev-containers-verified`
-    container directory the build uses to its manifest's id.
+    the project.  They're kept whole, as the file has them, to compare.
+    `verified_containers` maps each `dev-containers-verified` container
+    directory the build uses to its manifest's id.
     """
-    scoter = nullable_dict(suc, "resolved", "scoter") or {}
-    paths = nullable_dict(scoter, "paths") or {}
-    path_lists = nullable_dict(scoter, "path-lists") or {}
-    values = nullable_dict(scoter, "values") or {}
     vcs_runs: jdata.JsonData = None
     if vcs_section:
-        runs = nullable_dict(suc, "resolved", vcs_section, "runs") or {}
         vcs_runs = {
-            key: runs.get(key)
+            key: config.raw("resolved", vcs_section, "runs", key)
             for key in ("local-clone", "fetch-changes-into", "show-fetch-changes", "merge-changes")
         }
-    checks = nullable_dict(suc, "host-command-checks") or {}
     return {
-        "project-files-dir": values.get("project-files-dir"),
-        "dev-containers-search": path_lists.get("dev-containers-search"),
-        "dev-containers-verified": path_lists.get("dev-containers-verified"),
-        "verified-dir": paths.get("verified-dir"),
+        "project-files-dir": config.raw("resolved", "scoter", "values", "project-files-dir"),
+        "dev-containers-search":
+            config.raw("resolved", "scoter", "path-lists", "dev-containers-search"),
+        "dev-containers-verified":
+            config.raw("resolved", "scoter", "path-lists", "dev-containers-verified"),
+        "verified-dir": config.raw("resolved", "scoter", "paths", "verified-dir"),
         "vcs": vcs_section,
         "vcs-runs": vcs_runs,
         # What enforces the egress rules: a different gateway enforces them
         # differently, so the rules need a new review.
         "gateway": {
-            "name": (nullable_dict(suc, "resolved", "network-gateway", "values") or {}).get("name"),
-            "write-config":
-                (nullable_dict(suc, "resolved", "network-gateway", "runs") or {}).get("write-config"),
+            "name": config.raw("resolved", "network-gateway", "values", "name"),
+            "write-config": config.raw("resolved", "network-gateway", "runs", "write-config"),
         },
-        "host-command-checks": checks.get("checks"),
-        "hidden-host-commands": _hidden_checks(suc),
+        "host-command-checks": config.raw("host-command-checks", "checks"),
+        "hidden-host-commands": _hidden_checks(config),
         "verified-containers": dict(sorted(verified_containers.items())),
     }
 
 
-def _hidden_checks(suc: jdata.DictJsonData) -> jdata.DictJsonData:
+def _hidden_checks(config: UserConfig) -> jdata.DictJsonData:
     """The lower priority versions of each `host-commands` check a setup file replaces or removes.
 
     An upgrade that changes one of them doesn't change the check in effect,
     but should still ask for a new review.
     """
+    setup = config.raw("setup")
     versions: dict[str, list[jdata.JsonData]] = {}
-    setup = nullable_dict(suc, "setup") or {}
-    files = setup.get("files") or []
-    if not isinstance(files, list):
-        raise TypeError("setup.files: expected a list")
-    for file in files:
-        sections = nullable_dict(file, "sections") or {}
-        for section, groups in sections.items():
-            checks = nullable_dict(groups, "host-commands") or {}
-            for key, check in checks.items():
-                versions.setdefault(f"{section}:{key}", []).append(
-                    {"file": nullable_str(file, "file"), "check": check}
+    for file_path in jdata.find_list_keys(setup, "files"):
+        file = jdata.find_str(setup, *file_path, "file")
+        for section_path in jdata.find_dict_keys(setup, *file_path, "sections"):
+            for key_path in jdata.find_dict_keys(setup, *section_path, "host-commands"):
+                versions.setdefault(f"{section_path[-1]}:{key_path[-1]}", []).append(
+                    {"file": file, "check": jdata.find(setup, *key_path)}
                 )
     return {key: found[1:] for key, found in sorted(versions.items()) if len(found) > 1}

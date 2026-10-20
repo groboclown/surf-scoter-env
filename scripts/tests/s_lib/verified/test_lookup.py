@@ -5,6 +5,7 @@ import json
 import unittest
 
 from ....surf_scoter_lib import jdata
+from ....surf_scoter_lib.user_config import UserConfig
 from ....surf_scoter_lib.verified import lookup, records, snapshot, store
 from .helper import POSIX, TempDirTest
 
@@ -44,9 +45,9 @@ class LookupTest(TempDirTest):
 
     def accept(self, kind: records.Kind = records.Kind.REVIEWED) -> records.Acceptance:
         """Accept the project's files as they are now."""
-        suc = self.suc()
-        taken = lookup._snapshot(suc, self.project)
-        setup = records.SetupRecord(records.setup_values(suc, None, {}))
+        config = UserConfig(self.suc())
+        taken = lookup._snapshot(config, self.project)
+        setup = records.SetupRecord(records.setup_values(config, None, {}))
         now = records.now_utc()
         acceptance = records.Acceptance(
             id=records.new_acceptance_id(now - datetime.timedelta(seconds=1)),
@@ -70,17 +71,17 @@ class LookupTest(TempDirTest):
 
     def test_nothing_accepted(self) -> None:
         """No store, or no record, is no match."""
-        self.assertEqual(lookup.find(self.suc()), lookup.Lookup())
+        self.assertEqual(lookup.find(UserConfig(self.suc())), lookup.Lookup())
         missing = self.suc()
         paths = missing["resolved"]["scoter"]["paths"]  # type: ignore[index]
         paths["verified-dir"] = str(self.tmp / "nowhere")  # type: ignore[index]
-        self.assertEqual(lookup.find(missing), lookup.Lookup())
-        self.assertEqual(lookup.find({}), lookup.Lookup())
+        self.assertEqual(lookup.find(UserConfig(missing)), lookup.Lookup())
+        self.assertEqual(lookup.find(UserConfig({})), lookup.Lookup())
 
     def test_exact(self) -> None:
         """The files as accepted: the acceptance's own `accepted.json`."""
         acceptance = self.accept()
-        found = lookup.find(self.suc())
+        found = lookup.find(UserConfig(self.suc()))
         self.assertEqual(found.match, records.MatchKind.EXACT)
         self.assertEqual(found.acceptance, acceptance.id)
         assert found.accepted_settings is not None  # nosec: B101  # narrowing for the type checker
@@ -92,7 +93,7 @@ class LookupTest(TempDirTest):
         """A comment changes nothing that matters: the acceptance is carried forward."""
         original = self.accept()
         self.write("proj/.surf-scoter.d/env/Dockerfile", "# A new comment.\nFROM scratch\n")
-        found = lookup.find(self.suc())
+        found = lookup.find(UserConfig(self.suc()))
         self.assertEqual(found.match, records.MatchKind.MEANING)
         self.assertNotEqual(found.acceptance, original.id)
         self.assertIsNotNone(found.notice)
@@ -105,19 +106,19 @@ class LookupTest(TempDirTest):
         assert found.accepted_settings is not None  # nosec: B101  # narrowing for the type checker
         self.assertEqual(found.accepted_settings.read_text(), json.dumps({"commands": []}))
         # Now it matches exactly.
-        self.assertEqual(lookup.find(self.suc()).match, records.MatchKind.EXACT)
+        self.assertEqual(lookup.find(UserConfig(self.suc())).match, records.MatchKind.EXACT)
 
     def test_changed(self) -> None:
         """A change that matters is no match."""
         self.accept()
         self.write("proj/.surf-scoter.d/env/Dockerfile", "FROM ubuntu\n")
-        self.assertEqual(lookup.find(self.suc()), lookup.Lookup())
+        self.assertEqual(lookup.find(UserConfig(self.suc())), lookup.Lookup())
 
     def test_blanket(self) -> None:
         """A blanket acceptance matches, without an `accepted.json`."""
         self.accept(records.Kind.BLANKET)
         self.write("proj/.surf-scoter.d/env/Dockerfile", "FROM ubuntu\n")
-        found = lookup.find(self.suc())
+        found = lookup.find(UserConfig(self.suc()))
         self.assertEqual(found.match, records.MatchKind.BLANKET)
         self.assertIsNone(found.accepted_settings)
 
@@ -127,10 +128,10 @@ class LookupTest(TempDirTest):
         outside = self.tmp / "dist" / "base"
         self.write("dist/base/Dockerfile", "FROM scratch\n")
         suc["dev-container"] = {"parent-builds": [{"dir": str(outside), "tag": "base"}]}
-        self.assertEqual(lookup._verified_containers(suc), {})
+        self.assertEqual(lookup._verified_containers(UserConfig(suc)), {})
         lists = suc["resolved"]["scoter"]["path-lists"]  # type: ignore[index]
         lists["dev-containers-verified"] = [str(self.tmp / "dist")]  # type: ignore[index]
-        found = lookup._verified_containers(suc)
+        found = lookup._verified_containers(UserConfig(suc))
         self.assertEqual(list(found), [str(outside)])
         self.assertEqual(
             found[str(outside)],

@@ -480,6 +480,76 @@ scoter:
         dev-containers-verified: []
 
     value-lists:
+        # Names of files (and, ending in `/`, directories) in a project's container
+        # directories that look like secrets.  The review warns about each: a
+        # container directory goes into the image, where the container can read it.
+        # Patterns use `*`, `?` and `[...]`, matched against each name.
+        secret-file-patterns:
+            - .env
+            - .env.*
+            - '*.pem'
+            - '*.key'
+            - '*.p12'
+            - '*.pfx'
+            - id_*
+            - .netrc
+            - .npmrc
+            - .pypirc
+            - .git-credentials
+            - '*.kdbx'
+            - '*.tfstate'
+            - .aws/
+            - .ssh/
+            - .docker/
+            - .kube/
+        # Hosts anyone can upload to: an egress rule that reaches one lets the
+        # container send data out, whatever the other rules say.  The review warns
+        # about each.  `*.` covers a domain's subdomains.
+        egress-data-out-hosts:
+            # Code hosts.
+            - github.com
+            - '*.github.com'
+            - '*.githubusercontent.com'
+            - gitlab.com
+            - '*.gitlab.com'
+            - bitbucket.org
+            - codeberg.org
+            # Paste sites.
+            - pastebin.com
+            - paste.ee
+            - hastebin.com
+            - dpaste.org
+            - rentry.co
+            # Object storage.
+            - s3.amazonaws.com
+            - '*.s3.amazonaws.com'
+            - '*.blob.core.windows.net'
+            - storage.googleapis.com
+            - '*.r2.cloudflarestorage.com'
+            - '*.digitaloceanspaces.com'
+            # Tunnels and user content.
+            - '*.ngrok.io'
+            - '*.ngrok-free.app'
+            - '*.trycloudflare.com'
+            - '*.workers.dev'
+            - '*.pages.dev'
+            - '*.vercel.app'
+            - '*.netlify.app'
+            - '*.herokuapp.com'
+            # Webhooks and chat.
+            - webhook.site
+            - '*.requestbin.com'
+            - '*.pipedream.net'
+            - hooks.slack.com
+            - discord.com
+            - '*.discord.com'
+            - api.telegram.org
+            # File sharing.
+            - transfer.sh
+            - file.io
+            - wetransfer.com
+            - '*.dropbox.com'
+            - drive.google.com
         # Domains a project's egress rule can't allow every subdomain of
         # (`*.github.io`, say): public suffixes and shared hosting, where anyone
         # can have a name.  A wildcard on a single label (`*.com`) is always

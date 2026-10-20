@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .. import fileutil, jdata
 from ..err import VerifiedStoreErr
-from .store import VerifiedStore, canonical_json, check_private, json_id, nullable_str
+from .store import VerifiedStore, canonical_json, check_private, json_id
 
 DEV_ENV_FILE = "dev-env.yaml"
 
@@ -69,7 +69,7 @@ class FileEntry:
             sha256=jdata.req_str(data, "sha256"),
             size=size,
             executable=jdata.req_bool(data, "executable"),
-            canonical=nullable_str(data, "canonical"),
+            canonical=jdata.find_str(data, "canonical"),
         )
 
 

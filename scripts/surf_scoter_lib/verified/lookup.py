@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .. import jdata
 from ..err import VerifiedStoreErr
+from ..user_config import UserConfig
 from . import records, snapshot, store
 
 ACCEPTED_FILE = "accepted.json"
@@ -43,50 +44,30 @@ class Lookup:
         }
 
 
-def _get(data: jdata.JsonData, *keys: str) -> jdata.JsonData:
-    """`data[k1][k2]...`, or None where any of it is missing."""
-    for key in keys:
-        if not isinstance(data, dict):
-            return None
-        data = data.get(key)
-    return data
-
-
-def _text(data: jdata.JsonData, *keys: str) -> str | None:
-    value = _get(data, *keys)
-    return value if isinstance(value, str) else None
-
-
-def _int(data: jdata.JsonData, *keys: str, default: int) -> int:
-    value = _get(data, *keys)
-    return value if isinstance(value, int) and not isinstance(value, bool) else default
-
-
-def find(suc: jdata.DictJsonData) -> Lookup:
-    """The acceptance for the project in `suc`, the universal configuration file's data."""
-    project = _text(suc, "active-config-locations", "project-dir")
-    verified = _text(suc, "resolved", "scoter", "paths", "verified-dir")
-    if project is None or verified is None or not os.path.isdir(verified):
+def find(config: UserConfig) -> Lookup:
+    """The acceptance for the project in the universal configuration file."""
+    project = config.active_location("project-dir")
+    verified = config.optional_path("scoter", "verified-dir")
+    if project is None or verified is None or not verified.is_dir():
         return Lookup()
     project_dir = os.path.realpath(project)
-    verified_store = store.VerifiedStore.open(Path(verified))
+    verified_store = store.VerifiedStore.open(verified)
     env_id = store.environment_id(Path(project_dir))
     record = records.load_environment(verified_store, project_dir, env_id)
     if record is None:
         return Lookup()
 
-    current = _snapshot(suc, Path(project_dir))
+    current = _snapshot(config, Path(project_dir))
     setup = records.SetupRecord(records.setup_values(
-        suc, _vcs_section(suc), _verified_containers(suc),
+        config, _vcs_section(config), _verified_containers(config),
     ))
-    now = records.now_utc()
-    found = record.find(current.manifest, setup, now)
+    found = record.find(current.manifest, setup, records.now_utc())
     if found is None:
         return Lookup()
     acceptance = found.acceptance
     notice = None
     if found.kind == records.MatchKind.MEANING:
-        acceptance = _carry_forward(verified_store, project_dir, env_id, found, current, suc)
+        acceptance = _carry_forward(verified_store, project_dir, env_id, found, current, config)
         notice = (
             "The project's files changed only in comments or layout since you accepted them; "
             "the acceptance carries on, with the same settings and expiry."
@@ -97,63 +78,53 @@ def find(suc: jdata.DictJsonData) -> Lookup:
     return Lookup(found.kind, acceptance.id, accepted, notice)
 
 
-def _limits(suc: jdata.DictJsonData) -> snapshot.SnapshotLimits:
+def _limits(config: UserConfig) -> snapshot.SnapshotLimits:
     defaults = snapshot.SnapshotLimits()
     return snapshot.SnapshotLimits(
-        max_file_size=_int(
-            suc, "resolved", "scoter", "values", "verified-max-file-size",
-            default=defaults.max_file_size,
-        ),
-        max_snapshot_size=_int(
-            suc, "resolved", "scoter", "values", "verified-max-snapshot-size",
-            default=defaults.max_snapshot_size,
-        ),
+        max_file_size=config.optional_int_value("scoter", "verified-max-file-size")
+        or defaults.max_file_size,
+        max_snapshot_size=config.optional_int_value("scoter", "verified-max-snapshot-size")
+        or defaults.max_snapshot_size,
     )
 
 
-def _container_dirs(suc: jdata.DictJsonData) -> list[Path]:
-    dev_container = _text(suc, "active-config-locations", "dev-container-path")
-    builds = _get(suc, "dev-container", "parent-builds")
-    parents = [
-        Path(build["dir"])
-        for build in (builds if isinstance(builds, list) else [])
-        if isinstance(build, dict) and isinstance(build.get("dir"), str)
-    ]
-    return snapshot.container_dirs(Path(dev_container) if dev_container else None, parents)
+def _container_dirs(config: UserConfig) -> list[Path]:
+    parents = (
+        [directory for _, directory in config.dev_container_parent_builds()]
+        if config.has_dev_container() else []
+    )
+    return snapshot.container_dirs(config.active_location("dev-container-path"), parents)
 
 
-def _snapshot(suc: jdata.DictJsonData, project_dir: Path) -> snapshot.Snapshot:
-    files_dir = _text(suc, "resolved", "scoter", "values", "project-files-dir")
-    file_name = _text(suc, "resolved", "scoter", "values", "project-file-name")
+def _snapshot(config: UserConfig, project_dir: Path) -> snapshot.Snapshot:
+    files_dir = config.optional_value("scoter", "project-files-dir")
+    file_name = config.optional_value("scoter", "project-file-name")
     if files_dir is None or file_name is None:
         raise VerifiedStoreErr("the setup names no project files directory or project file")
-    parsed = snapshot.ParsedFiles(
-        project=_get(suc, "current-project-setup"),
-        dev_container=_get(suc, "dev-container"),
-    )
+    parsed = snapshot.ParsedFiles(project=config.project_setup(), dev_container=config.dev_container())
     return snapshot.snapshot_project(
-        project_dir / files_dir, file_name, _container_dirs(suc), parsed, _limits(suc),
+        project_dir / files_dir, file_name, _container_dirs(config), parsed, _limits(config),
     )
 
 
-def _vcs_section(suc: jdata.DictJsonData) -> str | None:
-    vcs = _text(suc, "current-project-setup", "vcs")
+def _vcs_section(config: UserConfig) -> str | None:
+    vcs = config.project_str("vcs")
     if vcs is None:
         return None
     section = vcs + VCS_SECTION_SUFFIX
-    return section if isinstance(_get(suc, "resolved", section), dict) else None
+    return section if config.has_section(section) else None
 
 
-def _verified_containers(suc: jdata.DictJsonData) -> dict[str, str]:
+def _verified_containers(config: UserConfig) -> dict[str, str]:
     """The build's container directories in `dev-containers-verified`, with their manifests' ids."""
-    listed = _get(suc, "resolved", "scoter", "path-lists", "dev-containers-verified")
-    roots = [Path(os.path.realpath(p)) for p in (listed if isinstance(listed, list) else [])
-             if isinstance(p, str)]
+    roots = [
+        Path(os.path.realpath(p)) for p in config.optional_path_list("scoter", "dev-containers-verified")
+    ]
     found: dict[str, str] = {}
-    for directory in _container_dirs(suc):
+    for directory in _container_dirs(config):
         real = Path(os.path.realpath(directory))
         if any(real.is_relative_to(root) for root in roots):
-            found[str(real)] = snapshot.snapshot_dir(real, _limits(suc)).manifest.id
+            found[str(real)] = snapshot.snapshot_dir(real, _limits(config)).manifest.id
     return found
 
 
@@ -163,10 +134,10 @@ def _carry_forward(
     env_id: str,
     found: records.Match,
     current: snapshot.Snapshot,
-    suc: jdata.DictJsonData,
+    config: UserConfig,
 ) -> records.Acceptance:
     """Record a new acceptance for `current`, from a match on meaning."""
-    keep = _int(suc, "resolved", "scoter", "values", "verified-keep", default=10)
+    keep = config.optional_int_value("scoter", "verified-keep") or 10
     with verified_store.locked():
         # Again, under the lock: another run may have changed it.
         record = records.load_environment(verified_store, project_dir, env_id)

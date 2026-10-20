@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from ...surf_scoter_lib import gateway
+from ...surf_scoter_lib.user_config import UserConfig
 
 SCRIPT = Path(__file__).parents[2] / "gateway_squid.py"
 
@@ -28,14 +29,14 @@ class RulesFromTest(unittest.TestCase):
             "egress": {"gateway": "squid", "rules": [_rule("a.example.com", port=443, methods=[])]},
             "current-project-setup": {"egress": [_rule("b.example.com")]},
         }
-        rules, source = gateway.rules_from(suc)
+        rules, source = gateway.rules_from(UserConfig(suc))
         self.assertEqual((source, [r.host for r in rules]), ("accepted", ["a.example.com"]))
         suc["egress"] = None
-        rules, source = gateway.rules_from(suc)
+        rules, source = gateway.rules_from(UserConfig(suc))
         self.assertEqual((source, [r.host for r in rules]), ("project", ["b.example.com"]))
         # Ports default by protocol.
         self.assertEqual(rules[0].port, 443)
-        self.assertEqual(gateway.rules_from({}), ([], "project"))
+        self.assertEqual(gateway.rules_from(UserConfig({})), ([], "project"))
 
     def test_bad_rules(self) -> None:
         """Anything the generator wouldn't let through is refused, not passed on."""
@@ -50,9 +51,9 @@ class RulesFromTest(unittest.TestCase):
             _rule("a.example.com", protocol="http", methods=["get"]),
         ):
             with self.assertRaises(gateway.RuleErr, msg=str(bad)):
-                gateway.rules_from({"egress": {"rules": [bad]}})
+                gateway.rules_from(UserConfig({"egress": {"rules": [bad]}}))
         with self.assertRaises(gateway.RuleErr):
-            gateway.rules_from({"egress": {"rules": "x"}})
+            gateway.rules_from(UserConfig({"egress": {"rules": "x"}}))
 
 
 class SquidTest(unittest.TestCase):
@@ -60,13 +61,13 @@ class SquidTest(unittest.TestCase):
 
     def test_enforced_and_refused(self) -> None:
         """Only `tls` on 443; everything else refused, with its reason."""
-        rules, _ = gateway.rules_from({"egress": {"rules": [
+        rules, _ = gateway.rules_from(UserConfig({"egress": {"rules": [
             _rule("registry.npmjs.org"),
             _rule("*.pkg.dev"),
             _rule("a.example.com", protocol="https", methods=["GET"]),
             _rule("b.example.com", protocol="http", methods=["GET"]),
             _rule("git.example.com", port=22),
-        ]}})
+        ]}}))
         report, text = gateway.squid(rules, "accepted")
         self.assertEqual([r.host for r in report.enforced], ["registry.npmjs.org", "*.pkg.dev"])
         reasons = {rule.host: reason for rule, reason in report.refused}

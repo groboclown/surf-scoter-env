@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 
 from . import jdata
+from .err import ConfigErr
+from .user_config import UserConfig
 
 DEFAULT_PORTS = {"tls": 443, "https": 443, "http": 80}
 
@@ -64,43 +66,34 @@ class RuleErr(ValueError):
     """An egress rule isn't what the generator would have let through."""
 
 
-def rules_from(suc: jdata.DictJsonData) -> tuple[list[Rule], str]:
+def rules_from(config: UserConfig) -> tuple[list[Rule], str]:
     """The egress rules in the universal configuration file, and where they came from."""
-    egress = suc.get("egress")
-    if isinstance(egress, dict):
-        raw = egress.get("rules")
-        source = "accepted"
-    else:
-        project = suc.get("current-project-setup")
-        raw = project.get("egress") if isinstance(project, dict) else None
-        source = "project"
-    if raw is None:
-        return [], source
-    if not isinstance(raw, list):
-        raise RuleErr("egress: expected a list of rules")
-    return [_rule(entry, i) for i, entry in enumerate(raw)], source
+    try:
+        entries, source = config.egress_rules()
+    except ConfigErr as err:
+        raise RuleErr(str(err)) from err
+    return [_rule(entry, i) for i, entry in enumerate(entries)], source
 
 
-def _rule(entry: jdata.JsonData, i: int) -> Rule:
-    if not isinstance(entry, dict):
-        raise RuleErr(f"egress[{i}]: expected a rule")
-    host = entry.get("host")
-    protocol = entry.get("protocol")
-    if not isinstance(host, str) or not host_is_valid(host):
-        raise RuleErr(f"egress[{i}].host: {host!r} isn't a host name")
+def _rule(entry: jdata.DictJsonData, i: int) -> Rule:
+    at = f"egress[{i}]"
+    try:
+        host = jdata.req_str(entry, "host")
+        protocol = jdata.req_str(entry, "protocol")
+        port = jdata.find_int(entry, "port")
+        methods = jdata.find_str_list(entry, "methods")
+    except (KeyError, TypeError, ValueError) as err:
+        raise RuleErr(f"{at}: {err}") from err
+    if not host_is_valid(host):
+        raise RuleErr(f"{at}.host: {host!r} isn't a host name")
     if protocol not in DEFAULT_PORTS:
-        raise RuleErr(f"egress[{i}].protocol: {protocol!r} isn't known")
-    assert isinstance(protocol, str)  # nosec: B101  # narrowing for the type checker
-    port = entry.get("port", DEFAULT_PORTS[protocol])
+        raise RuleErr(f"{at}.protocol: {protocol!r} isn't known")
     if port is None:
         port = DEFAULT_PORTS[protocol]
-    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
-        raise RuleErr(f"egress[{i}].port: {port!r} isn't a port")
-    methods = entry.get("methods") or []
-    if not isinstance(methods, list) or not all(
-        isinstance(m, str) and m.isascii() and m.isalpha() and m.isupper() for m in methods
-    ):
-        raise RuleErr(f"egress[{i}].methods: expected upper-case method names")
+    if not 0 < port < 65536:
+        raise RuleErr(f"{at}.port: {port!r} isn't a port")
+    if not all(m.isascii() and m.isalpha() and m.isupper() for m in methods):
+        raise RuleErr(f"{at}.methods: expected upper-case method names")
     return Rule(host, protocol, port, tuple(methods))
 
 

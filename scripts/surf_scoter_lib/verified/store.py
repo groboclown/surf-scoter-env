@@ -69,30 +69,6 @@ def json_id(data: jdata.JsonData) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(data)).hexdigest()
 
 
-def nullable_str(data: jdata.JsonData, key: str) -> str | None:
-    """`data[key]`: text, or None when it's null or missing."""
-    if not isinstance(data, dict):
-        raise TypeError(f"expected a mapping holding `{key}`")
-    value = data.get(key)
-    if value is None or isinstance(value, str):
-        return value
-    raise TypeError(f"{key}: expected text or null, found {type(value).__name__}")
-
-
-def nullable_dict(data: jdata.JsonData, *keys: str) -> jdata.DictJsonData | None:
-    """`data[key][...]`: a mapping, or None when any of it is null or missing."""
-    value: jdata.JsonData = data
-    for key in keys:
-        if value is None:
-            return None
-        if not isinstance(value, dict):
-            raise TypeError(f"expected a mapping holding `{key}`")
-        value = value.get(key)
-    if value is None or isinstance(value, dict):
-        return value
-    raise TypeError(f"{'.'.join(keys)}: expected a mapping or null, found {type(value).__name__}")
-
-
 def _is_windows() -> bool:
     return sys.platform == "win32"
 

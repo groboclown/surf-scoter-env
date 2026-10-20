@@ -4,6 +4,7 @@ import datetime
 import unittest
 
 from ....surf_scoter_lib import err
+from ....surf_scoter_lib.user_config import UserConfig
 from ....surf_scoter_lib.verified import records, snapshot
 from .helper import POSIX, TempDirTest
 
@@ -166,7 +167,7 @@ class RecordsTest(TempDirTest):
                 {"file": "/d", "sections": {"h": {"host-commands": {"s": {"action": "refuse"}}}}},
             ]},
         }
-        values = records.setup_values(suc, "git-vcs", {"/c": "sha256:c"})
+        values = records.setup_values(UserConfig(suc), "git-vcs", {"/c": "sha256:c"})
         self.assertEqual(values["verified-dir"], "/v")
         self.assertEqual(values["vcs-runs"], {
             "local-clone": ["git", "clone"], "fetch-changes-into": None,

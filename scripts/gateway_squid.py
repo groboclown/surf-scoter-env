@@ -17,7 +17,7 @@ import os
 import sys
 from collections.abc import Sequence
 
-from surf_scoter_lib import gateway
+from surf_scoter_lib import UserConfig, gateway
 from surf_scoter_lib.err import SurfScoterErr
 
 MAX_UNIVERSAL_SIZE = 4 * 1024 * 1024
@@ -36,7 +36,7 @@ def main(argv: Sequence[str]) -> int:
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        rules, source = gateway.rules_from(suc)
+        rules, source = gateway.rules_from(UserConfig(suc))
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
         return 2
