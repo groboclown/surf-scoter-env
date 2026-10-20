@@ -40,8 +40,13 @@ pub fn read_limited_to(path: &Path, max: u64) -> Result<String, String> {
 /// device is refused before anything is read from it, as reading one could
 /// hang or have side effects.
 pub fn read_regular_file(path: &Path) -> Result<String, String> {
+    read_regular_file_to(path, MAX_CONFIG_FILE_SIZE)
+}
+
+/// `read_regular_file`, refusing anything over `max` bytes.
+pub fn read_regular_file_to(path: &Path, max: u64) -> Result<String, String> {
     let file = open_regular(path)?;
-    read_file(file, MAX_CONFIG_FILE_SIZE)
+    read_file(file, max)
 }
 
 /// Open `path` without following a symlink in its last component, and

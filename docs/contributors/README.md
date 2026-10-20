@@ -8,3 +8,8 @@
 * [Projects in V1](projects-v1.md)
 * [The universal configuration file](universal-configuration-file.md)
 * [Creating and maintaining sub-commands](sub-commands.md)
+
+
+## A Note about Performance
+
+The primary execution command, `scoter run`, is expected to remain running for an extended period of time, and the user runs it infrequently.  While performance is important, shaving off 3 seconds in one place doesn't add that much improvement.  Security and readability take the front seat to performance.

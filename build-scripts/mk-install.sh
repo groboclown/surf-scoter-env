@@ -33,7 +33,11 @@ cp "${base}/host/${target_dir}/scoter-host${ext}" "${workdir}/bin/."
 cp "${base}/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
 cp "${base}/scripts/"*.py "${workdir}/bin/."
 mkdir -p "${workdir}/bin/surf_scoter_lib"
-cp "${base}/scripts/surf_scoter_lib"/*.py "${workdir}/bin/surf_scoter_lib/."
+# The library and its packages (such as `verified`), without caches.
+(cd "${base}/scripts/surf_scoter_lib" && find . -name '*.py' -print) | while read -r file; do
+    mkdir -p "${workdir}/bin/surf_scoter_lib/$(dirname "${file}")"
+    cp "${base}/scripts/surf_scoter_lib/${file}" "${workdir}/bin/surf_scoter_lib/${file}"
+done
 
 cp -R "${base}/containers" "${workdir}/."
 rm -r "${workdir}/containers/dev-env/target"

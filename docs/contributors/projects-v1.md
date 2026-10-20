@@ -823,13 +823,84 @@ Add another CLI option to the SUC generator to read from the user's verified pro
 
 This will introduce a new section for the egress settings, and expand the VCS settings.  A consumer of the SUC should be able to recreate the original user's verified project settings.
 
-"host-brokered" is built only from the verified settings, never from "current-project-setup".  Remove `gen-scoter-uc --unreviewed-project-commands`, and `scoter.py`'s warning, which step 7 added as a stand-in.  This step also adds the SUC's egress section; until then, the rules are only in `current-project-setup`.
+"host-brokered" is built only from the verified settings, never from "current-project-setup".  `gen-scoter-uc --unreviewed-project-commands`, and `scoter.py`'s warning, stay as a stand-in until step 15 makes an acceptance possible; `scoter.py` passes the flag only when no acceptance matches.  This step also adds the SUC's egress section.
 
 From this step on, the SUC is security-critical: whoever can write it decides what runs on the host, and `scoter-host` loads it without running the setup checks again.
 
 * Write it only with `mkstemp` (mode `0600`) in a directory only the user can read, as `scoter.py` does now, and never into the setup directory the container mounts.
 * Pass sub-commands its path, never its contents through the environment, and remove it when the run ends.
 * Decide what `scoter-host` checks again when it loads the SUC.  At least: the file's owner and mode, that its project and dev container locations are still where the accepted settings say, and that the accepted settings it carries match the ones in `verified-dir` (by fingerprint), so an old or edited SUC can't stand in for a review.
+
+### Draft: the accepted settings
+
+Nothing defines the accepted data yet: step 5 named the file (`accepted.json`), and steps 12 to 14 make it from the user's review.  This step needs its shape, as the generator reads it.  The proposal: what the runtime needs, resolved, so nothing in it is worked out again from the project or the host.
+
+```json
+{
+    "$schema": "surf-scoter-accepted-settings-1",
+    "project-dir": "/home/user/mono/client",
+    "expires-at": "2026-11-19T15:04:05+00:00",
+    "vcs": "git",
+    "gateway": null,
+    "egress": [
+        {"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}
+    ],
+    "commands": [
+        {
+            "command": "aws",
+            "program": "/usr/local/bin/aws",
+            "args": ["s3", "ls"],
+            "env": {
+                "allow": ["AWS_*"], "drop": [], "error": [],
+                "set": {"HOME": "@HOME@", "AWS_CONFIG_FILE": "/home/user/.aws/config"},
+                "default": {}
+            }
+        }
+    ]
+}
+```
+
+* **`commands`** have exactly the shape of today's `host-brokered` entries: `program` is the absolute executable (the review resolved it through `command-map` or the `PATH`), and `env` is the command's whole environment plan, with `${section:key}` frozen and `@NAME@` left for `scoter-host` (step 7's decision).  So `host-brokered` is `commands`, after the generator's checks.
+* **`project-dir`** ties the settings to the environment they were accepted for.
+* **`expires-at`** is the acceptance's expiry, so `scoter-host` can check it at start without reading the store's records.  A carried-forward acceptance (step 5) copies the file, expiry included, as carrying forward never extends it.
+* **`gateway`** is step 9's; `null` until then.
+* **`vcs`** is the project's VCS name.  The VCS commands themselves come from the setup, and the acceptance's `setup` values (step 5) already record them, so a change asks for a new review.  That's the "expanded VCS settings": nothing more needs to be in the accepted data.
+
+### Draft: the flow
+
+The store is managed in Python (step 5), so Python finds the acceptance and the generator reads the file it's given:
+
+1. **Phase 1 and 2**, as now: the setup, then the project (`current-project-setup`, `host-command-checks`).
+2. **The lookup**, by a script of its own, as the VCS root search is: the setup's `verified: runs: find-acceptance`, given the phase 2 SUC (`{x:universal}`), runs the distribution's `verified_find.py`.  It snapshots the project's files (step 5's `snapshot_project`, with the parsed files from the SUC), works out the `setup_values`, and asks the environment's record for a usable acceptance.  A match on meaning is carried forward (step 17 decides how the user is told; for now, one line).  It prints JSON: the match (`exact`, `meaning`, `blanket` or `null`), the acceptance's id, its `accepted.json`, and any notice.  `scoter.py` only reads that.
+3. **Phase 3**: `gen-scoter-uc --universal PHASE2.json --no-setup-search --accepted-settings FILE`.  The generator reads `FILE` (size-limited, `O_NOFOLLOW`, regular), checks it against the schema, checks that `project-dir` is this run's, and checks each `program` as step 4 checks `command-map` programs: absolute, an executable file, and not in the project, the workspace or the repository.  It writes:
+    * `accepted-settings`: `{"file": FILE, "contents": {...}}`, so the SUC alone shows what was accepted, and `scoter-host` can compare it with the store;
+    * `host-brokered`: from `commands`, never from `current-project-setup`;
+    * `egress`: `{"gateway": ..., "rules": [...]}`, from the accepted `egress`.
+
+### Draft: protecting the SUC
+
+* `scoter.py` already writes it with `mkstemp` (mode `0600`).  Make that inside a private directory (`mkdtemp`, `0700`) rather than the shared temporary directory.
+* `main_run.py` saves the copy `scoter-host` reads into `.dev-env/resources/suc.json`, inside the project directory, with the default mode.  Move it to `${scoter:state-dir}/environments/HOST/suc.json` (directories `0700`, file `0600`, written with `mkstemp` and renamed into place), and remove it in `scoter kill`.
+* **`scoter-host` checks, when it loads the SUC:**
+    * the file belongs to the user and others can't use it (POSIX; Windows is left to the profile's ACLs, as for the store);
+    * `accepted-settings.file` is inside `verified-dir`, is a private regular file, and its contents are exactly `accepted-settings.contents`.  No hash needed (the Rust side has none), and a revoked, replaced or edited acceptance is caught, as the store's file no longer matches;
+    * the project directory and the dev container directory still exist where `active-config-locations` says, and the project directory is the accepted `project-dir`.
+    * the accepted `expires-at` hasn't passed.  Only at start: a session that's running when its acceptance expires finishes.  `verified_find.py` only picks unexpired acceptances, too.
+
+Decided: the shape above; the lookup in its own script; `scoter-host` checks expiry only at start; the flag stays until step 15; the SUC copy moves out of the project in this step.
+
+A blanket acceptance has no `accepted.json`: its settings are worked out from the project's files on each run, through the checks of step 11.  Until then, `scoter.py` treats a blanket match as no match.
+
+### Completed
+
+* **The accepted settings.**  [`accepted.rs`](../../host/src/config/accepted.rs) reads and checks them (the schema, `expires-at` as an RFC 3339 time, `egress` through step 7's rules, `commands` in the `host-brokered` shape with absolute programs).  `gen-scoter-uc --accepted-settings FILE` checks them against the run (the project directory, and each program an executable outside the project), and the SUC gets `accepted-settings` (`file` and `contents`), `egress` (`gateway` and `rules`), and `host-brokered` from the accepted `commands` alone.
+* **The lookup.**  [`verified/lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py), run by [`verified_find.py`](../../scripts/verified_find.py) through the setup's new `verified: runs: find-acceptance`.  It carries a match on meaning forward (copying the acceptance's files, `accepted.json` included).  Both install scripts include it; `mk-install.sh` now copies the library's packages too.
+* **`scoter.py`.**  A third generator run, with `--accepted-settings` when the lookup finds an acceptance, and `--unreviewed-project-commands` (with the warning) when it doesn't, until step 15.  The universal files it passes along go in a private `mkdtemp` directory, and are removed when done; the sub-command now runs as a child (rather than replacing `scoter`) so its file can be removed afterwards, and Ctrl-C still reaches it.
+* **`scoter-host`.**  `accepted::check_for_run`, before anything starts: the SUC is the user's alone; the accepted file is in `verified-dir`, private, and still says what the SUC does; `expires-at` hasn't passed (at start only); the project and dev container directories are still where they were.
+* **The SUC copy** for `scoter-host` moved from `.dev-env/resources/suc.json` to `${scoter:state-dir}/environments/HOST/suc.json` (`fileutil.write_private`: directories `0700`, file `0600`, replaced whole), removed when `scoter run` tears down.
+* **Docs.**  [The universal configuration file](universal-configuration-file.md) (the option, the third run, the new sections, `scoter-host`'s checks) and [the system configuration file](../system-config-file.md#the-verified-store).
+
+**Tests:** in `accepted.rs`: parsing, its errors, and RFC 3339 times.  In `universal.rs`: `host-brokered` from accepted settings (whatever the project's commands, flag or not), the run checks (a program in the project, a missing program, settings for another project), and `scoter-host`'s start checks (valid; expired; a universal file others can read; the store's file changed, gone, or readable by others; the dev container gone).  In Python: the lookup (nothing accepted, exact, carried forward on meaning, a change that matters, blanket, `dev-containers-verified`), `write_private`, the private temporary files, `find_acceptance`, and running a sub-command to its end.
 
 ## 9. Add a default section for the network gateway settings
 
@@ -909,6 +980,8 @@ The code that constructs the pieces for verification should go into a library fo
 
 ## 15. Add the use / deny / edit prompt
 
+With this step, an acceptance can be made, so remove `gen-scoter-uc --unreviewed-project-commands` and `scoter.py`'s warning (step 7's stand-in, kept by step 8).
+
 `main_verify.py` presents the verification file and asks the user to use it as-is, deny it, or edit it.
 
 * Create the file with `mkstemp` in a directory only the user can read.  After editing, open it without following symlinks and read it once.
@@ -961,6 +1034,10 @@ Things left dangling because of dependency ordering.  These may be tackled earli
 - Step 7:
   - The review (steps 12 to 14) freezes `${section:key}` values at acceptance, and records the `@NAME@` names each command uses (not their values), asking again when a project starts using a new one.
   - `protocol: https` needs a gateway that looks inside TLS; step 9 refuses it, and `methods`, on the Squid gateway.
+- Step 8:
+  - A blanket acceptance has no `accepted.json`; `scoter.py` treats a blanket match as no match until step 11's checks can work the settings out from the project's files.
+  - `scoter kill` isn't implemented; when it is, it removes `${scoter:state-dir}/environments/HOST`, as `scoter run`'s teardown does.
+  - The running environments file (`running-env.json`) keeps a copy of the whole SUC for teardown; it's in `state-dir` now, but not written private.
 
 ## 19. Review the settings format
 
@@ -1018,3 +1095,7 @@ Egress hosts (all warn; several, like `github.com`, are often needed, which is w
 | `file-sharing` | `transfer.sh`, `file.io`, `wetransfer.com`, `*.dropbox.com`, `drive.google.com` |
 
 These should go into a similar "checks" structure as the host-bridge items.
+
+## Remove the `--bin-dir` and `--sub-cmd-dir` arguments
+
+With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.

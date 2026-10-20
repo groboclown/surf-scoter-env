@@ -74,7 +74,22 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
             settings,
         )
         check_project_vcs(settings, vcs_root)
-        warn_unreviewed_commands(settings)
+        # Phase 3: with the user's accepted settings, if they accepted it.
+        found = find_acceptance(settings)
+        accepted = found.get("accepted-settings") if found else None
+        notice = found.get("notice") if found else None
+        if isinstance(notice, str):
+            print(notice, file=sys.stderr)
+        settings = reprocess_config(
+            resolved_bin_dir,
+            dist_dir,
+            project_dir,
+            vcs_root[0] if vcs_root else None,
+            settings,
+            accepted_settings=accepted if isinstance(accepted, str) else None,
+        )
+        if not isinstance(accepted, str):
+            warn_unreviewed_commands(settings)
 
     # Overwrite the bin dir if it was explicitly set.
     active_locs = settings["active-config-locations"]
@@ -200,6 +215,37 @@ def check_project_vcs(settings: DictJsonData, vcs_root: tuple[Path, str] | None)
         )
 
 
+def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
+    """Ask the setup's `verified: runs: find-acceptance` for the project's acceptance.
+
+    It's given the configuration with the project (`{x:universal}`), and
+    prints JSON: `match`, `acceptance`, `accepted-settings` (the file for
+    gen-scoter-uc) and `notice`.  None when the setup has no such command.
+    """
+    template = _opt_lookup(settings, "resolved", "verified", "runs", "find-acceptance")
+    if template is None:
+        return None
+    if not isinstance(template, list) or not all(isinstance(a, str) for a in template):
+        raise ConfigErr("The setup's `verified` `runs: find-acceptance` has no value.")
+    tmp = save_to_tmp(settings)
+    try:
+        args = [arg.replace("{x:universal}", tmp) for arg in template]
+        res = subprocess.run(  # nosec: B603  # The command comes from the user's setup.
+            args, stdout=subprocess.PIPE, check=False, shell=False,
+        )
+    finally:
+        remove_tmp(tmp)
+    if res.returncode != 0:
+        raise ConfigErr("Couldn't look up your acceptance of the project's settings.")
+    try:
+        found: JsonData = json.loads(res.stdout)
+    except ValueError as err:
+        raise ConfigErr(f"`find-acceptance` printed something that isn't JSON: {err}") from err
+    if not isinstance(found, dict):
+        raise ConfigErr("`find-acceptance` printed something unexpected.")
+    return found
+
+
 def warn_unreviewed_commands(settings: DictJsonData) -> None:
     """Warn that the project's host commands run without a review.
 
@@ -226,8 +272,13 @@ def reprocess_config(
     project_dir: Path,
     vcs_root: Path | None,
     orig: DictJsonData,
+    *,
+    accepted_settings: str | None = None,
 ) -> DictJsonData:
-    """Reprocess this configuration with the project, and the repository it's in."""
+    """Reprocess this configuration with the project, and the repository it's in.
+
+    With `accepted_settings`, the generator builds the host commands from them.
+    """
     # Save the configuration for reprocessing.
     tmp = save_to_tmp(orig)
 
@@ -241,22 +292,35 @@ def reprocess_config(
             dev_container_settings_dir=None,
             universal_file=tmp,
             no_setup_search=True,
+            accepted_settings=accepted_settings,
         )
     finally:
-        os.unlink(tmp)
+        remove_tmp(tmp)
 
 
 def save_to_tmp(data: DictJsonData) -> str:
-    """Save the data to a temporary file."""
-    fd, file = tempfile.mkstemp()
+    """Save the data to a private temporary file; remove it with `remove_tmp`.
+
+    The universal configuration file decides what runs on this computer, so
+    it goes in a new directory only you can use (`mkdtemp`), as a file only
+    you can read (`mkstemp`), never in a directory others share.
+    """
+    directory = tempfile.mkdtemp(prefix="surf-scoter-")
     try:
-        os.write(fd, json.dumps(data).encode("utf-8"))
-        os.close(fd)
+        fd, file = tempfile.mkstemp(dir=directory, suffix=".json")
+        try:
+            os.write(fd, json.dumps(data).encode("utf-8"))
+        finally:
+            os.close(fd)
         return file
     except:
-        os.close(fd)
-        os.unlink(file)
+        shutil.rmtree(directory, ignore_errors=True)
         raise
+
+
+def remove_tmp(file: str) -> None:
+    """Remove a file `save_to_tmp` made, and its directory."""
+    shutil.rmtree(os.path.dirname(file), ignore_errors=True)
 
 
 def require_global_config_path(distribution_dir: str | None) -> Path:
@@ -334,8 +398,13 @@ def generate_config(
     dev_container_settings_dir: str | None,
     universal_file: str | None,
     no_setup_search: bool,
+    accepted_settings: str | None = None,
 ) -> DictJsonData:
-    """Run the gen-scoter-uc program."""
+    """Run the gen-scoter-uc program.
+
+    With a project, the host commands come from `accepted_settings` (the
+    user's accepted settings); without them, from the project file, unreviewed.
+    """
     if bin_dir:
         gen_uc = _require_exe(bin_dir / GEN_SCOTER_UC_EXEC)
     else:
@@ -353,9 +422,12 @@ def generate_config(
         args.extend(("--universal", universal_file))
     if no_setup_search:
         args.append("--no-setup-search")
-    # Until the accepted settings feed `host-brokered` (step 8), it comes from
-    # the project file, unreviewed; see `warn_unreviewed_commands`.
-    args.append("--unreviewed-project-commands")
+    if accepted_settings:
+        args.extend(("--accepted-settings", accepted_settings))
+    elif project_dir:
+        # No acceptance yet: until a review can make one (step 15), the host
+        # commands come from the project file; see `warn_unreviewed_commands`.
+        args.append("--unreviewed-project-commands")
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,
@@ -497,11 +569,29 @@ def run_sub_command(
     config_file = save_to_tmp(config)
     cmd_args = [*prefix, config_file, *argv]
 
-    # Change execution over the sub-command.
-    # print(cmd_args)  # for debugging
-    os.execv(cmd_args[0], cmd_args)  # nosec: B606  # We vetted the command and arguments.
-    print(f"Failed to start sub-command {argv[0]} at {cmd_file}.", file=sys.stderr)
-    return 127
+    # Run the sub-command, then remove the configuration it was given.
+    try:
+        return run_to_end(cmd_args)
+    except OSError as err:
+        print(f"Failed to start sub-command {argv[0]} at {cmd_file}: {err}", file=sys.stderr)
+        return 127
+    finally:
+        remove_tmp(config_file)
+
+
+def run_to_end(cmd_args: Sequence[str]) -> int:
+    """Run the command, and wait for it to end; its exit code.
+
+    Ctrl-C reaches the command too (it's in the same process group), and the
+    command handles it: `run` tears its environment down.  So this keeps
+    waiting rather than stopping it, as `subprocess.run` would.
+    """
+    process = subprocess.Popen(cmd_args, shell=False)  # nosec: B603  # Vetted by the caller.
+    while True:
+        try:
+            return process.wait()
+        except KeyboardInterrupt:
+            continue
 
 
 # ---------------------------------------------------------------------

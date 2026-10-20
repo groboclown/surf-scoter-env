@@ -65,6 +65,20 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_FAILURE;
         }
     };
+    // The universal file decides what runs here: it must be the user's
+    // alone, and its accepted settings must still be the store's, unexpired.
+    let problems = config::accepted::check_for_run(
+        &cli.universal,
+        config.accepted.as_ref(),
+        &config.system,
+        config::accepted::now(),
+    );
+    if !problems.is_empty() {
+        for e in &problems {
+            eprintln!("scoter-host: {e}");
+        }
+        return EXIT_FAILURE;
+    }
     let universal = cli.universal.display();
     // Both are there when there's a project file.
     let (Some(mut project), Some(dev_container)) = (config.project, config.dev_container) else {
@@ -559,6 +573,11 @@ mod tests {
                 workspace.is_some()
             ));
             std::fs::write(&path, json).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
             path
         }
     }

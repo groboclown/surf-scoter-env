@@ -273,6 +273,18 @@ host-bridge:
                 - ~/.volta/bin
                 - ~/.proto/shims
 
+# Finding your acceptance of a project's settings, in `scoter: paths: verified-dir`.
+verified:
+    runs:
+        # Given the universal configuration file (`{x:universal}`) with the
+        # project, prints JSON saying which acceptance matches, if any.
+        find-acceptance:
+            - ${python:exec}
+            - -E
+            - -s
+            - ${scoter:distribution-bin-dir}/verified_find.py
+            - '{x:universal}'
+
 # Information for the workspace clone.
 workspace:
     paths:

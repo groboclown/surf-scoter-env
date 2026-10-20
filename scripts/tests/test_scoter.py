@@ -237,3 +237,59 @@ class WarnUnreviewedCommandsTest(unittest.TestCase):
         self.assertIn("(aws, git)", text)
         self.assertIn("can't review them yet", text)
 
+
+class TempFileTest(unittest.TestCase):
+    """Test the private temporary configuration files."""
+
+    @unittest.skipIf(sys.platform == "win32", "modes")
+    def test_private(self) -> None:
+        """In a directory of its own, only the user's; removed with it."""
+        file = scoter.save_to_tmp({"a": 1})
+        directory = os.path.dirname(file)
+        self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(file).st_mode & 0o777, 0o600)
+        with open(file, encoding="utf-8") as inp:
+            self.assertEqual(inp.read(), '{"a": 1}')
+        scoter.remove_tmp(file)
+        self.assertFalse(os.path.exists(directory))
+
+
+class FindAcceptanceTest(unittest.TestCase):
+    """Test asking the setup's `find-acceptance` for the acceptance."""
+
+    def settings(self, script: str) -> scoter.DictJsonData:
+        return {"resolved": {"verified": {"runs": {"find-acceptance": [
+            sys.executable, "-c", script, "{x:universal}",
+        ]}}}}
+
+    def test_found(self) -> None:
+        """Given the configuration's file, which is gone afterwards; its JSON."""
+        script = (
+            "import json, os, sys; "
+            "print(json.dumps({'match': 'exact', 'accepted-settings': '/v/a.json', "
+            "'given': os.path.isfile(sys.argv[1]), 'file': sys.argv[1]}))"
+        )
+        found = scoter.find_acceptance(self.settings(script))
+        assert found is not None  # nosec: B101  # narrowing for the type checker
+        self.assertEqual(found["accepted-settings"], "/v/a.json")
+        self.assertTrue(found["given"])
+        self.assertFalse(os.path.exists(str(found["file"])))
+
+    def test_problems(self) -> None:
+        """No command is no lookup; a failing or confused one is an error."""
+        self.assertIsNone(scoter.find_acceptance({}))
+        with self.assertRaises(scoter.ConfigErr):
+            scoter.find_acceptance(self.settings("import sys; sys.exit(3)"))
+        with self.assertRaises(scoter.ConfigErr):
+            scoter.find_acceptance(self.settings("print('not json')"))
+        with self.assertRaises(scoter.ConfigErr):
+            scoter.find_acceptance(self.settings("print('[1]')"))
+
+
+class RunToEndTest(unittest.TestCase):
+    """Test running a sub-command."""
+
+    def test_exit_code(self) -> None:
+        """The command's exit code."""
+        self.assertEqual(scoter.run_to_end([sys.executable, "-c", "import sys; sys.exit(4)"]), 4)
+

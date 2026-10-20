@@ -17,6 +17,7 @@
 //! setup files again, and its project file is used unless another is given.
 //! That allows building the configuration up in steps.
 
+pub mod accepted;
 pub mod command;
 pub mod dev_env;
 pub mod egress;
@@ -32,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use accepted::AcceptedSettings;
 use dev_env::DevContainer;
 use environment::{EnvPlan, EnvRules};
 use project::ProjectConfig;
@@ -74,6 +76,9 @@ pub struct LoadOptions {
     pub universal: Option<PathBuf>,
     /// Don't look for the user's setup file or the install directory's.
     pub no_setup_search: bool,
+    /// The user's accepted settings for the project (`--accepted-settings`):
+    /// an `accepted.json` in the verified store.
+    pub accepted_settings: Option<PathBuf>,
 }
 
 /// What `load_all` uses from a universal configuration file: the setup, and
@@ -95,6 +100,18 @@ struct UniversalInput {
     /// The commands, as they run.
     #[serde(default)]
     host_brokered: Vec<serde_json::Value>,
+    /// The accepted settings `host-brokered` was built from: the store's
+    /// file, and its contents.
+    #[serde(default)]
+    accepted_settings: Option<AcceptedInput>,
+}
+
+/// A universal configuration file's `accepted-settings`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedInput {
+    file: PathBuf,
+    contents: serde_json::Value,
 }
 
 impl UniversalInput {
@@ -130,6 +147,8 @@ pub struct FullConfig {
     pub project: Option<ProjectConfig>,
     /// The project's dev container; present whenever `project` is.
     pub dev_container: Option<DevContainer>,
+    /// The user's accepted settings for the project, when given.
+    pub accepted: Option<AcceptedSettings>,
 }
 
 /// Read the whole configuration, using the process environment to find the
@@ -259,11 +278,17 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     if let (Some(system), Some(project)) = (&system, &project) {
         errors.extend(egress_problems(project, system));
     }
+    let accepted = universal.accepted_settings.and_then(|input| {
+        accepted::parse(input.contents, &input.file)
+            .map_err(|e| errors.extend(e))
+            .ok()
+    });
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
             project,
             dev_container,
+            accepted,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -404,11 +429,26 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         errors.extend(plan_environments(project, system));
         errors.extend(egress_problems(project, system));
     }
+    // Checked against the project and the setup in effect.
+    let accepted = options.accepted_settings.as_deref().and_then(|file| {
+        let read = accepted::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()?;
+        if let Some(system) = &system {
+            let problems = read.check(system);
+            if !problems.is_empty() {
+                errors.extend(problems);
+                return None;
+            }
+        }
+        Some(read)
+    });
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
             project,
             dev_container,
+            accepted,
         }),
         _ => Err(ConfigErrors(errors)),
     }

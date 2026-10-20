@@ -24,6 +24,10 @@ from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import ConfigErr
 from surf_scoter_lib.ssh_config import SshConfig
 
+# Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`.
+SUC_COPY_DIR = "environments"
+SUC_COPY_FILE = "suc.json"
+
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
 
@@ -128,9 +132,13 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             resources_dir / defaults.DOCKER_COMPOSE_FILENAME
         )
 
-        # Save off a copy of the config file
-        universal_config_file = resources_dir / "suc.json"
-        config.save(universal_config_file)
+        # scoter-host's copy of the configuration: it decides what runs on
+        # this computer, so it's private, and outside the project.
+        universal_config_file = fileutil.write_private(
+            config.require_path("scoter", "state-dir"),
+            (SUC_COPY_DIR, host, SUC_COPY_FILE),
+            config.dumps().encode("utf-8"),
+        )
     except:
         print("Aborting execution.", file=sys.stderr)
         # Close without saving.
@@ -230,6 +238,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     )
     active_envs.rm_environ_by_host(host)
     active_envs.save(close=True)
+
+    # scoter-host's copy of the configuration.
+    fileutil.rm(universal_config_file.parent)
 
     # Clean up the setup and resource directories.
     #_rm(setup_dir)

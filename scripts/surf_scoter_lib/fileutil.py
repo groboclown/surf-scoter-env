@@ -4,8 +4,9 @@ import contextlib
 import os
 import platform
 import shutil
+import tempfile
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 
 from . import log
@@ -148,6 +149,48 @@ def require_exe(name: str | Path) -> Path:
 def is_windows() -> bool:
     """Check if the user is running on Windows."""
     return platform.system() == "Windows"
+
+
+# ---------------------------------------------------------------------
+# Private files
+
+
+def write_private(root: Path, parts: Sequence[str], data: bytes) -> Path:
+    """Write `data` to `root/parts...`, private to the user, replacing any file whole.
+
+    `root` and the directories below it are created with mode 0700 as
+    needed; none of them may be a symlink.  The file is written to a
+    temporary file beside it (mode 0600) and renamed into place.
+    """
+    if not root.is_absolute():
+        raise SurfScoterErr(f"{root}: must be an absolute path")
+    if not os.path.lexists(root):
+        root.mkdir(mode=MODE_USER_RWX, parents=True)
+    directory = root
+    for part in ("", *parts[:-1]):
+        if part:
+            if part in (".", "..") or "/" in part or "\\" in part:
+                raise SurfScoterErr(f"`{part}` is not a directory name")
+            directory = directory / part
+            if not os.path.lexists(directory):
+                directory.mkdir(mode=MODE_USER_RWX)
+        if os.path.islink(directory) or not directory.is_dir():
+            raise SurfScoterErr(f"{directory}: not a directory (or a symlink)")
+        if not is_windows():
+            os.chmod(directory, MODE_USER_RWX)
+    path = directory / parts[-1]
+    fd, temp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp)
+        raise
+    return path
 
 
 # ---------------------------------------------------------------------

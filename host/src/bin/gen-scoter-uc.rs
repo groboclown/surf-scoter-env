@@ -6,6 +6,7 @@
 //!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
+//!                      [--accepted-settings ACCEPTED.json]
 //!                      [--unreviewed-project-commands] [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
@@ -42,7 +43,8 @@ const EXIT_USAGE: i32 = 2;
 const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] \
                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
-                     [--unreviewed-project-commands] [--output FILE]";
+                     [--accepted-settings ACCEPTED.json] [--unreviewed-project-commands] \
+                     [--output FILE]";
 
 fn main() {
     std::process::exit(run(std::env::args_os().skip(1)));
@@ -73,6 +75,9 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             );
             println!(
                 "--no-setup-search skips looking for the user's and the install directory's setup files."
+            );
+            println!(
+                "--accepted-settings gives the user's accepted settings for the project, from the verified store; host-brokered is built from them."
             );
             println!(
                 "--unreviewed-project-commands builds host-brokered from the project's commands, which nobody has reviewed; without it, host-brokered is empty."
@@ -141,6 +146,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut dev_container_settings_dir: Option<OsString> = None;
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
+    let mut accepted_settings: Option<OsString> = None;
     let mut no_setup_search = false;
     let mut unreviewed_project_commands = false;
     let mut output: Option<OsString> = None;
@@ -177,6 +183,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             "--dev-container-settings-dir" => &mut dev_container_settings_dir,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
+            "--accepted-settings" => &mut accepted_settings,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -201,6 +208,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
             no_setup_search,
+            accepted_settings: accepted_settings.map(PathBuf::from),
         },
         build: BuildOptions {
             unreviewed_project_commands,
@@ -248,6 +256,7 @@ mod tests {
             "/opt/scoter",
             "--universal=first.json",
             "--no-setup-search",
+            "--accepted-settings=/v/accepted.json",
             "--unreviewed-project-commands",
             "--output=out.json",
         ]));
@@ -262,6 +271,7 @@ mod tests {
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
+                    accepted_settings: Some(PathBuf::from("/v/accepted.json")),
                 },
                 build: BuildOptions::UNREVIEWED,
                 output: Some(PathBuf::from("out.json")),

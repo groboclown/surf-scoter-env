@@ -182,6 +182,8 @@ The tools use these sections:
     * `programs: exec`: the interpreter, normally `python3`.  Point it at a virtual environment's interpreter, such as `${scoter:distribution-dir}/.venv/bin/python`, to give the scripts installed libraries.  It runs on your computer with your privileges, so never point it into a project.
     * `runs: sub-command`: how the tool starts a sub-command script: normally `${exec} -E -s {x:script}`.  `{x:script}` is the script, and the tool adds the universal configuration file, the sub-command name and its arguments after it.  It must start with the interpreter; `-E` ignores the `PYTHON*` environment variables (which a project could set when you enter its directory) and `-s` your user site-packages.
 * `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  Its `host-commands` map a project's `git` command to `${exec}`, and warn about it, and about the options that set Git configuration.
+* `verified`: your acceptances of projects' settings (see [The verified store](#the-verified-store)).
+    * `runs: find-acceptance`: given the universal configuration file with the project (`{x:universal}`), prints JSON saying which of your acceptances matches the project's files, if any, and its accepted settings.  The distribution runs its `bin/verified_find.py`, with the `python` section's interpreter.
 * `host-bridge`: the [host command checks](#host-command-checks) that aren't about one tool: shells, interpreters, programs that run other programs, options and environment variables that run code, and version manager shims.
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
@@ -339,6 +341,10 @@ The copies take disk space.  Each file is kept once, however many acceptances sh
 * `verified-max-file-size` and `verified-max-snapshot-size` limit what one acceptance can copy.
 
 Everything in it must belong to you, with no access for anyone else (directories `0700`, files `0600`), and contain no symlinks; the tools refuse to read it otherwise.  On Windows, which has no file modes, that's left to your user profile's permissions.
+
+Each `scoter` run with a project looks for the acceptance that matches the project's files, as they are now, and the setup values it was accepted under.  A change that only touches comments or blank lines (in a Dockerfile, a JSON file, or the YAML files the tools read) carries the acceptance forward, with its settings and its expiry; any other change needs a new review.
+
+`scoter run` keeps `scoter-host`'s copy of the configuration in `${scoter:state-dir}/environments/HOST/suc.json`, private to you, and removes it when the environment stops.
 
 The tools lock the store while they change it, so two `scoter` commands can't interleave their changes.  If `verified-dir` is on a network file system (such as an NFS home directory), the lock may only work between commands on the same computer.
 

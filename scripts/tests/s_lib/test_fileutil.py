@@ -45,3 +45,43 @@ class LockTest(unittest.TestCase):
         os.symlink(target, self.tmp / "lock")
         with self.assertRaises(OSError), fileutil.exclusive_lock(self.tmp / "lock"):
             pass
+
+
+class WritePrivateTest(unittest.TestCase):
+    """Test fileutil.write_private."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(os.path.realpath(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    @unittest.skipUnless(POSIX, "modes")
+    def test_private(self) -> None:
+        """Directories 0700, the file 0600, replaced whole."""
+        root = self.tmp / "state"
+        path = fileutil.write_private(root, ("environments", "host", "suc.json"), b"one")
+        self.assertEqual(path, root / "environments" / "host" / "suc.json")
+        self.assertEqual(path.read_bytes(), b"one")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        for directory in (root, root / "environments", path.parent):
+            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700, directory)
+        fileutil.write_private(root, ("environments", "host", "suc.json"), b"two")
+        self.assertEqual(path.read_bytes(), b"two")
+        self.assertEqual(sorted(os.listdir(path.parent)), ["suc.json"])
+
+    @unittest.skipUnless(POSIX, "symlinks")
+    def test_refused(self) -> None:
+        """No symlinked directories, no `..`, and an absolute root."""
+        root = self.tmp / "state"
+        root.mkdir()
+        (self.tmp / "elsewhere").mkdir()
+        os.symlink(self.tmp / "elsewhere", root / "environments")
+        with self.assertRaises(err.SurfScoterErr):
+            fileutil.write_private(root, ("environments", "f"), b"x")
+        with self.assertRaises(err.SurfScoterErr):
+            fileutil.write_private(root, ("..", "f"), b"x")
+        with self.assertRaises(err.SurfScoterErr):
+            fileutil.write_private(Path("relative"), ("f",), b"x")
+

@@ -11,6 +11,7 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
               [--dev-container-workspace-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
+              [--accepted-settings ACCEPTED.json]
               [--unreviewed-project-commands] [--output FILE]
 ```
 
@@ -20,6 +21,7 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
 * `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  It wins over a `scoter: paths: distribution-dir` in the setup files.  The other setup file is the user's, found through `$SURF_SCOTER_HOME` or `~/.config`; no setup file is ever read from a project.
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
+* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`scoter: paths: verified-dir`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.
 * `--unreviewed-project-commands`: build `host-brokered` from the project file's `commands`, as they are.  Nobody has reviewed them, so `scoter` warns on every run that it passes this.  Without it, `host-brokered` is empty.  It's a stand-in until the user's accepted settings feed `host-brokered` (step 8 of [Projects in v1](projects-v1.md)), and goes then.
 * `--output`: the file to write; without it, the JSON goes to stdout.
 
@@ -27,16 +29,21 @@ If the configuration has problems, the program writes all of them to stderr, one
 
 ### Building up the configuration in steps
 
-The `scoter` program needs the system setup to find the project.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` twice:
+The `scoter` program needs the system setup to find the project, and the project to find the user's acceptance of it.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` three times:
 
 ```shell
 gen-scoter-uc --output first.json
 # ... run first.json's VCS `find-root` commands, then look for the project
 #     directory up to the root ...
-gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT
+gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT --output second.json
+# ... run second.json's `verified: runs: find-acceptance`, given second.json ...
+gen-scoter-uc --universal second.json --no-setup-search --project-dir DIR --vcs-root ROOT \
+    --accepted-settings ACCEPTED.json
 ```
 
-The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.
+The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.  The third adds the accepted settings `find-acceptance` named.  Without any (no acceptance matches), `scoter` gives `--unreviewed-project-commands` instead, until a review can make one (step 15).
+
+`scoter` writes each universal file it passes along into a new directory only the user can use, as a file only they can read, and removes it when it's done.
 
 ### Starting `scoter-host`
 
@@ -47,7 +54,13 @@ gen-scoter-uc --project-dir DIR --dev-container-workspace-dir WORKSPACE --output
 scoter-host --universal universal.json CONTAINER_NAME
 ```
 
-It reads the universal configuration file and **no other file**:
+Before anything else, it checks:
+
+* the universal configuration file belongs to the user, and nobody else can use it (it decides what runs on the host);
+* with `accepted-settings`: its `file` is in `verified-dir`, private, and still says exactly what `contents` does (a revoked, replaced or edited acceptance doesn't), and the acceptance's `expires-at` hasn't passed.  Only when it starts: a session that's running when its acceptance expires carries on;
+* the project directory is the accepted one, and it and the dev container directory are still there.
+
+It reads the universal configuration file and **no other file** (but for the accepted settings' file in the store, to compare):
 
 * the commands it runs are the `host-brokered` list, exactly as written there: each entry's `program` is the program run (`null` makes the command unavailable, and its requests are refused), and its `env` is the command's whole environment plan;
 * the system settings come from the file's `setup` record, expanded again;
@@ -232,8 +245,31 @@ The general layout:
         ]
     },
 
-    // The commands `scoter-host` runs.  Empty unless gen-scoter-uc is given
-    // --unreviewed-project-commands, until the accepted settings feed it.
+    // The user's accepted settings, from the verified store, which 'host-brokered' and
+    // 'egress' were made from: the store's file, and its contents (see step 8 of
+    // projects-v1.md).  'null' without them.
+    "accepted-settings": {
+        "file": "/home/user/.config/surf-scoter.d/verified/my-project-3f9a0c17b2e4/acceptances/20261020T150405Z-7c1e/accepted.json",
+        "contents": {
+            "$schema": "surf-scoter-accepted-settings-1",
+            "project-dir": "/home/user/my-project",
+            "expires-at": "2026-11-19T15:04:05+00:00",
+            "vcs": "git",
+            "gateway": null,
+            "egress": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}],
+            "commands": []
+        }
+    },
+
+    // The accepted egress rules, and the gateway they were accepted for.  'null' without
+    // accepted settings.
+    "egress": {
+        "gateway": null,
+        "rules": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}]
+    },
+
+    // The commands `scoter-host` runs: the accepted settings' `commands`.  Without accepted
+    // settings, empty, unless gen-scoter-uc is given --unreviewed-project-commands.
     "host-brokered": [
         // This is the `commands` section from the project configuration file.
         // It's nearly verbatim, except for two fields, so each entry says exactly what it does:
