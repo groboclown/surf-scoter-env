@@ -179,12 +179,12 @@ class ProgramFindingsTest(unittest.TestCase):
         os.chmod(shims, 0o755)  # nosec: B103  # As above.
         config = _config({"git": "${x:git}"}, {"git": self.tool("git", shims)})
         config.raw()["host-command-checks"] = {"checks": {
-            "host-bridge:version-manager-shims": {
+            "verification:version-manager-shims": {
                 "action": "refuse", "reason": "A shim picks the real program.", "paths": [str(shims)],
                 "files": [], "commands": {}, "name-patterns": [], "options": [], "env": [], "overrides": [],
             },
             # Checks by name don't apply to the setup's programs.
-            "host-bridge:vcs": {
+            "verification:vcs": {
                 "action": "refuse", "reason": "Not for the setup.", "paths": [],
                 "files": [], "commands": {"git": None}, "name-patterns": ["git"], "options": [], "env": [],
                 "overrides": [],
@@ -203,13 +203,13 @@ class HostCommandReportTest(unittest.TestCase):
         config = user_config.UserConfig({
             "host-command-checks": {
                 "checks": {
-                    "host-bridge:shells": {
+                    "verification:shells": {
                         "action": "refuse", "commands": {"sh": "/bin/sh"}, "overrides": [],
                     },
                     "mine:ksh": {
                         "action": "warn",
                         "commands": {"ksh": "/bin/ksh", "dash": None},
-                        "overrides": ["host-bridge:shells"],
+                        "overrides": ["verification:shells"],
                     },
                 },
                 "notices": [{
@@ -224,7 +224,7 @@ class HostCommandReportTest(unittest.TestCase):
             setup_check.host_command_report(config),
             [
                 "/u/setup.yaml removes `a:b`",
-                "`mine:ksh` overrides `host-bridge:shells` for `dash`, `ksh`, with `warn`",
+                "`mine:ksh` overrides `verification:shells` for `dash`, `ksh`, with `warn`",
             ],
         )
         self.assertEqual(len(config.host_command_checks()), 2)

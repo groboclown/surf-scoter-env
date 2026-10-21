@@ -148,8 +148,8 @@ def _is_item(key: str) -> bool:
 
 
 def expires_at(config: UserConfig, now: datetime.datetime) -> str:
-    """A new acceptance's expiry: `verified-expiry-days` from now (30 by default)."""
-    days = config.optional_int_value("scoter", "verified-expiry-days") or 30
+    """A new acceptance's expiry: `verification: expiry-days` from now (30 by default)."""
+    days = config.optional_int_value("verification", "expiry-days") or 30
     return (now + datetime.timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
@@ -270,7 +270,7 @@ def _header(out: Writer, config: UserConfig, context: Context) -> None:
     out.note(f"  project files  {files_dir}{snapshot_id}")
     if context.branch:
         out.note(f"  branch         {context.branch}")
-    out.note(f"  gateway        {config.optional_value('network-gateway', 'name') or 'none'}")
+    out.note(f"  gateway        {config.optional_value('dev-env', 'network-gateway-name') or 'none'}")
     if context.accepted_note:
         out.note(f"  {context.accepted_note}")
     previous = context.previous

@@ -29,9 +29,12 @@ class LookupTest(TempDirTest):
                 "dev-container-path": str(self.project / ".surf-scoter.d" / "env"),
             },
             "resolved": {
+                "verification": {
+                    "paths": {"store": str(self.verified.root)},
+                    "path-lists": {"verified-containers": []},
+                },
                 "scoter": {
-                    "paths": {"verified-dir": str(self.verified.root)},
-                    "path-lists": {"dev-containers-search": [], "dev-containers-verified": []},
+                    "path-lists": {"dev-containers-search": []},
                     "values": {
                         "project-files-dir": ".surf-scoter.d",
                         "project-file-name": "project.yaml",
@@ -73,8 +76,8 @@ class LookupTest(TempDirTest):
         """No store, or no record, is no match."""
         self.assertEqual(lookup.find(UserConfig(self.suc())), lookup.Lookup())
         missing = self.suc()
-        paths = missing["resolved"]["scoter"]["paths"]  # type: ignore[index]
-        paths["verified-dir"] = str(self.tmp / "nowhere")  # type: ignore[index]
+        paths = missing["resolved"]["verification"]["paths"]  # type: ignore[index]
+        paths["store"] = str(self.tmp / "nowhere")  # type: ignore[index]
         self.assertEqual(lookup.find(UserConfig(missing)), lookup.Lookup())
         self.assertEqual(lookup.find(UserConfig({})), lookup.Lookup())
 
@@ -123,14 +126,14 @@ class LookupTest(TempDirTest):
         self.assertIsNone(found.accepted_settings)
 
     def test_verified_containers(self) -> None:
-        """Containers in `dev-containers-verified` go into the setup values; others don't."""
+        """Containers in `verification: verified-containers` go into the setup values; others don't."""
         suc = self.suc()
         outside = self.tmp / "dist" / "base"
         self.write("dist/base/Dockerfile", "FROM scratch\n")
         suc["dev-container"] = {"parent-builds": [{"dir": str(outside), "tag": "base"}]}
         self.assertEqual(lookup.verified_containers(UserConfig(suc)), {})
-        lists = suc["resolved"]["scoter"]["path-lists"]  # type: ignore[index]
-        lists["dev-containers-verified"] = [str(self.tmp / "dist")]  # type: ignore[index]
+        lists = suc["resolved"]["verification"]["path-lists"]  # type: ignore[index]
+        lists["verified-containers"] = [str(self.tmp / "dist")]  # type: ignore[index]
         found = lookup.verified_containers(UserConfig(suc))
         self.assertEqual(list(found), [str(outside)])
         self.assertEqual(
@@ -150,7 +153,7 @@ class LookupTest(TempDirTest):
             f"Your acceptance of these files ({acceptance.id}) expired {acceptance.expires_at.isoformat()}.",
         )
         changed_setup = self.suc()
-        changed_setup["resolved"]["network-gateway"] = {"values": {"name": "other"}}  # type: ignore[index]
+        changed_setup["resolved"]["dev-env"] = {"values": {"network-gateway-name": "other"}}  # type: ignore[index]
         self.assertEqual(
             lookup.no_match_reason(UserConfig(changed_setup)),
             f"Your setup changed since you accepted these files ({acceptance.id}): gateway: name.",

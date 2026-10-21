@@ -91,6 +91,8 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         # Remember to mark the work directories as ignored.
 
         # -- workspace directory
+        # Its parent first: by default in `state-dir`, so only yours.
+        _make_work_parent(config)
         # Setup the workspace directory via the vcs command.
         workspace_dir = _setup_workspace(
             config, vcs_section, args.clean_workspace, args.workspace_fetch
@@ -102,7 +104,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         if setup_dir is None:
             setup_dir = config.require_path("workspace", "setup-dir")
             config.set_active_location("dev-container-settings-dir", setup_dir)
-        setup_dir.mkdir(exist_ok=True)
+        setup_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, setup_dir)
 
         # Write the authorized keys file.
@@ -136,7 +138,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
         # -- resources directory
         resources_dir = config.require_path("workspace", "resources-dir")
-        resources_dir.mkdir(exist_ok=True)
+        resources_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, resources_dir)
 
         # The network gateway's configuration, from the egress rules.
@@ -292,8 +294,8 @@ def _setup_programs_ok(config: UserConfig) -> bool:
 def _active_envs(config: UserConfig) -> contextlib.AbstractContextManager[ActiveEnvironmentSet]:
     """The active environments, to change under their lock."""
     return ActiveEnvironmentSet.locked(
-        config.require_path("dev-env", "running-env-config"),
-        config.require_path("dev-env", "running-env-config-lock"),
+        config.require_path("scoter", "running-envs"),
+        config.require_path("scoter", "running-envs-lock"),
     )
 
 
@@ -492,10 +494,24 @@ def _setup_workspace(
     return workspace_dir
 
 
+def _make_work_parent(config: UserConfig) -> None:
+    """Make the workspace's parent directory, readable only by you, if it isn't there."""
+    parent = config.optional_path("workspace", "workspace-parent-dir")
+    if parent is not None and not parent.exists():
+        parent.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
+
+
 def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -> None:
-    """Mark the directory as ignored by adding the name to the parent's ignore file."""
+    """Mark the directory as ignored by adding the name to the parent's ignore file.
+
+    Only a directory in the project needs it (the workspace's default is
+    outside, in `state-dir`).
+    """
     if not vcs_section:
         # No ignore possible.
+        return
+    project = config.active_location("project-dir")
+    if project is None or not Path(os.path.realpath(path)).is_relative_to(os.path.realpath(project)):
         return
     ignore_file_name = config.require_value(vcs_section, "ignore-file")
     if not ignore_file_name:
@@ -692,7 +708,7 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             out.write(config.dumps())
         res = config.run_command(
-            "network-gateway", "write-config",
+            "dev-env", "network-gateway-write-config",
             check=False,
             template={"universal": str(universal), "output": str(output)},
         )
@@ -750,7 +766,7 @@ def _write_docker_compose_env_file(
         # Mount points
         "WORKSPACE_CONTAINER": mounts["workspace"],
         "SETTINGS_CONTAINER": mounts["setup"],
-        "GATEWAY_CONFIG_CONTAINER": config.require_value("network-gateway", "config-mount"),
+        "GATEWAY_CONFIG_CONTAINER": config.require_value("dev-env", "network-gateway-config-mount"),
 
         # Limits
         "PIDS_LIMIT": config.require_value("dev-env", "pids-limit"),

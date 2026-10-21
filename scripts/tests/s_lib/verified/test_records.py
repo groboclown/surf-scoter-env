@@ -155,10 +155,10 @@ class RecordsTest(TempDirTest):
         suc = {
             "resolved": {
                 "scoter": {
-                    "paths": {"verified-dir": "/v"},
-                    "path-lists": {"dev-containers-search": ["/a"], "dev-containers-verified": []},
+                    "path-lists": {"dev-containers-search": ["/a"]},
                     "values": {"project-files-dir": ".surf-scoter.d"},
                 },
+                "verification": {"paths": {"store": "/v"}, "path-lists": {"verified-containers": []}},
                 "git-vcs": {"runs": {"local-clone": ["git", "clone"], "find-root": ["x"]}},
             },
             "host-command-checks": {"checks": {"h:s": {"action": "refuse"}}},
@@ -168,7 +168,7 @@ class RecordsTest(TempDirTest):
             ]},
         }
         values = records.setup_values(UserConfig(suc), "git-vcs", {"/c": "sha256:c"})
-        self.assertEqual(values["verified-dir"], "/v")
+        self.assertEqual(values["store"], "/v")
         self.assertEqual(values["vcs-runs"], {
             "local-clone": ["git", "clone"], "fetch-changes-into": None,
             "show-fetch-changes": None, "merge-changes": None,

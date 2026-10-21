@@ -22,7 +22,7 @@ it_expect "${IT_SANDBOX}/review.yaml" '  - {host: "registry.npmjs.org", protocol
 it_expect "${IT_SANDBOX}/review.yaml" '  - command: "ls"'
 # The shell is refused, so it's commented out, with its override offered.
 it_expect "${IT_SANDBOX}/review.yaml" '  # - command: "sh"'
-it_expect "${IT_SANDBOX}/review.yaml" '    # $override: ["host-bridge:shells"]'
+it_expect "${IT_SANDBOX}/review.yaml" '    # $override: ["verification:shells"]'
 # What the setup changes about the host command checks (nothing, here), unless left out.
 it_expect "${IT_SANDBOX}/review.yaml" "#scoter: Your setup's host command checks: none removed, replaced or overridden."
 scoter verify --skip-setup-review --output "${IT_SANDBOX}/skipped.yaml" 2> /dev/null

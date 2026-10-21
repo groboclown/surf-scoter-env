@@ -30,10 +30,10 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `docker: programs: exec` and `docker: runs: *` | Build images, start and stop the environment, start the bridge broker | These run on your host with your privileges.  `broker` must not request a TTY, and must run inside the named container. |
 | `ssh: runs: proxy-command` | How SSH reaches the container | Keep it going through the runtime's exec channel.  Switching to a published port breaks N5. |
 | `ssh: paths: key-file`, `known-hosts`, `config-file` | Your client key and the files `scoter` edits | `scoter` rewrites the config and `known_hosts` files on each run. |
-| `workspace: paths: *` | Where the workspace, setup and resources directories live | Keep the setup and resources directories **outside** the workspace.  Inside it, the container could write them through its read-write workspace mount. |
+| `workspace: paths: *` | Where the workspace, setup and resources directories live | Keep the setup and resources directories **outside** the workspace.  Inside it, the container could write them through its read-write workspace mount.  The default keeps all three outside the project, in `state-dir` (FILE-9). |
 | `git-vcs: runs: *`, `file-vcs: runs: *` | How the workspace is created, refreshed and merged back | `fetch-changes` runs on your host with the workspace as its working directory (see [file access attack vectors](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace)). |
-| `network-gateway: runs: write-config` | Turns the egress rules into the gateway's configuration | A command that writes a broader list than the rules say breaks N2. |
-| `network-gateway: values: name` | The gateway the egress rules are accepted for | Changing it asks for a new review; a gateway that enforces less than its name suggests weakens N2. |
+| `dev-env: runs: network-gateway-write-config` | Turns the egress rules into the gateway's configuration | A command that writes a broader list than the rules say breaks N2. |
+| `dev-env: values: network-gateway-name` | The gateway the egress rules are accepted for | Changing it asks for a new review; a gateway that enforces less than its name suggests weakens N2. |
 | `dev-env: paths: docker-compose`, `firewall-router`, `network-gateway` | Which compose file and network containers to use | Replacing these replaces the network.  Recheck every property. |
 | `dev-env: values: *-image` | Image names for the containers | An image from a registry rather than a local build means trusting whoever publishes it. |
 | `dev-env: values: mem-limit`, `cpus`, `pids-limit`, `logging-max-size` | Dev container resource limits | Removing them lets the container exhaust your host. |

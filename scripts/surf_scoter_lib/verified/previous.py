@@ -35,7 +35,7 @@ class Previous:
     review_file: Path
     # Its snapshot's files, read from the store.
     files: dict[str, bytes] = field(default_factory=dict)
-    # The setup values that changed since: `host-command-checks: host-bridge:shells`, say.
+    # The setup values that changed since: `host-command-checks: verification:shells`, say.
     setup_changes: list[str] = field(default_factory=list)
     # What the user accepted, as the generator read their `review.yaml`
     # (`previous-review: data`); filled in by the caller.
@@ -51,12 +51,12 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
     passed over.
     """
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None or verified is None or not verified.is_dir():
         return None
     project_dir = os.path.realpath(project)
     verified_store = store.VerifiedStore.open(verified)
-    env_id = store.environment_id(Path(project_dir))
+    env_id = store.project_id(config, project_dir)
     record = records.load_environment(verified_store, project_dir, env_id)
     if record is None:
         return None

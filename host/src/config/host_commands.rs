@@ -4,7 +4,7 @@
 //! Any section can have `host-commands`.  Each key is one check:
 //!
 //! ```yaml
-//! host-bridge:
+//! verification:
 //!   host-commands:
 //!     shells:
 //!       action: refuse

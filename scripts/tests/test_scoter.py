@@ -166,6 +166,29 @@ class CommandEnvTest(unittest.TestCase):
                 os.environ["GIT_DIR"] = old
 
 
+class CurrentBranchTest(unittest.TestCase):
+    """The branch, for `${scoter:project-branch}`, from the VCS section's `current-branch`."""
+
+    def settings(self, command: list[str] | None) -> scoter.DictJsonData:
+        runs: dict[str, object] = {} if command is None else {"current-branch": command}
+        return {"resolved": {"git-vcs": {"runs": runs}}}
+
+    def test_branch(self) -> None:
+        root = (Path(tempfile.gettempdir()), "git")
+        printing = [sys.executable, "-c", "import sys; print('feature/' + sys.argv[1][-1:])", "{x:root}"]
+        self.assertEqual(
+            scoter.vcs_current_branch(self.settings(printing), root), "feature/" + str(root[0])[-1:],
+        )
+        # None without the command, or when it says nothing or fails.
+        self.assertIsNone(scoter.vcs_current_branch(self.settings(None), root))
+        self.assertIsNone(scoter.vcs_current_branch(
+            self.settings([sys.executable, "-c", "pass", "{x:root}"]), root,
+        ))
+        self.assertIsNone(scoter.vcs_current_branch(
+            self.settings([sys.executable, "-c", "print('x'); raise SystemExit(1)", "{x:root}"]), root,
+        ))
+
+
 class FindProjectDirTest(unittest.TestCase):
     """Test the project search, from the start up to the VCS root."""
 
@@ -268,7 +291,7 @@ class FindAcceptanceTest(unittest.TestCase):
     """Test asking the setup's `find-acceptance` for the acceptance."""
 
     def settings(self, script: str) -> scoter.DictJsonData:
-        return {"resolved": {"verified": {"runs": {"find-acceptance": [
+        return {"resolved": {"scoter": {"runs": {"find-acceptance": [
             sys.executable, "-c", script, "{x:universal}",
         ]}}}}
 

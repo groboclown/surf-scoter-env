@@ -36,13 +36,13 @@ use super::egress::{self, EgressRule};
 use super::environment::EnvPlan;
 use super::project::{self, Commands};
 use super::read;
-use super::system::{SCOTER_SECTION, SystemConfig, VERIFIED_DIR};
+use super::system::{SCOTER_SECTION, SystemConfig, VERIFICATION_SECTION, VERIFIED_STORE};
 use super::{ConfigError, child_key, index_key};
 
 pub const SCHEMA: &str = "surf-scoter-accepted-settings-1";
 /// The setup section and `values` key naming the network gateway.
-pub const GATEWAY_SECTION: &str = "network-gateway";
-pub const GATEWAY_NAME: &str = "name";
+pub const GATEWAY_SECTION: &str = "dev-env";
+pub const GATEWAY_NAME: &str = "network-gateway-name";
 const KEYS: [&str; 9] = [
     "$schema",
     "project-dir",
@@ -413,7 +413,7 @@ pub fn check_for_run(
     };
     let error = |key: &str, message: String| ConfigError::new(Some(universal), key, message);
     let at = "accepted-settings";
-    match system.get_path(SCOTER_SECTION, VERIFIED_DIR) {
+    match system.get_path(VERIFICATION_SECTION, VERIFIED_STORE) {
         Some(verified) if canonical(&accepted.file).starts_with(canonical(&verified)) => {
             match check_private(&accepted.file).and_then(|()| {
                 let text =
@@ -437,7 +437,7 @@ pub fn check_for_run(
         _ => errors.push(error(
             &child_key(at, "file"),
             format!(
-                "{} isn't in the verified store (`{SCOTER_SECTION}:{VERIFIED_DIR}`)",
+                "{} isn't in the verified store (`{VERIFICATION_SECTION}:{VERIFIED_STORE}`)",
                 accepted.file.display()
             ),
         )),

@@ -7,21 +7,22 @@ Because the tooling brings configuration settings from many different places, it
 The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, with the same configuration code that `scoter-host` uses):
 
 ```
-gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
+gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
               [--dev-container-workspace-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
               [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
-              [--output FILE]
+              [--previous-review REVIEW.yaml] [--output FILE]
 ```
 
 * `--vcs-root`: the root of the repository holding the project, which `scoter` finds from the setup's VCS sections (see [Version control roots](../system-config-file.md#version-control-roots)).  It must exist and hold the project directory.  It's the `scoter` location `vcs-root`; setup files can't be read from inside it.  Without a `--project-dir` this time, a `--universal` file's carries over.
+* `--project-branch`: the project's branch, which `scoter` gets from the VCS section's `runs: current-branch`.  It's made safe as one path part and set as the `scoter` value `project-branch` (see [the `scoter:` section](../system-config-file.md#the-scoter-section)).  A `--universal` file's carries over while the project directory stays the same.  The generator also works out the `scoter` value `project-id` from the project directory, the same as the verified store's name for it.
 * `--project-dir`: the project: the directory holding the project files directory, with the project file in it (`scoter: values: project-files-dir` and `project-file-name` in the setup say where).  It must exist, and the setup files' `./` locations start there.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir`, `vcs-root` and `dev-container-path`, `current-project-setup`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings them along.
 * `--dev-container-workspace-dir` and `--dev-container-settings-dir`: the directories mounted in the launched dev container: the project workspace (writable), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.
 * `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  It wins over a `scoter: paths: distribution-dir` in the setup files.  The other setup file is the user's, found through `$SURF_SCOTER_HOME` or `~/.config`; no setup file is ever read from a project.
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
-* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`scoter: paths: verified-dir`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.  When its `dev-container: use` names one of the user's containers, that container (found in `dev-containers-search` directories outside the project directory and the VCS root, as are its parents) becomes the dev container: `dev-container-path` and `dev-container` are its, not the project's.
+* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`verification: paths: store`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.  When its `dev-container: use` names one of the user's containers, that container (found in `dev-containers-search` directories outside the project directory and the VCS root, as are its parents) becomes the dev container: `dev-container-path` and `dev-container` are its, not the project's.
 * `--previous-review`: an earlier acceptance's review file, from the verified store, which a new review starts from (step 17 of [Projects in v1](projects-v1.md)).  It's parsed as `--review` is, but not checked against the run: it has usually expired.  The file's `previous-review` gets its `file`, and its `data` as the user left it, `$comment`s and `$override`s included.  Nothing is accepted from it.
 * `--review`: the user's review file for the project (step 12 of [Projects in v1](projects-v1.md)).  It's read as the project file is, its `project-dir` must be this run's, its `expires-at` in the future, and a `dev-container: use: {name: ...}` one of the user's containers.  The file's `review` gets its `result`, and, unless it's `reject`, the accepted settings it gives, in `accepted.json`'s shape.  Nothing runs from a review: `host-brokered` doesn't change.
 * `--output`: the file to write; without it, the JSON goes to stdout.
@@ -37,7 +38,7 @@ gen-scoter-uc --output first.json
 # ... run first.json's VCS `find-root` commands, then look for the project
 #     directory up to the root ...
 gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT --output second.json
-# ... run second.json's `verified: runs: find-acceptance`, given second.json ...
+# ... run second.json's `scoter: runs: find-acceptance`, given second.json ...
 gen-scoter-uc --universal second.json --no-setup-search --project-dir DIR --vcs-root ROOT \
     --accepted-settings ACCEPTED.json
 ```
@@ -58,7 +59,7 @@ scoter-host --universal universal.json CONTAINER_NAME
 Before anything else, it checks:
 
 * the universal configuration file belongs to the user, and nobody else can use it (it decides what runs on the host);
-* with `accepted-settings`: its `file` is in `verified-dir`, private, and still says exactly what `contents` does (a revoked, replaced or edited acceptance doesn't), and the acceptance's `expires-at` hasn't passed.  Only when it starts: a session that's running when its acceptance expires carries on;
+* with `accepted-settings`: its `file` is in the verified store (`verification: paths: store`), private, and still says exactly what `contents` does (a revoked, replaced or edited acceptance doesn't), and the acceptance's `expires-at` hasn't passed.  Only when it starts: a session that's running when its acceptance expires carries on;
 * the project directory is the accepted one, and it and the dev container directory are still there.
 
 It reads the universal configuration file and **no other file** (but for the accepted settings' file in the store, to compare):
@@ -94,6 +95,9 @@ The general layout:
         "project-config": "/home/user/my-project/.surf-scoter.d/project.yaml",
         "project-dir": "/home/user/my-project",
         "vcs-root": "/home/user/my-project",
+        // The project's id, and its branch made safe as a path part (`scoter` values).
+        "project-id": "my-project-3f9a0b1c2d4e",
+        "project-branch": "feature-x",
         "dev-container-path": "/home/user/my-project/.surf-scoter.d/dev-env",
         // The host directories mounted in the dev container:
         //   --dev-container-workspace-dir - the cloned project workspace
@@ -184,7 +188,7 @@ The general layout:
         // `section:key`, highest priority first: the check is the first one's alone (a check's
         // fields aren't merged), and the others hold the versions it hides.
         "checks": {
-            "host-bridge:shells": {
+            "verification:shells": {
                 "files": [
                     "/home/user/.config/surf-scoter.d/setup.yaml",
                     "/home/user/.local/share/surf-scoter/setup.yaml"
@@ -194,13 +198,13 @@ The general layout:
                 "commands": {"bash": "/usr/bin/bash", "sh": "/usr/bin/sh", "ksh": "/usr/bin/ksh"},
                 "name-patterns": [], "options": [], "env": [], "paths": [], "overrides": []
             },
-            "host-bridge:ksh-is-mine": {
+            "verification:ksh-is-mine": {
                 "files": ["/home/user/.config/surf-scoter.d/setup.yaml"],
                 "action": "warn",
                 "reason": "I review the ksh scripts this project's commands run.",
                 "commands": {"ksh": "/usr/bin/ksh"},
                 "name-patterns": [], "options": [], "env": [], "paths": [],
-                "overrides": ["host-bridge:shells"]
+                "overrides": ["verification:shells"]
             },
             "docker:docker": {
                 "files": ["/home/user/.local/share/surf-scoter/setup.yaml"],
@@ -212,7 +216,7 @@ The general layout:
         },
         // Each command name the checks map, with the program it runs and the checks that map it.
         "command-map": {
-            "bash": {"program": "/usr/bin/bash", "checks": ["host-bridge:shells"]},
+            "bash": {"program": "/usr/bin/bash", "checks": ["verification:shells"]},
             "docker": {"program": "/usr/sbin/podman", "checks": ["docker:docker"]}
         },
         // For each mapped command, what the checks that match on its name alone make of it, in
@@ -223,21 +227,21 @@ The general layout:
         // replaced.  Checks with 'options', 'env' or 'paths' depend on the project's command,
         // so they're left to whoever checks it.
         "commands": {
-            "bash": {"action": "refuse", "checks": ["host-bridge:shells"], "overridden": []},
+            "bash": {"action": "refuse", "checks": ["verification:shells"], "overridden": []},
             "docker": {"action": "warn", "checks": ["docker:docker"], "overridden": []},
             "ksh": {
                 "action": "warn",
-                "checks": ["host-bridge:ksh-is-mine"],
-                "overridden": [{"check": "host-bridge:shells", "by": "host-bridge:ksh-is-mine"}]
+                "checks": ["verification:ksh-is-mine"],
+                "overridden": [{"check": "verification:shells", "by": "verification:ksh-is-mine"}]
             }
         },
         // Things to tell the user: a check removed or replaced (which misses what the lower
         // priority file adds to it later), or an override that does nothing.  See below.
         "notices": [
             {
-                "message": "/home/user/.config/surf-scoter.d/setup.yaml replaces `host-bridge:shells` from /home/user/.local/share/surf-scoter/setup.yaml without its commands `nu`; ...",
+                "message": "/home/user/.config/surf-scoter.d/setup.yaml replaces `verification:shells` from /home/user/.local/share/surf-scoter/setup.yaml without its commands `nu`; ...",
                 "id": "check-replaced-without",
-                "parameters": {"check": "host-bridge:shells", "field": "commands", "entries": ["nu"]},
+                "parameters": {"check": "verification:shells", "field": "commands", "entries": ["nu"]},
                 "sources": [
                     "/home/user/.config/surf-scoter.d/setup.yaml",
                     "/home/user/.local/share/surf-scoter/setup.yaml"

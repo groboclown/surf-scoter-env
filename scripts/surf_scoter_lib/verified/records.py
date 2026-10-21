@@ -46,7 +46,7 @@ class Validity(StrEnum):
 
     VALID = "valid"
     EXPIRED = "expired"
-    # Exempted from its checks until a later time (step 20).
+    # Exempted from its checks until a later time (step 21).
     EXEMPT = "exempt"
     # The window itself is wrong: it starts in the future, say.
     INVALID = "invalid"
@@ -372,7 +372,7 @@ def setup_values(
     A change to any of them asks for a new review: they're the boundaries
     the project was reviewed within, and they come from the setup files, not
     the project.  They're kept whole, as the file has them, to compare.
-    `verified_containers` maps each `dev-containers-verified` container
+    `verified_containers` maps each `verification: verified-containers` container
     directory the build uses to its manifest's id.
     """
     vcs_runs: jdata.JsonData = None
@@ -385,16 +385,16 @@ def setup_values(
         "project-files-dir": config.raw("resolved", "scoter", "values", "project-files-dir"),
         "dev-containers-search":
             config.raw("resolved", "scoter", "path-lists", "dev-containers-search"),
-        "dev-containers-verified":
-            config.raw("resolved", "scoter", "path-lists", "dev-containers-verified"),
-        "verified-dir": config.raw("resolved", "scoter", "paths", "verified-dir"),
+        "verified-container-dirs":
+            config.raw("resolved", "verification", "path-lists", "verified-containers"),
+        "store": config.raw("resolved", "verification", "paths", "store"),
         "vcs": vcs_section,
         "vcs-runs": vcs_runs,
         # What enforces the egress rules: a different gateway enforces them
         # differently, so the rules need a new review.
         "gateway": {
-            "name": config.raw("resolved", "network-gateway", "values", "name"),
-            "write-config": config.raw("resolved", "network-gateway", "runs", "write-config"),
+            "name": config.raw("resolved", "dev-env", "values", "network-gateway-name"),
+            "write-config": config.raw("resolved", "dev-env", "runs", "network-gateway-write-config"),
         },
         "host-command-checks": config.raw("host-command-checks", "checks"),
         "hidden-host-commands": _hidden_checks(config),

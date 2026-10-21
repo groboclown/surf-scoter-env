@@ -75,6 +75,9 @@ def load_config(
     vcs_root = find_vcs_root(settings, start)
     project_dir = find_project_dir(settings, start, vcs_root[0] if vcs_root else None)
 
+    # The branch, for the setup's `${scoter:project-branch}`.
+    branch = vcs_current_branch(settings, vcs_root) if project_dir and vcs_root else None
+
     if project_dir:
         # Phase 2: with the project, and the repository it's in.
         settings = reprocess_config(
@@ -83,6 +86,7 @@ def load_config(
             project_dir,
             vcs_root[0] if vcs_root else None,
             settings,
+            project_branch=branch,
         )
         check_project_vcs(settings, vcs_root)
     if project_dir and with_acceptance:
@@ -99,6 +103,7 @@ def load_config(
             vcs_root[0] if vcs_root else None,
             settings,
             accepted_settings=accepted if isinstance(accepted, str) else None,
+            project_branch=branch,
         )
 
     # Overwrite the bin dir if it was explicitly set.
@@ -107,6 +112,30 @@ def load_config(
         active_locs["distribution-bin-dir"] = str(resolved_bin_dir)
 
     return settings
+
+
+def vcs_current_branch(settings: DictJsonData, vcs_root: tuple[Path, str]) -> str | None:
+    """The branch checked out at the repository root, from its VCS section's `runs: current-branch`.
+
+    None when the section has none, or it can't tell.  The generator makes
+    it safe as a path part; it's only a name to build paths from.
+    """
+    root, name = vcs_root
+    section = name + VCS_SECTION_SUFFIX
+    template = _opt_lookup(settings, "resolved", section, "runs", "current-branch")
+    if template is None:
+        return None
+    cmd = [str(root) if part == "{x:root}" else part
+           for part in _command(template, f"{section}/runs/current-branch", "{x:root}")]
+    try:
+        res = subprocess.run(  # nosec: B603  # The setup's command, as a list.
+            cmd, stdout=subprocess.PIPE, check=False, shell=False, timeout=60,
+            env=command_env(settings, section),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    branch = res.stdout.decode("utf-8", errors="replace").strip()
+    return branch if res.returncode == 0 and branch else None
 
 
 def vcs_find_root_commands(settings: DictJsonData) -> list[tuple[str, list[str]]]:
@@ -244,7 +273,7 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
     prints JSON: `match`, `acceptance`, `accepted-settings` (the file for
     gen-scoter-uc) and `notice`.  None when the setup has no such command.
     """
-    template = _opt_lookup(settings, "resolved", "verified", "runs", "find-acceptance")
+    template = _opt_lookup(settings, "resolved", "scoter", "runs", "find-acceptance")
     if template is None:
         return None
     if not isinstance(template, list) or not all(isinstance(a, str) for a in template):
@@ -276,10 +305,12 @@ def reprocess_config(
     orig: DictJsonData,
     *,
     accepted_settings: str | None = None,
+    project_branch: str | None = None,
 ) -> DictJsonData:
     """Reprocess this configuration with the project, and the repository it's in.
 
     With `accepted_settings`, the generator builds the host commands from them.
+    `project_branch` is the project's branch, for `${scoter:project-branch}`.
     """
     # Save the configuration for reprocessing.
     tmp = save_to_tmp(orig)
@@ -295,6 +326,7 @@ def reprocess_config(
             universal_file=tmp,
             no_setup_search=True,
             accepted_settings=accepted_settings,
+            project_branch=project_branch,
         )
     finally:
         remove_tmp(tmp)
@@ -424,6 +456,7 @@ def generate_config(
     universal_file: str | None,
     no_setup_search: bool,
     accepted_settings: str | None = None,
+    project_branch: str | None = None,
 ) -> DictJsonData:
     """Run the gen-scoter-uc program.
 
@@ -450,6 +483,8 @@ def generate_config(
         args.append("--no-setup-search")
     if accepted_settings:
         args.extend(("--accepted-settings", accepted_settings))
+    if project_branch:
+        args.extend(("--project-branch", project_branch))
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,

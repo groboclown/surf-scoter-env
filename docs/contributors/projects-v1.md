@@ -584,7 +584,7 @@ verified-dir/                     0700
 
 * removing an acceptance removes the blobs nothing else refers to;
 * every write to an environment prunes it: expired acceptances beyond `scoter: values: verified-keep` (default 10) go, oldest first;
-* `scoter` lists the store's size with the accepted projects (step 20), and can prune or revoke them.
+* `scoter` lists the store's size with the accepted projects (step 21), and can prune or revoke them.
 
 [The system configuration file](../system-config-file.md) says where the space goes, and how to reclaim it.
 
@@ -1069,7 +1069,7 @@ dev-container:
 * **`review`** names the format, so a later version can tell an old file.
 * **`result`** is commented out: the file says yes (with the step 15 prompt's "use") unless the user uncomments `result: reject`.  `reject` is the only value; any other is an error, so a typo can't accept.  Rejecting stores nothing, as a "deny" doesn't.
 * **`project-dir`** is read-only: the parser refuses the file if it's changed.  It says which project this is, and the generator checks it again (step 8).
-* **`expires-at`** defaults to `verified-expiry-days` from now.  The user can shorten or lengthen it; it must be in the future.  `exempt-until` isn't here: exemptions are their own command (step 20).
+* **`expires-at`** defaults to `verified-expiry-days` from now.  The user can shorten or lengthen it; it must be in the future.  `exempt-until` isn't here: exemptions are their own command (step 21).
 * **`egress`**, **`env`** and **`commands`** are the project file's, resolved, in its shape, `env` split as the project has it (a top-level `env`, and each command's own).  That keeps the next review's diff readable: what the user changed against what the project changed, item by item (step 17).  `${section:key}` is frozen, with its source in a comment; `@NAME@` stays as written (step 7).  The parser builds each command's whole environment plan, as `accepted.json` holds it.
 * **Refused items** are generated commented out, with their reasons, so the file can be accepted as it stands, minus what can't be.  The parser runs the checks again (step 13), so an item the user uncomments is refused again, unless it carries an `$override` (below).
 * **Findings** come before the item they're about, worst first.
@@ -1307,7 +1307,7 @@ The acceptance's setup values (step 5) are compared with the current ones, and e
 
 * Unchanged items stay in the file as data, collapsed to one line each.
 * An item the project changed after the user edited it shows the project's setting, with the user's edit commented out beside it.
-* The base includes expired acceptances.  So expiring doesn't remove an acceptance: saving no longer prunes (step 5's `verified-keep`); cleaning up is step 20's, which may also clean up projects whose directory is gone.
+* The base includes expired acceptances.  So expiring doesn't remove an acceptance: saving no longer prunes (step 5's `verified-keep`); cleaning up is step 21's, which may also clean up projects whose directory is gone.
 * Carrying forward on meaning stays automatic, with its notice: asking would bother the user about noise.
 
 Completed:
@@ -1322,7 +1322,7 @@ Completed:
   * The top-level `env` is one item, compared the same way.  The file's own `$comment` is carried, and the dev container's `use` and `images` choices too.
   * Container files: unchanged ones are one line; changed text files show a unified diff (up to 200 lines, for files up to 256 KB); new and removed ones are marked.
   * The header names the base, and the summary counts what changed since.
-* **No more pruning on save:** `save_environment` only writes; `prune_environment` keeps the old pruning for step 20's cleanup.  `verified-keep` is for that cleanup.
+* **No more pruning on save:** `save_environment` only writes; `prune_environment` keeps the old pruning for step 21's cleanup.  `verified-keep` is for that cleanup.
 
 **Tests:** in [`test_main_verify_diff.py`](../../scripts/tests/test_main_verify_diff.py), with the generator and acceptances made through the prompt: a first review is full; a re-review after the user's edits (a note, a narrower argument, an override) and the project's changes (a new rule, a changed command, a changed Dockerfile) shows each as it should, and can be used as it stands; nothing changed keeps the user's edits; a removed item is offered back with its note; the base prefers the branch and takes an expired acceptance; the suggestion is stored.  In [`test_review.py`](../../scripts/tests/s_lib/test_review.py): `compare` for each kind and the command matching, `differences`, `setup_changes`.  In `universal.rs`: `--previous-review` reads an expired review for another directory, keeping its notes, and still refuses a broken one.  By hand: accepted a scratch project, changed it, and `scoter verify --output` showed the unchanged rule on one line, the new rule, the changed `ls` and the Dockerfile's diff.
 
@@ -1360,7 +1360,7 @@ Done by later steps, or only notes:
 - ~~Step 16: containers in `dev-containers-verified` build from their live directories, leaving a short window after the lookup checked their manifests.~~  Done in batch E: an acceptance now keeps them as it keeps the project's files: `containers.json` beside `accepted.json` (each directory's manifest, `lookup.verified_container_snapshots`), with their contents in the store.  The run's staging (`staging.stage_containers`) restores each one the build uses and builds from that; an acceptance made before they were kept asks for a new review.  **Tests:** in `test_main_run_staging.py`: a verified parent changed after the acceptance builds as accepted, and an acceptance without `containers.json`.
 - ~~Step 16: `images` only applies to the project's container; with `use: {name}`, the user's container builds as it is.~~  Done in batch E: the user's own container is trusted, as their setup is, and still builds from where it is, unless the acceptance's `images` change a `FROM`: then from a copy in the staging directory, which they're applied to (the user's own is left as it is).  `images` now rewrites every staged Dockerfile.  Its parents, found by name outside the project, build as they are.  **Tests:** in `test_main_run_staging.py`.
 - ~~Step 16: a `FROM` naming an image through an `ARG` isn't matched.~~  Done in batch E: `images` can't map it, as the image isn't known until the build, so the review notes each one.  **Tests:** in `test_review.py`.
-- ~~Step 8 and step 11: blanket acceptances.~~  Folded into step 20's timed exemption.
+- ~~Step 8 and step 11: blanket acceptances.~~  Folded into step 21's timed exemption.
 - ~~Step 15: `--accept-file`.~~  For automation, out of scope for now: a future task, with its draft.
 - ~~Step 3: the VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with, which a project's `.envrc` could set (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`).~~  Done in batch B: any section's `value-lists: drop-env` names the variables its `runs` commands don't get (a name, or a prefix ending in `*`; case-insensitive on Windows).  `UserConfig.run_command` (the run's clone, fetch and merge), `scoter verify`'s `current-branch` and `scoter.py`'s `find-root` use it.  The distribution's `git-vcs` drops `GIT_*`; [the system configuration file](../system-config-file.md#value-lists) says how to add to it or drop less, and why `docker` has none (a future task, below).  **Tests:** in `test_user_config.py`: `drop_env`, and `run_command` without a dropped variable, another section's command with it.  In `test_scoter.py`: `find-root` without `GIT_DIR`.
 
@@ -1372,7 +1372,77 @@ We should review the settings files and the formats and look for opportunities t
 
 The user-setup sub-command can provide capabilities for exploring and disecting the setup.  It should help to identify weaknesses without overwhealming the user.
 
-## 20. Put a bow on it
+Adjustments:
+
+- `network-gateway`: The contents should move into the `dev-env` section, as it relates to the gateway image and docker-compose file.
+- `verified`: this isn't a user adjustable command, but a helper internal tool.  It should stay in the setup file to reduce hard-coded values in the `scoter.py` script, but where it sits makes it look like a user-adjustable program.  This should belong in the `scoter:` section instead.
+- `scoter: value-lists:` entries `secret-file-patterns`, `egress-data-out-hosts`, and `egress-refused-wildcards` with the `verified-*` values, plus the `host-bridge` section: these belong together as part of the verification values.  See below for the note on `egress-refused-wildcards` and the public suffix list, but that's out of scope for this step.
+- Consider `workspace`: it's fine where it is, but it may better belong with the dev-env values.  While here, it would be nice to add in a `scoter: values: project-id` (unique per project directory, not verification id) so the user can use this for the `workspace: paths: workspace-parent-dir` value for a path outside the project directory, which would handle a set of red team issues.  Also adding in a `scoter: values: project-branch` (comes from the VCS discovery) would also be nice, so a user could have a workspace per branch if needed.
+
+### Review of the adjustments, and more suggestions
+
+On the notes above:
+
+* **`network-gateway` into `dev-env`.**  Agreed.  `dev-env` already names the gateway's container directory (`paths: network-gateway`) and image (`values: network-gateway-image`); the rest follows the same prefix: `values: network-gateway-name` (was `network-gateway: values: name`), `network-gateway-config-mount`, and `runs: network-gateway-write-config`.  The gateway name is also a setup value an acceptance is reviewed under (step 5's `gateway`), and the Rust side reads it (`accepted.rs`'s `GATEWAY_SECTION` and `GATEWAY_NAME`), so both change together.
+* **`verified` into `scoter`.**  Agreed: `scoter: runs: find-acceptance`.  The same holds for every `runs` entry that runs one of the distribution's own scripts and that a user has no reason to change: `find-acceptance`, and the gateway's `write-config`.  The VCS sections' `find-root` and `current-branch` are the exception: they're per VCS, and a user adding a VCS writes their own.
+* **One section for the review's values.**  Agreed.  I'd name it `verification` (the sub-command is `verify`, and the store `verified-dir`), holding:
+  * `host-commands`: the checks now in `host-bridge`, so their ids become `verification:shells` and so on;
+  * `value-lists`: `secret-file-patterns`, `egress-data-out-hosts`, `egress-refused-wildcards`;
+  * `values`: `expiry-days`, `keep`, `max-file-size`, `max-snapshot-size` (the `verified-` prefix goes, as the section says it);
+  * `paths: store` (was `scoter: paths: verified-dir`), and `path-lists: verified-containers` (was `scoter: path-lists: dev-containers-verified`), as both decide what a review covers.
+* **`workspace`.**  I'd keep it a section of its own: it's where the run puts the project's files, which is what a user changes most, and folding it into `dev-env` would put the most edited values among the least edited.  Its default should move out of the project (FILE-9; the comment there still says "See ticket" with no number): `workspace-parent-dir: ${scoter:state-dir}/workspaces/${scoter:project-id}`.
+* **`${scoter:project-id}`.**  The step 5 environment id is already unique per project directory (its name and a hash of its canonical path), and is what names the project's directory in the verified store; it isn't an acceptance's id.  So I'd make `project-id` that value, worked out by the generator, and have the Python store read it from the SUC rather than work it out again: one source, which is what the "Naming by the environment id" future task asks for (it can then fold into this step).
+* **`${scoter:project-branch}`.**  It comes from the VCS section's `current-branch`, which `scoter.py` would run before the generator's second run and pass in (`--project-branch`), since the setup's paths are worked out there.  SECURITY: a branch name is the project's to choose (`../../.ssh`, or one with a newline), so as a path part it must be made safe: one name, with `/` and anything outside a small set of characters replaced (`feature/x` becomes `feature-x`), `.` and `..` refused, and a length limit.  Without a branch (a detached checkout, or a VCS with none), it's empty, so a path using it stays the project's.
+
+More suggestions:
+
+* **All the checks in one place.**  `docker` and `git-vcs` also have `host-commands` (the `docker` and `git` checks, with `command-map: ${exec}`).  Auditing the restrictions means reading every section.  Moving them into `verification` (with `command-map: {docker: ${docker:exec}}`) puts every restriction in one list, which is what someone checking for a weakened setup reads.
+* **One way to run the distribution's scripts.**  `${python:exec} -E -s ${scoter:distribution-bin-dir}/X.py` is written out five times; a copy that drops `-E` lets a project's `PYTHONPATH` in.  A `python: runs: script: [${exec}, -E, -s]`, used as `[${python:script}, ${scoter:distribution-bin-dir}/X.py, ...]` (a whole-argument reference to a list puts its items in place), keeps the flags in one place.
+* **The tools' own state files** (`dev-env: paths: running-env-config` and `-lock`) aren't anything to adjust either: `scoter: paths: running-envs` and its lock, beside `state-dir`, or fixed names inside `state-dir`.
+* **The tool-set `scoter` locations.**  `scoter: paths` mixes what the user sets (`verified-dir`, `state-dir`) with what the generator sets (`project-dir`, `vcs-root`, ...; only in a comment).  With `verified-dir` moving to `verification`, `scoter: paths` keeps `state-dir` and the tool-set ones; the comment should say plainly which is which.
+* **Making a weakened setup obvious.**  `scoter user-setup` (and now the review) reports checks a setup removes, replaces or overrides.  A setup can also weaken things outside the checks: `python: runs: sub-command` without `-E`; `git-vcs: runs: local-clone` without `--no-local` (FILE-2); a shorter `drop-env`; a project location in `dev-containers-search`; a smaller `egress-refused-wildcards`.  The defaults mark these with `SECURITY:` comments, which a user never sees.  Suggest a `verification: value-lists: guarded` list of `section:kind:key` names in the defaults, and `user-setup` (and the review's setup notes) reporting each that a user's setup file changes, with the default beside it.  Lists that only add (more `secret-file-patterns`) needn't be reported.
+* **Words.**  The code and docs say "verified", "accepted" and "review" for overlapping things.  With the new section: *verification* for the setup's policy, *review* for the file, *acceptance* for what's stored.  The rename is a good moment to settle it in the docs too.
+
+### Plan
+
+Breaking changes are fine (no release yet), so no migration of setup files, acceptances or stored state: an acceptance made before is simply asked for again.
+
+1. **The new layout in `defaults/setup.yaml`**, as above: `verification` (checks, lists, values, store, verified containers), `dev-env` taking the gateway, `scoter` taking `find-acceptance` and the state files, the checks from `docker` and `git-vcs` moved into `verification`, and `python: runs: script` used by every distribution script.
+2. **The code**, by name: the Python accessors' section and key names (`checks.py`, `review.py`, `verified/*.py`, `main_run.py`, `main_kill.py`, `scoter.py`'s `find_acceptance`); the Rust constants (`config.rs`'s `EGRESS_REFUSED_WILDCARDS` section, `accepted.rs`'s gateway, `system.rs`'s `verified-dir` checks); the step 5 setup values (`records.setup_values`) with the new names; and the tests, whose fixtures write these names.
+3. **`project-id` and `project-branch`**: the generator works out `project-id` (step 5's algorithm, as Rust) as a tool-set `scoter` location; `store.environment_id` reads it from the SUC; `scoter.py` runs `current-branch` before the second generator run and passes `--project-branch`, which the generator makes safe as a path part.  Then the workspace default moves to `${scoter:state-dir}/workspaces/${scoter:project-id}`, and the container names can follow (the "Naming by the environment id" future task).
+4. **Guarded settings** in `user-setup` and the review's setup notes.
+5. **The docs**: [the system configuration file](../system-config-file.md) (each section), [the universal configuration file](universal-configuration-file.md), the security docs that name `host-bridge:` checks, and the integration tests' expectations; then a run of all three integration tests.
+
+### Design decisions
+
+* The section is `verification`.
+* Every `host-commands` check moves into it, `docker`'s too, so none is missed by being elsewhere.  `git` has no check of its own: the `git-vcs` section's `git` and `git-options` go, as `verification:version-manager` already covers `git` (having both is the confusion splitting them leads to).
+* `workspace` stays its own section.  Its default moves out of the project, using `${scoter:project-id}`; `${scoter:project-branch}` is there for a user who wants a workspace per branch, but the default doesn't use it.
+* The generator works out `project-id`.
+* The guarded settings report is a step of its own (step 20).
+
+### Completed
+
+* **The layout** of [`defaults/setup.yaml`](../../defaults/setup.yaml):
+  * `verification`: every `host-commands` check (the old `host-bridge` ones, ids now `verification:NAME`, and `docker`'s, with `command-map: {docker: ${docker:exec}}`); `paths: store` (was `scoter: paths: verified-dir`); `path-lists: verified-containers` (was `scoter: path-lists: dev-containers-verified`); `value-lists: secret-file-patterns`, `egress-data-out-hosts`, `egress-refused-wildcards` (were `scoter`'s); `values: expiry-days`, `keep`, `max-file-size`, `max-snapshot-size` (were `scoter: values: verified-*`).  `git-vcs`'s `git` and `git-options` checks are gone: `verification:version-manager` covers `git`.
+  * `dev-env`: `values: network-gateway-name` and `network-gateway-config-mount`, `runs: network-gateway-write-config` (were the `network-gateway` section).
+  * `scoter`: `runs: find-acceptance` (was the `verified` section); `paths: running-envs` and `running-envs-lock` (were `dev-env: paths: running-env-config` and its lock).
+  * `python: runs: script` (`${exec} -E -s`): every distribution script's `runs`, `sub-command` included, starts with it.
+  * `workspace: paths: workspace-parent-dir` defaults to `${scoter:state-dir}/workspaces/${scoter:project-id}`, outside the project (FILE-9 is mitigated by default).  `scoter run` makes it private, and adds the work directories to the project's ignore file only when they're inside the project.
+* **The code**: the Rust constants (`system.rs`'s `VERIFICATION_SECTION` and `VERIFIED_STORE`, which the "outside the project" check now takes with `scoter:state-dir`; `accepted.rs`'s gateway; `config.rs`'s refused wildcards), the Python accessors (`checks`, `review`, `verified/*`, `main_run`, `main_kill`, `scoter.py`), and `records.setup_values`' names (`store`, `verified-container-dirs`; the second avoids a clash with the containers' ids, which ruff caught).
+* **`${scoter:project-id}`**: the generator works it out (`system::environment_id`, the step 5 algorithm in Rust, with the `sha2` crate), as a tool-only `scoter` value, also in `active-config-locations`.  The scripts' store takes it from there (`store.project_id`), falling back to its own `environment_id` for a file without one.  Both have the same known values in their tests, so they can't drift apart.
+* **`${scoter:project-branch}`**: `scoter.py` runs the VCS section's `current-branch` before the generator's second run and gives it to `gen-scoter-uc --project-branch`; the generator makes it safe as one path part (`system::path_part`: letters, digits, `.`, `_` and `-`, each run of anything else made one `-`, ends trimmed of `.` and `-`, at most 64), and carries it over from `--universal` while the project directory stays the same (the review's and the run's later generator runs give it again).  Not set without one.
+* **The docs**: [the system configuration file](../system-config-file.md) (the sections, the `scoter:` locations, the checks' examples, the store), [the universal configuration file](universal-configuration-file.md), and the security docs (`files.md`, FILE-9, `settings.md`, `network.md`).
+
+**Tests:** in Rust: the new layout's fixtures throughout; the store's "outside the project" check under its new name; `environment_id` against the Python implementation's values; `path_part` on hostile branch names (`../../.ssh`, `..`, a newline, `${...}`); `project-id` and `project-branch` in the universal file, carried over by `--universal` with and without the same project, and not settable by a setup file; `--project-branch` parsed.  In Python: the fixtures throughout; `store.project_id`; the same id values; `scoter.vcs_current_branch`.  All three integration tests pass, `03` with the workspace outside the project.
+
+## 20. Report guarded settings that a setup weakens
+
+From step 19: a setup can weaken the tools' protections outside the `host-commands` checks, which `scoter user-setup` already reports when removed, replaced or overridden.  For example: `python: runs: script` without `-E`; `git-vcs: runs: local-clone` without `--no-local` (FILE-2); a shorter `drop-env`; a project location in `dev-containers-search`; a smaller `egress-refused-wildcards`.  The defaults mark these with `SECURITY:` comments, which a user never sees.
+
+Suggested: a `verification: value-lists: guarded` list of `section:kind:key` names in the defaults, and `user-setup` (and the review's setup notes, step 18) reporting each that a user's setup file changes, with the default beside it.  Lists that only add (more `secret-file-patterns`) needn't be reported.  This is what makes it obvious when a user follows instructions that remove restrictions.
+
+## 21. Put a bow on it
 
 - Allow a timed exemption for working on a project.
   - It covers blanket acceptances too (moved from step 18).  The kind exists in the records and the lookup (step 5), for a private project nobody else contributes to, but no command creates one, and `scoter.py` treats a match as none (steps 8 and 11).  Step 16 also changed what one would have to mean: the run builds only from a stored, accepted copy, and a blanket acceptance has none.  One way, drafted in step 18: "accept as suggested" on each run, recorded by a `scoter verify` option: each run takes a fresh snapshot and, if the checks refuse nothing, stores an acceptance of the suggestion as it stands (as using the review unedited would), and builds from that; refusals, setup changes and a gateway change still stop it.  A timed exemption ("don't ask me again for a week") covers much of the same need with less trust handed out.
@@ -1480,7 +1550,7 @@ With the updates to self-hosting, these two arguments are now not needed.  The c
 
 ## Compare the "egress-refused-wildcards" setting with Browser cookie domains
 
-The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).
+The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).  This means the list should be loadable from a file (not url) so that the long list can match the pulled file.
 
 ## Allow `scoter user-setup` to work with automation
 

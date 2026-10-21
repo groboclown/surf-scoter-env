@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from ....surf_scoter_lib import err
+from ....surf_scoter_lib.user_config import UserConfig
 from ....surf_scoter_lib.verified import store
 from .helper import POSIX, TempDirTest
 
@@ -35,6 +36,21 @@ class EnvironmentIdTest(unittest.TestCase):
             long_name = Path(tmp) / ("a" * 50)
             long_name.mkdir()
             self.assertEqual(len(store.environment_id(long_name)), 32 + 1 + 12)
+
+    def test_matches_the_generator(self) -> None:
+        """The same as the generator's `scoter:project-id` for these (host/src/config/system.rs)."""
+        for directory, expected in (
+            ("/no/such/My Project!! (copy)", "my-project-copy-c593c7ec2d55"),
+            ("/no/such/" + "x" * 40 + "-y", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-06211fd163da"),
+            ("/no/such/!!!", "project-b94ae0807dcf"),
+        ):
+            self.assertEqual(store.environment_id(Path(directory)), expected, directory)
+
+    def test_project_id_from_the_universal_file(self) -> None:
+        """The generator's id when the file has one; worked out the same way when it hasn't."""
+        given = UserConfig({"active-config-locations": {"project-id": "given-0123456789ab"}})
+        self.assertEqual(store.project_id(given, "/no/such/x"), "given-0123456789ab")
+        self.assertEqual(store.project_id(UserConfig({}), "/no/such/!!!"), "project-b94ae0807dcf")
 
 
 @unittest.skipUnless(POSIX, "owner and mode checks")

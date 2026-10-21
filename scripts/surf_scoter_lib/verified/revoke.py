@@ -22,7 +22,6 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from ..user_config import UserConfig
 from . import records, store
@@ -57,7 +56,7 @@ class Environment:
 
 def open_store(config: UserConfig) -> store.VerifiedStore | None:
     """The user's verified store; None when there isn't one yet."""
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if verified is None or not verified.is_dir():
         return None
     return store.VerifiedStore.open(verified)
@@ -69,7 +68,7 @@ def environment(config: UserConfig, verified_store: store.VerifiedStore) -> Envi
     if project is None:
         return None
     project_dir = os.path.realpath(project)
-    return Environment(verified_store, project_dir, store.environment_id(Path(project_dir)))
+    return Environment(verified_store, project_dir, store.project_id(config, project_dir))
 
 
 def environments(verified_store: store.VerifiedStore) -> list[Environment]:

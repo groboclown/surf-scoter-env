@@ -52,11 +52,16 @@ class RevokeTest(unittest.TestCase):
         }
         suc: jdata.DictJsonData = {
             "active-config-locations": locations,
-            "resolved": {"scoter": {
-                "paths": {"verified-dir": str(self.verified)},
-                "path-lists": {"dev-containers-search": [], "dev-containers-verified": []},
-                "values": {"project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml"},
-            }},
+            "resolved": {
+                "scoter": {
+                    "path-lists": {"dev-containers-search": []},
+                    "values": {"project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml"},
+                },
+                "verification": {
+                    "paths": {"store": str(self.verified)},
+                    "path-lists": {"verified-containers": []},
+                },
+            },
             "current-project-setup": {"container": {"dev-container-path": "env"}},
             "dev-container": {"user": "me", "parent-builds": []},
             "setup": {"files": []},

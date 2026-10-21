@@ -40,16 +40,6 @@ docker:
         inspect-container: ${exec} inspect --format json {x:name}
         image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
-    host-commands:
-        # A project's `docker` command runs this section's program.
-        docker:
-            action: warn
-            reason: >-
-                An allowed `docker` command can start a container that mounts your
-                home directory, and so change anything there, the accepted project
-                settings included.
-            command-map:
-                docker: ${exec}
 
 # The Python interpreter that runs the sub-command scripts (the distribution's
 # `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
@@ -61,20 +51,174 @@ python:
     programs:
         exec: python3
     runs:
+        # How the tools run the distribution's scripts: every `runs` entry that
+        # starts one uses this, so the flags are in one place.  `-E` ignores the
+        # PYTHON* environment variables (a project's `.envrc` could set
+        # PYTHONPATH, say), and `-s` ignores your user site-packages.
+        script:
+            - ${exec}
+            - -E
+            - -s
         # How scoter starts a sub-command script; scoter adds the universal
         # configuration file, the sub-command name and its arguments after it.
-        # `-E` ignores the PYTHON* environment variables (a project's `.envrc`
-        # could set PYTHONPATH, say), and `-s` ignores your user site-packages.
-        sub-command: ${exec} -E -s {x:script}
+        sub-command:
+            - ${script}
+            - '{x:script}'
 
-# Checks on the commands a project asks to run on your computer (its host
-# commands).  Any section can have `host-commands`; the checks that aren't about
-# one tool are here.  Each check has an `action` (refuse, warn or allow), a
+# Where a project's run keeps its files: the workspace (the clone the
+# container works in), and the run's settings and resources.
+workspace:
+    paths:
+        # Outside the project, named by its id (`${scoter:project-id}`, the same
+        # for the same project directory), so the project's own files, and the
+        # container's, stay apart (FILE-9).  For a workspace per branch, add
+        # `/${scoter:project-branch}`: the branch the VCS names, made safe as one
+        # path part, and not set when there's none.
+        workspace-parent-dir: ${scoter:state-dir}/workspaces/${scoter:project-id}
+        setup-dir: ${workspace-parent-dir}/setup
+        resources-dir: ${workspace-parent-dir}/resources
+        workspace-dir: ${workspace-parent-dir}/workspace
+
+
+# The 'git' VCS tool.
+# The scoter tool will reference this by using the project's `vcs` value,
+# with a `-vcs` suffix.
+# Not all VCS provide these commands.
+#
+# A VCS section can say how to find the root of a repository, with
+# `runs: find-root`: a command that prints the root of the repository holding
+# `{x:start}`, or nothing when it isn't in one.  scoter runs every VCS
+# section's `find-root`, and the nearest root wins, so a Git submodule, with its
+# own `.git` file, is its own repository when you're inside it.
+#
+# SECURITY: find the root from the repository's files alone.  Don't run the VCS
+# itself (`git rev-parse --show-toplevel` reads the repository's configuration,
+# which the project controls).  The distribution's two scripts do this, given
+# the file or directory that marks a checkout:
+#   vcs_root_nearest.py MARKER START: the nearest directory, at or above
+#       START, holding MARKER: `.git` (a directory, or a file in a worktree or
+#       submodule), `.hg` or `.svn`.
+#   vcs_root_outermost.py MARKER START: the highest directory of the unbroken
+#       run holding MARKER, for a VCS that keeps a directory in every directory
+#       of a checkout (CVS, with `CVS`).
+# Both stop below your home directory, and at a file system boundary.
+git-vcs:
+    programs:
+        exec: git
+    runs:
+        # SECURITY: keep `--no-local`.  Without it, git clones a local path by
+        # hard-linking the object files, so the project and the workspace share
+        # them.  The container owns those files (through the user namespace
+        # mapping), and could rewrite objects in your real repository behind
+        # already-reviewed hashes.  See FILE-2 in
+        # docs/security/files-attack-vectors.md.
+        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:workspace-dir}
+        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
+        fetch-changes: ${exec} fetch --all
+        show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
+
+        # Requires the user to review the changes and does not commit them.
+        # But it's potentially dangerous because it makes those workspace
+        # files active.
+        merge-changes: ${exec} merge {x:branch}
+
+        find-root:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_root_nearest.py
+            - .git
+            - '{x:start}'
+        # The branch checked out at `{x:root}`, for the review, read from the
+        # repository's files (Git isn't run).  Prints nothing when it can't tell.
+        current-branch:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_branch.py
+            - '{x:root}'
+    values:
+        ignore-file: .gitignore
+    value-lists:
+        # The environment variables these commands don't get.  A project can set
+        # them as you enter its directory (a `.envrc`, say), and Git's own point
+        # it at another repository (`GIT_DIR`), configuration (`GIT_CONFIG_*`)
+        # or program (`GIT_SSH_COMMAND`).  Set them in your Git configuration
+        # instead; `core.sshCommand` takes the place of `GIT_SSH_COMMAND`.
+        # Note, though, that scoter shouldn't be performing remote pulls or
+        # pushes, so dropping that value shouldn't cause issues.
+        drop-env:
+            - GIT_*
+
+
+# Default for no vcs - stored as simple files.
+# TODO create a "file vcs" python script in the install directory to handle these mechanisms.
+#      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
+#      support easier.  It also leads to allowing an ignore-file.  See ticket #23.
+file-vcs:
+    programs:
+        cp: cp
+        diff: diff
+        noop: echo
+    runs:
+        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
+        fetch-changes: ${noop}
+        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
+        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+    values:
+        ignore-file: ""
+
+
+# Information for dealing with developer environments.
+dev-env:
+    paths:
+        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
+        network-gateway: ${scoter:distribution-dir}/containers/network-gateway
+
+        docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
+    values:
+        firewall-router-image: ${dev-env-image-prefix}firewall-router
+        network-gateway-image: ${dev-env-image-prefix}network-gateway
+        dev-env-image-prefix: local-surf-scoter/
+
+        # Limits for the docker-compose file.
+        mem-limit: 8g
+        cpus: 4
+        pids-limit: 4096
+        logging-max-size: 10m
+
+        # For auto-assigned sshd port, start at this number.
+        start-sshd-port: 20160
+
+        # The network gateway: the only way out of the dev container (see
+        # docs/security/network.md).  It enforces the project's egress rules, as
+        # far as it can, and refuses to start with a rule it can't enforce.
+        # Its name: your acceptance of a project's egress rules is for this
+        # gateway, and a different one asks for a new review.
+        network-gateway-name: squid
+        # Where the gateway container reads the configuration
+        # `network-gateway-write-config` makes (the docker-compose file mounts it
+        # there, read-only).
+        network-gateway-config-mount: /user-space/egress-hosts.txt
+    runs:
+        # Given the universal configuration file (`{x:universal}`) and where to
+        # write (`{x:output}`), writes the gateway's configuration from the egress
+        # rules, and prints JSON saying what it enforces and what it refuses.  It
+        # exits with 1, writing nothing, when it refuses any rule.
+        network-gateway-write-config:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/gateway_squid.py
+            - '{x:universal}'
+            - '{x:output}'
+
+
+# What a review of a project's settings checks (`scoter verify`), and where
+# your acceptances are kept.
+#
+# `host-commands`: the checks on the commands a project asks to run on your
+# computer (its host commands).  Every check is here, so none is missed by
+# being somewhere else.  Each check has an `action` (refuse, warn or allow), a
 # `reason`, and what it matches.  When several checks match a command, the most
 # restrictive wins.
 #
 # Your setup file can add checks of its own.  To relax one of these for some
-# commands, add a check with `overrides: [host-bridge:NAME]` naming those
+# commands, add a check with `overrides: [verification:NAME]` naming those
 # commands, rather than replacing the check: a replacement won't get what later
 # versions of Surf Scoter add to it.  See docs/system-config-file.md.
 #
@@ -82,7 +226,7 @@ python:
 # what's blocked or raises warnings.  This format can't capture everything,
 # and instead works as a way to declaratively construct best practice rules
 # and warning signs.
-host-bridge:
+verification:
     host-commands:
         shells:
             action: refuse
@@ -281,230 +425,29 @@ host-bridge:
                 - ~/.plenv/shims
                 - ~/.volta/bin
                 - ~/.proto/shims
-
-# The network gateway: the only way out of the dev container (see
-# docs/security/network.md).  It enforces the project's egress rules, as far
-# as it can, and refuses to start with a rule it can't enforce.
-network-gateway:
-    values:
-        # The gateway's name.  Your acceptance of a project's egress rules is for
-        # this gateway: a different one asks for a new review.
-        name: squid
-        # Where the gateway container reads the configuration `write-config`
-        # makes (the docker-compose file mounts it there, read-only).
-        config-mount: /user-space/egress-hosts.txt
-    runs:
-        # Given the universal configuration file (`{x:universal}`) and where to
-        # write (`{x:output}`), writes the gateway's configuration from the egress
-        # rules, and prints JSON saying what it enforces and what it refuses.  It
-        # exits with 1, writing nothing, when it refuses any rule.
-        write-config:
-            - ${python:exec}
-            - -E
-            - -s
-            - ${scoter:distribution-bin-dir}/gateway_squid.py
-            - '{x:universal}'
-            - '{x:output}'
-
-# Finding your acceptance of a project's settings, in `scoter: paths: verified-dir`.
-verified:
-    runs:
-        # Given the universal configuration file (`{x:universal}`) with the
-        # project, prints JSON saying which acceptance matches, if any.
-        find-acceptance:
-            - ${python:exec}
-            - -E
-            - -s
-            - ${scoter:distribution-bin-dir}/verified_find.py
-            - '{x:universal}'
-
-# Information for the workspace clone.
-workspace:
-    paths:
-        workspace-parent-dir: ${scoter:project-dir}/.dev-env
-        setup-dir: ${workspace-parent-dir}/setup
-        resources-dir: ${workspace-parent-dir}/resources
-        workspace-dir: ${workspace-parent-dir}/workspace
-
-
-# The 'git' VCS tool.
-# The scoter tool will reference this by using the project's `vcs` value,
-# with a `-vcs` suffix.
-# Not all VCS provide these commands.
-#
-# A VCS section can say how to find the root of a repository, with
-# `runs: find-root`: a command that prints the root of the repository holding
-# `{x:start}`, or nothing when it isn't in one.  scoter runs every VCS
-# section's `find-root`, and the nearest root wins, so a Git submodule, with its
-# own `.git` file, is its own repository when you're inside it.
-#
-# SECURITY: find the root from the repository's files alone.  Don't run the VCS
-# itself (`git rev-parse --show-toplevel` reads the repository's configuration,
-# which the project controls).  The distribution's two scripts do this, given
-# the file or directory that marks a checkout:
-#   vcs_root_nearest.py MARKER START: the nearest directory, at or above
-#       START, holding MARKER: `.git` (a directory, or a file in a worktree or
-#       submodule), `.hg` or `.svn`.
-#   vcs_root_outermost.py MARKER START: the highest directory of the unbroken
-#       run holding MARKER, for a VCS that keeps a directory in every directory
-#       of a checkout (CVS, with `CVS`).
-# Both stop below your home directory, and at a file system boundary.
-git-vcs:
-    programs:
-        exec: git
-    runs:
-        # SECURITY: keep `--no-local`.  Without it, git clones a local path by
-        # hard-linking the object files, so the project and the workspace share
-        # them.  The container owns those files (through the user namespace
-        # mapping), and could rewrite objects in your real repository behind
-        # already-reviewed hashes.  See FILE-2 in
-        # docs/security/files-attack-vectors.md.
-        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:workspace-dir}
-        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
-        fetch-changes: ${exec} fetch --all
-        show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
-
-        # Requires the user to review the changes and does not commit them.
-        # But it's potentially dangerous because it makes those workspace
-        # files active.
-        merge-changes: ${exec} merge {x:branch}
-
-        find-root:
-            - ${python:exec}
-            - -E
-            - -s
-            - ${scoter:distribution-bin-dir}/vcs_root_nearest.py
-            - .git
-            - '{x:start}'
-        # The branch checked out at `{x:root}`, for the review, read from the
-        # repository's files (Git isn't run).  Prints nothing when it can't tell.
-        current-branch:
-            - ${python:exec}
-            - -E
-            - -s
-            - ${scoter:distribution-bin-dir}/vcs_git_branch.py
-            - '{x:root}'
-    values:
-        ignore-file: .gitignore
-    value-lists:
-        # The environment variables these commands don't get.  A project can set
-        # them as you enter its directory (a `.envrc`, say), and Git's own point
-        # it at another repository (`GIT_DIR`), configuration (`GIT_CONFIG_*`)
-        # or program (`GIT_SSH_COMMAND`).  Set them in your Git configuration
-        # instead; `core.sshCommand` takes the place of `GIT_SSH_COMMAND`.
-        # Note, though, that scoter shouldn't be performing remote pulls or
-        # pushes, so dropping that value shouldn't cause issues.
-        drop-env:
-            - GIT_*
-    host-commands:
-        # A project's `git` command runs this section's program.
-        git:
+        # A project's `docker` command runs the `docker` section's program.
+        docker:
             action: warn
             reason: >-
-                Git reads the configuration and hooks of the repository it runs in,
-                which can run commands; a repository the container can write is the
-                container's choice of commands.
+                An allowed `docker` command can start a container that mounts your
+                home directory, and so change anything there, the accepted project
+                settings included.
             command-map:
-                git: ${exec}
-        git-options:
-            action: warn
-            reason: >-
-                These set any Git configuration, including `core.sshCommand` and
-                `core.fsmonitor`, which run commands.
-            command-map:
-                git: ${exec}
-            options: [-c, --config-env, --exec-path]
+                docker: ${docker:exec}
 
-
-# Default for no vcs - stored as simple files.
-# TODO create a "file vcs" python script in the install directory to handle these mechanisms.
-#      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
-#      support easier.  It also leads to allowing an ignore-file.  See ticket #23.
-file-vcs:
-    programs:
-        cp: cp
-        diff: diff
-        noop: echo
-    runs:
-        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
-        fetch-changes: ${noop}
-        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
-        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
-    values:
-        ignore-file: ""
-
-
-# Information for dealing with developer environments.
-dev-env:
     paths:
-        # Stores the running docker-compose configurations, so that
-        # parallel runs can understand how to deal with resource contention.
-        running-env-config: ${scoter:state-dir}/running-env.json
-        running-env-config-lock: ${scoter:state-dir}/running-env.json.lock
-
-        firewall-router: ${scoter:distribution-dir}/containers/firewall-router
-        network-gateway: ${scoter:distribution-dir}/containers/network-gateway
-
-        docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
-    values:
-        firewall-router-image: local-surf-scoter/firewall-router
-        network-gateway-image: local-surf-scoter/network-gateway
-        dev-env-image-prefix: local-surf-scoter/
-
-        # Limits for the docker-compose file.
-        mem-limit: 8g
-        cpus: 4
-        pids-limit: 4096
-        logging-max-size: 10m
-
-        # For auto-assigned sshd port, start at this number.
-        start-sshd-port: 20000
-
-
-# The configuration loader will alter the "scoter" section to match the
-# loaded configuration settings.
-scoter:
-    #paths:
-    # Set by you or by scoter (--distribution-dir wins):
-    #    distribution-dir: set to the Surf Scoter installation directory.
-    #
-    # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
-    # these after they've loaded would be a lie.
-    #    project-config: set to the project configuration file: `project-file-name` in the
-    #        project directory's `project-files-dir`.
-    #    project-dir: set to the project directory, which holds the `project-files-dir`.
-    #        scoter finds it, searching up from where it runs (or --project-dir) to the root
-    #        of the repository holding it.
-    #    vcs-root: set to the root of the repository holding the project (see the VCS sections).
-    #    dev-container-path: set to the project's dev container directory.
-    #    user-setup-file: set to the user's scoter configuration file.
-    #    user-dir: set to the user's scoter configuration directory.
-    #    cwd: set to the directory the tool ran in.
-    paths:
-        # Where your accepted (verified) project settings are kept.  They decide what each
-        # project may do, so this must be an absolute path outside any project, its workspace
-        # and its repository.
-        verified-dir: ~/.config/surf-scoter.d/verified
-        # Where the tools keep their own state, such as the running environments.
-        # Like `verified-dir`, an absolute path outside any project.
-        state-dir: ~/.config/surf-scoter.d/state
+        # Where your acceptances of projects' settings are kept.  They decide what
+        # each project may do, so this must be an absolute path outside any
+        # project, its workspace and its repository.
+        store: ~/.config/surf-scoter.d/verified
 
     path-lists:
-        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
-        # SECURITY: a dev container, and every parent it builds on, must be inside
-        # the project's `project-files-dir` or one of these directories.  Don't add
-        # directories a project controls, such as `${scoter:project-dir}` itself:
-        # they would let a project build from, and read, files outside its
-        # `project-files-dir`.
-        dev-containers-search:
-            - ${scoter:project-dir}/${scoter:project-files-dir}
-            - ${scoter:distribution-dir}/containers
-        # The `dev-containers-search` directories whose containers are reviewed
-        # like a project's own: copied into `verified-dir` with each acceptance,
-        # and a change to one asks for a new review.  Others are trusted as part
-        # of your installation.  Add `${scoter:distribution-dir}/containers` to
-        # review the distribution's too.
-        dev-containers-verified: []
+        # The `scoter: path-lists: dev-containers-search` directories whose
+        # containers are reviewed like a project's own: kept in the `store` with
+        # each acceptance, built from that copy, and a change to one asks for a
+        # new review.  Others are trusted as part of your installation.  Add
+        # `${scoter:distribution-dir}/containers` to review the distribution's too.
+        verified-containers: []
 
     value-lists:
         # Names of files (and, ending in `/`, directories) in a project's container
@@ -634,20 +577,75 @@ scoter:
             - duckdns.org
 
     values:
+        # How long an acceptance of a project's settings lasts, in days.
+        expiry-days: 30
+        # How many expired acceptances to keep for each project when you ask
+        # for a cleanup.  Nothing removes them on its own: the newest is what
+        # the next review compares with.
+        keep: 10
+        # The largest project file, and the most for all of a project's files,
+        # kept in the `store` with each acceptance, in bytes.
+        max-file-size: 16777216
+        max-snapshot-size: 268435456
+
+
+# The tools' own settings.  The configuration loader adds the locations it
+# works out (the `paths` below the comment), which you can't set.
+scoter:
+    #paths:
+    # Set by you or by scoter (--distribution-dir wins):
+    #    distribution-dir: set to the Surf Scoter installation directory.
+    #
+    # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
+    # these after they've loaded would be a lie.
+    #    project-config: set to the project configuration file: `project-file-name` in the
+    #        project directory's `project-files-dir`.
+    #    project-dir: set to the project directory, which holds the `project-files-dir`.
+    #        scoter finds it, searching up from where it runs (or --project-dir) to the root
+    #        of the repository holding it.
+    #    vcs-root: set to the root of the repository holding the project (see the VCS sections).
+    #    dev-container-path: set to the project's dev container directory.
+    #    user-setup-file: set to the user's scoter configuration file.
+    #    user-dir: set to the user's scoter configuration directory.
+    #    cwd: set to the directory the tool ran in.
+    #    distribution-bin-dir: set to the distribution's `bin` directory.
+    paths:
+        # Where the tools keep their own state, such as the running environments.
+        # Like `verification: paths: store`, an absolute path outside any project.
+        state-dir: ~/.config/surf-scoter.d/state
+        # The running environments, so that parallel runs can tell what's in use,
+        # and `scoter kill` can stop one; and the lock on changing them.
+        running-envs: ${state-dir}/running-env.json
+        running-envs-lock: ${state-dir}/running-env.json.lock
+
+    path-lists:
+        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
+        # SECURITY: a dev container, and every parent it builds on, must be inside
+        # the project's `project-files-dir` or one of these directories.  Don't add
+        # directories a project controls, such as `${scoter:project-dir}` itself:
+        # they would let a project build from, and read, files outside its
+        # `project-files-dir`.
+        dev-containers-search:
+            - ${scoter:project-dir}/${scoter:project-files-dir}
+            - ${scoter:distribution-dir}/containers
+
+    runs:
+        # The distribution's own commands, which there's no reason to change.
+        #
+        # Finding your acceptance of a project's settings, in `verification:
+        # paths: store`.
+        # Given the universal configuration file (`{x:universal}`) with the
+        # project, prints JSON saying which acceptance matches, if any.
+        find-acceptance:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/verified_find.py
+            - '{x:universal}'
+
+    values:
         # The directory, inside the project directory, that holds the project file and the
         # project's dev containers.  Everything the tools read from a project lives there.
         # It must be a single directory name.
         project-files-dir: .surf-scoter.d
         # The project file, in the `project-files-dir`.  It must be a single file name.
         project-file-name: project.yaml
-        # How long an accepted project's settings stay accepted, in days.
-        verified-expiry-days: 30
-        # How many expired acceptances to keep for each project when you ask
-        # for a cleanup.  Nothing removes them on its own: the newest is what
-        # the next review compares with.
-        verified-keep: 10
-        # The largest project file, and the most for all of a project's files,
-        # copied into `verified-dir` with each acceptance, in bytes.
-        verified-max-file-size: 16777216
-        verified-max-snapshot-size: 268435456
         backup-file-extension: .backup

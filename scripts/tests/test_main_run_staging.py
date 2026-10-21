@@ -188,14 +188,14 @@ class PrepareTest(DistTest):
         setup = self.home / "setup.yaml"
         setup.write_text(
             setup.read_text(encoding="utf-8")
-            + f"    dev-containers-verified:\n      - {json.dumps(str(self.mine))}\n",
+            + f"  path-lists:\n    verified-containers:\n      - {json.dumps(str(self.mine))}\n",
             encoding="utf-8",
         )
         # The later runs start from the first one's setup: make it again.
         self.generate("--distribution-dir", str(self.dist), output=self.tmp / "first.json")
 
     def test_verified_container_as_accepted(self) -> None:
-        """A `dev-containers-verified` container builds from the copy kept with the acceptance."""
+        """A `verification: verified-containers` container builds from the copy kept with the acceptance."""
         self.verified_parent()
         accepted = self.accept()
         kept = json.loads((accepted.parent / "containers.json").read_text(encoding="utf-8"))

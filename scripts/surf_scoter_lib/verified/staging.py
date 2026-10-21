@@ -72,11 +72,11 @@ def find_accepted(config: UserConfig, now: datetime.datetime) -> Accepted | None
     if file is None:
         return None
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None or verified is None:
-        raise StagingErr("accepted settings, but no project or `verified-dir` to find them in")
+        raise StagingErr("accepted settings, but no project or `verification: paths: store` to find them in")
     project_dir = os.path.realpath(project)
-    env_id = store.environment_id(Path(project_dir))
+    env_id = store.project_id(config, project_dir)
     verified_store = store.VerifiedStore.open(verified)
     real = Path(os.path.realpath(file))
     acceptances = Path(os.path.realpath(verified_store.root / env_id / records.ACCEPTANCES_DIR))
@@ -168,7 +168,7 @@ def stage_containers(
 ) -> BuildPlan:
     """The build's other containers, staged in `dest` where they need to be.
 
-    * Each `dev-containers-verified` container the build uses is restored
+    * Each `verification: verified-containers` container the build uses is restored
       from the copy kept with the acceptance (`accept.CONTAINERS_FILE`), so
       it's built as it was accepted, not as it is now.
     * The user's own container (`use: {name}`), trusted as their setup is,
@@ -192,7 +192,7 @@ def stage_containers(
             if data is None:
                 raise StagingErr(
                     f"your acceptance ({accepted.acceptance.id}) was made before the containers in "
-                    "`dev-containers-verified` were kept with it"
+                    "`verification: verified-containers` were kept with it"
                 )
             stored = {
                 str(key[-1]): snapshot.Manifest.from_json(jdata.req_dict(data, *key))

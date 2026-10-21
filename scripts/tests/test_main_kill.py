@@ -53,11 +53,11 @@ class KillTest(unittest.TestCase):
             "active-config-locations": {"project-dir": str(self.project) if project else None},
             "current-project-setup": {"vcs": "git"} if project else None,
             "resolved": {
-                "dev-env": {"paths": {
-                    "running-env-config": str(self.state / "running-env.json"),
-                    "running-env-config-lock": str(self.state / "running-env.json.lock"),
+                "scoter": {"paths": {
+                    "state-dir": str(self.state),
+                    "running-envs": str(self.state / "running-env.json"),
+                    "running-envs-lock": str(self.state / "running-env.json.lock"),
                 }},
-                "scoter": {"paths": {"state-dir": str(self.state)}},
                 "docker": {"runs": {"compose-down": [*recorder, "down", "{x:compose-file}"]}},
                 "git-vcs": {"runs": {"fetch-changes-into": [*recorder, "fetch", "{x:workspace-dir}", "{x:branch}"]}},
             },

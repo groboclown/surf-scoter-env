@@ -137,7 +137,9 @@ pub const EGRESS_REFUSED_WILDCARDS: &str = "egress-refused-wildcards";
 
 /// The project's egress wildcards on a domain the setup refuses them on.
 fn egress_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
-    project.wildcard_problems(&system.value_list(system::SCOTER_SECTION, EGRESS_REFUSED_WILDCARDS))
+    project.wildcard_problems(
+        &system.value_list(system::VERIFICATION_SECTION, EGRESS_REFUSED_WILDCARDS),
+    )
 }
 
 /// The `scoter` section's `values` key naming the project files directory.
@@ -153,6 +155,10 @@ pub struct LoadOptions {
     /// `scoter` found it from the setup's VCS sections.  It must hold the
     /// project directory.
     pub vcs_root: Option<PathBuf>,
+    /// The project's branch (`--project-branch`), as the VCS section's
+    /// `current-branch` gave it; `scoter:project-branch` is it made safe as a
+    /// path part.
+    pub project_branch: Option<String>,
     /// The dev container's mounts: the project workspace (`--dev-container-workspace-dir`)
     /// and the settings directory (`--dev-container-settings-dir`).
     pub dev_container_workspace_dir: Option<PathBuf>,
@@ -333,6 +339,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         project_dir: path_of(&active.project_dir),
         project_config: path_of(&active.project_config),
         vcs_root: path_of(&active.vcs_root),
+        project_branch: active.project_branch.as_deref(),
         dev_container_workspace_dir: path_of(&active.dev_container_workspace_dir),
         dev_container_settings_dir: path_of(&active.dev_container_settings_dir),
         dev_container: universal.dev_container.is_some(),
@@ -462,9 +469,26 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     let dev_container_settings_dir = carried(&options.dev_container_settings_dir, |a| {
         &a.dev_container_settings_dir
     });
+    // Given, or carried over while the project is the one it was found for.
+    let same_project = |u: &UniversalInput| {
+        let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        match (&options.project_dir, &u.active_config_locations.project_dir) {
+            (None, _) => true,
+            (Some(given), Some(was)) => canonical(&tidy_dir(given)) == canonical(Path::new(was)),
+            (Some(_), None) => false,
+        }
+    };
+    let project_branch = match &options.project_branch {
+        Some(branch) => Some(branch.clone()),
+        None => universal
+            .as_ref()
+            .filter(|u| same_project(u))
+            .and_then(|u| u.active_config_locations.project_branch.clone()),
+    };
     let setup = SetupOptions {
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
+        project_branch: project_branch.as_deref(),
         // Worked out from the project directory, with the setup.
         project_config: None,
         find_project_config: true,

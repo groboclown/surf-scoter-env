@@ -30,9 +30,12 @@ class StoreAcceptanceTest(TempDirTest):
                 "dev-container-path": str(self.project / ".surf-scoter.d" / "env"),
             },
             "resolved": {
+                "verification": {
+                    "paths": {"store": str(self.verified)},
+                    "path-lists": {"verified-containers": []},
+                },
                 "scoter": {
-                    "paths": {"verified-dir": str(self.verified)},
-                    "path-lists": {"dev-containers-search": [], "dev-containers-verified": []},
+                    "path-lists": {"dev-containers-search": []},
                     "values": {
                         "project-files-dir": ".surf-scoter.d",
                         "project-file-name": "project.yaml",
@@ -82,8 +85,8 @@ class StoreAcceptanceTest(TempDirTest):
         self.assertEqual({a.id for a in record.acceptances[1:]}, {a.id for a in old})
 
     def test_no_store_named(self) -> None:
-        """Without `verified-dir`, nothing can be stored."""
+        """Without `verification: paths: store`, nothing can be stored."""
         suc = self.suc()
-        del suc["resolved"]["scoter"]["paths"]  # type: ignore[union-attr]
-        with self.assertRaisesRegex(VerifiedStoreErr, "verified-dir"):
+        del suc["resolved"]["verification"]["paths"]  # type: ignore[union-attr]
+        with self.assertRaisesRegex(VerifiedStoreErr, "verification: paths: store"):
             self.store(UserConfig(suc), records.now_utc() + datetime.timedelta(days=1))

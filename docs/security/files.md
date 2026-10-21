@@ -7,13 +7,13 @@ This document describes which files the container can see, how they get there, a
 
 ## The directories
 
-`scoter run` creates a `.dev-env` directory in your project directory (the `workspace` section of [`defaults/setup.yaml`](../../defaults/setup.yaml) sets the locations) with three subdirectories:
+`scoter run` keeps a project's run files in a directory of their own, outside the project: by default `${scoter:state-dir}/workspaces/${scoter:project-id}` (such as `~/.config/surf-scoter.d/state/workspaces/client-3f9a0b1c2d4e`), readable only by you.  The `workspace` section of [`defaults/setup.yaml`](../../defaults/setup.yaml) sets the locations; [the system configuration file](../system-config-file.md) describes the project id, and the branch you can add for a workspace per branch.  It has three subdirectories:
 
 | Host directory | Contents | In the dev container | Who writes it |
 | --- | --- | --- | --- |
-| `.dev-env/workspace` | A clone of your project | Read-write, at `mounts: workspace` (default `/workspace`) | The container |
-| `.dev-env/setup` | SSH host key, `authorized_keys`, bridge command list | Read-only, at `mounts: setup` (default `/opt/surf-scoter-setup`) | `scoter` on the host |
-| `.dev-env/resources` | Compose file, compose `.env`, the universal configuration file | Not mounted | `scoter` on the host |
+| `workspace` | A clone of your project | Read-write, at `mounts: workspace` (default `/workspace`) | The container |
+| `setup` | SSH host key, `authorized_keys`, bridge command list | Read-only, at `mounts: setup` (default `/opt/surf-scoter-setup`) | `scoter` on the host |
+| `resources` | Compose file, compose `.env`, the universal configuration file | Not mounted | `scoter` on the host |
 
 The gateway container also mounts its configuration (`resources/gateway-config`, made from the egress rules), read-only; the dev container doesn't get it.  Nothing else from your host is mounted.  In particular, the dev container never gets your home directory, your SSH keys, your cloud credential files, or the container runtime's socket.
 
@@ -40,7 +40,7 @@ Everything in the workspace was writable by the container, including the clone's
 
 ```sh
 cd ~/src/my-project
-git fetch /path/to/my-project/.dev-env/workspace my-branch
+git fetch ~/.config/surf-scoter.d/state/workspaces/my-project-3f9a0b1c2d4e/workspace my-branch
 git log -p HEAD..FETCH_HEAD
 ```
 
@@ -80,6 +80,6 @@ A project's `vcs` value picks a `NAME-vcs` section of the [system configuration]
 
 ### General
 
-* **Set `ignore-file`,** so the project's own VCS ignores the `.dev-env` directories rather than committing or scanning them.
+* **Set `ignore-file`,** so that, if you keep the workspace inside the project, the project's own VCS ignores those directories rather than committing or scanning them.  `scoter run` adds them to it only when they're inside the project.
 * **Treat `{x:...}` values as untrusted text.**  Pass them as single arguments in `runs` templates; never build shell command lines from them.
 * **Recheck the [file access attack vectors](files-attack-vectors.md)** against the new implementation, and add any new risk it brings as a vector there.

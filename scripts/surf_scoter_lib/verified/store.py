@@ -1,7 +1,7 @@
 #SPDX:MIT
-"""The verified store: the user's accepted project settings, in `scoter: paths: verified-dir`.
+"""The verified store: the user's accepted project settings, in `verification: paths: store`.
 
-    verified-dir/                 0700
+    store/                        0700
         index.json                0600  canonical project directory -> environment id
         lock                      0600  held while anything below changes
         blobs/AB/ABCD...          0600  file contents, by SHA-256
@@ -27,6 +27,7 @@ from pathlib import Path
 
 from .. import fileutil, jdata
 from ..err import VerifiedStoreErr
+from ..user_config import UserConfig
 
 # Internal storage file names can be hard-coded.
 INDEX_SCHEMA = "surf-scoter-verified-index-1"
@@ -57,6 +58,16 @@ def environment_id(project_dir: Path) -> str:
     name = _NAME_CHARS.sub("-", os.path.basename(canonical).lower())[:32].strip("-")
     digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()[:12]
     return f"{name or 'project'}-{digest}"
+
+
+def project_id(config: UserConfig, project_dir: str) -> str:
+    """The project's id: the generator's (`scoter:project-id`), as the setup's paths use it.
+
+    Worked out the same way (`environment_id`) for a universal configuration
+    file without one, such as a test's.
+    """
+    given = config.raw("active-config-locations", "project-id")
+    return given if isinstance(given, str) and given else environment_id(Path(project_dir))
 
 
 def canonical_json(data: jdata.JsonData) -> bytes:

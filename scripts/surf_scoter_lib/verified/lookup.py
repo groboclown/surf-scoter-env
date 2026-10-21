@@ -48,12 +48,12 @@ class Lookup:
 def find(config: UserConfig) -> Lookup:
     """The acceptance for the project in the universal configuration file."""
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None or verified is None or not verified.is_dir():
         return Lookup()
     project_dir = os.path.realpath(project)
     verified_store = store.VerifiedStore.open(verified)
-    env_id = store.environment_id(Path(project_dir))
+    env_id = store.project_id(config, project_dir)
     record = records.load_environment(verified_store, project_dir, env_id)
     if record is None:
         return Lookup()
@@ -89,13 +89,13 @@ def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) ->
     """
     never = "You haven't accepted this project's settings."
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None or verified is None or not verified.is_dir():
         return never
     project_dir = os.path.realpath(project)
     verified_store = store.VerifiedStore.open(verified)
     record = records.load_environment(
-        verified_store, project_dir, store.environment_id(Path(project_dir)),
+        verified_store, project_dir, store.project_id(config, project_dir),
     )
     accepted = [a for a in record.acceptances if a.suggestion is not None] if record else []
     if not accepted:
@@ -131,12 +131,12 @@ def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) ->
 
 
 def limits(config: UserConfig) -> snapshot.SnapshotLimits:
-    """The snapshot limits, from the setup's `verified-max-*` values."""
+    """The snapshot limits, from the setup's `verification: max-*` values."""
     defaults = snapshot.SnapshotLimits()
     return snapshot.SnapshotLimits(
-        max_file_size=config.optional_int_value("scoter", "verified-max-file-size")
+        max_file_size=config.optional_int_value("verification", "max-file-size")
         or defaults.max_file_size,
-        max_snapshot_size=config.optional_int_value("scoter", "verified-max-snapshot-size")
+        max_snapshot_size=config.optional_int_value("verification", "max-snapshot-size")
         or defaults.max_snapshot_size,
     )
 
@@ -172,14 +172,14 @@ def vcs_section(config: UserConfig) -> str | None:
 
 
 def verified_roots(config: UserConfig) -> list[Path]:
-    """The setup's `dev-containers-verified` directories, as real paths."""
+    """The setup's `verification: verified-containers` directories, as real paths."""
     return [
-        Path(os.path.realpath(p)) for p in config.optional_path_list("scoter", "dev-containers-verified")
+        Path(os.path.realpath(p)) for p in config.optional_path_list("verification", "verified-containers")
     ]
 
 
 def verified_container_snapshots(config: UserConfig) -> dict[str, snapshot.Snapshot]:
-    """The build's container directories in `dev-containers-verified` (real paths), with their snapshots."""
+    """The build's container directories in `verification: verified-containers` (real paths), with their snapshots."""
     roots = verified_roots(config)
     found: dict[str, snapshot.Snapshot] = {}
     for directory in container_dirs(config):
@@ -190,7 +190,7 @@ def verified_container_snapshots(config: UserConfig) -> dict[str, snapshot.Snaps
 
 
 def verified_containers(config: UserConfig) -> dict[str, str]:
-    """The build's container directories in `dev-containers-verified`, with their manifests' ids."""
+    """The build's container directories in `verification: verified-containers`, with their manifests' ids."""
     return {d: s.manifest.id for d, s in verified_container_snapshots(config).items()}
 
 

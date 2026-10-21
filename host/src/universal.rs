@@ -92,6 +92,12 @@ pub struct ActiveConfigLocations {
     /// The root of the repository holding the project (`--vcs-root`).
     #[serde(default)]
     pub vcs_root: Option<String>,
+    /// The project's id (`scoter:project-id`), worked out from its directory.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The project's branch, made safe as a path part (`scoter:project-branch`).
+    #[serde(default)]
+    pub project_branch: Option<String>,
     /// The project's dev container directory.
     #[serde(default)]
     pub dev_container_path: Option<String>,
@@ -212,6 +218,8 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             project_config: location(system::PROJECT_CONFIG),
             project_dir: location(system::PROJECT_DIR),
             vcs_root: location(system::VCS_ROOT),
+            project_id: location(system::PROJECT_ID),
+            project_branch: location(system::PROJECT_BRANCH),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
             dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
             dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
@@ -544,6 +552,12 @@ mod tests {
                                 "project-files-dir".to_string(),
                                 ScalarValue::String(".surf-scoter.d".to_string()),
                             ),
+                            (
+                                "project-id".to_string(),
+                                ScalarValue::String(crate::config::system::environment_id(
+                                    &dir.path().join("proj"),
+                                )),
+                            ),
                         ]),
                         ..section(
                             &[
@@ -590,11 +604,17 @@ mod tests {
         );
 
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
-        // The locations are also the `scoter` section's paths.
+        // The locations are also the `scoter` section's paths; the project's
+        // id and branch, its values (text, to build paths from).
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 11);
+        assert_eq!(active.len(), 13);
         for (key, value) in active {
-            let path = &json["resolved"]["scoter"]["paths"][key];
+            let group = if key == "project-id" || key == "project-branch" {
+                "values"
+            } else {
+                "paths"
+            };
+            let path = &json["resolved"]["scoter"][group][key];
             if value.is_null() {
                 assert!(path.is_null(), "{key}");
             } else {
@@ -804,7 +824,7 @@ mod tests {
                 "      command-map: {mytool: mytool, py: python3.12}\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, bash]}\n",
                 "    interpreters: {action: refuse, reason: interp, name-patterns: ['python*']}\n",
                 "    code-options: {action: warn, reason: opts, options: [-c]}\n",
@@ -820,11 +840,11 @@ mod tests {
         assert_eq!(
             checks.command_map,
             BTreeMap::from([
-                ("bash".to_string(), mapped(None, &["host-bridge:shells"])),
+                ("bash".to_string(), mapped(None, &["verification:shells"])),
                 ("docker".to_string(), mapped(p(&podman), &["docker:docker"])),
                 ("mytool".to_string(), mapped(p(&mytool), &["mine:tools"])),
                 ("py".to_string(), mapped(p(&python), &["mine:tools"])),
-                ("sh".to_string(), mapped(p(&sh), &["host-bridge:shells"])),
+                ("sh".to_string(), mapped(p(&sh), &["verification:shells"])),
             ])
         );
         let verdict = |action, checks: &[&str]| Verdict {
@@ -837,7 +857,7 @@ mod tests {
             BTreeMap::from([
                 (
                     "bash".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells"])
+                    verdict(Action::Refuse, &["verification:shells"])
                 ),
                 (
                     "docker".to_string(),
@@ -846,21 +866,21 @@ mod tests {
                 // The same file as `sh`.
                 (
                     "mytool".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:shells"])
                 ),
                 // By the base name of its executable.
                 (
                     "py".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:interpreters", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:interpreters"])
                 ),
                 // And the other way around.
                 (
                     "sh".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:shells"])
                 ),
             ])
         );
-        let shims = &checks.checks["host-bridge:shims"];
+        let shims = &checks.checks["verification:shims"];
         assert_eq!(
             shims.paths,
             [dir.path().join("dist/shims").display().to_string()]
@@ -869,7 +889,7 @@ mod tests {
             shims.files,
             [dir.path().join("dist/setup.yaml").display().to_string()]
         );
-        assert_eq!(checks.checks["host-bridge:code-options"].options, ["-c"]);
+        assert_eq!(checks.checks["verification:code-options"].options, ["-c"]);
         assert!(checks.notices.is_empty(), "{:?}", checks.notices);
     }
 
@@ -887,11 +907,11 @@ mod tests {
         let checks = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n    ksh-ok:\n      action: allow\n      reason: mine\n",
-                "      commands: [ksh, zsh]\n      overrides: ['host-bridge:shells', 'host-bridge:gone']\n",
+                "verification:\n  host-commands:\n    ksh-ok:\n      action: allow\n      reason: mine\n",
+                "      commands: [ksh, zsh]\n      overrides: ['verification:shells', 'verification:gone']\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, ksh]}\n",
                 "    korn: {action: warn, reason: korn, commands: [ksh]}\n",
             ),
@@ -901,12 +921,15 @@ mod tests {
         // the override takes `shells`' place, and `korn` still applies.
         let ksh = &checks.commands["ksh"];
         assert_eq!(ksh.action, Action::Warn);
-        assert_eq!(ksh.checks, ids(&["host-bridge:korn", "host-bridge:ksh-ok"]));
+        assert_eq!(
+            ksh.checks,
+            ids(&["verification:korn", "verification:ksh-ok"])
+        );
         assert_eq!(
             ksh.overridden,
             [Overridden {
-                check: "host-bridge:shells".to_string(),
-                by: "host-bridge:ksh-ok".to_string()
+                check: "verification:shells".to_string(),
+                by: "verification:ksh-ok".to_string()
             }]
         );
         assert_eq!(checks.commands["sh"].action, Action::Refuse);
@@ -916,8 +939,8 @@ mod tests {
         assert_eq!(
             messages(&checks.notices),
             [
-                "`host-bridge:ksh-ok` overrides `host-bridge:shells` for the command `zsh`, which `host-bridge:shells` doesn't match; the override does nothing for it",
-                "`host-bridge:ksh-ok` overrides `host-bridge:gone`, which isn't set; the override does nothing",
+                "`verification:ksh-ok` overrides `verification:shells` for the command `zsh`, which `verification:shells` doesn't match; the override does nothing for it",
+                "`verification:ksh-ok` overrides `verification:gone`, which isn't set; the override does nothing",
             ]
         );
         let user = dir.path().join("home/setup.yaml").display().to_string();
@@ -978,13 +1001,13 @@ mod tests {
         let errors = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n    shells: {action: refuse, reason: r, commands: [sh]}\n",
+                "verification:\n  host-commands:\n    shells: {action: refuse, reason: r, commands: [sh]}\n",
                 "a:\n  host-commands:\n    one: {action: warn, reason: r, command-map: {docker: podman}}\n",
                 "c:\n  host-commands:\n    x: {action: warn, reason: r, commands: [sh], overrides: ['c:x']}\n",
             ),
             concat!(
                 "b:\n  host-commands:\n    two: {action: warn, reason: r, command-map: {docker: sh}}\n",
-                "    relax: {action: allow, reason: r, commands: [sh], overrides: ['host-bridge:shells']}\n",
+                "    relax: {action: allow, reason: r, commands: [sh], overrides: ['verification:shells']}\n",
             ),
         )
         .unwrap_err();
@@ -997,7 +1020,7 @@ mod tests {
                     podman.display()
                 ),
                 format!(
-                    "b.host-commands.relax: overrides `host-bridge:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
+                    "b.host-commands.relax: overrides `verification:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
                     dir.path().join("home/setup.yaml").display()
                 ),
                 "c.host-commands.x: can't override itself".to_string(),
@@ -1035,13 +1058,13 @@ mod tests {
         let checks = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: warn, reason: mine, commands: [sh]}\n",
                 "    runners: null\n",
                 "    same: {action: refuse, reason: mine, commands: [x, y]}\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, ksh, nu]}\n",
                 "    runners: {action: refuse, reason: run, commands: [env]}\n",
                 "    same: {action: warn, reason: theirs, commands: [x]}\n",
@@ -1054,13 +1077,13 @@ mod tests {
             messages(&checks.notices),
             [
                 format!(
-                    "{user} removes `host-bridge:runners`, so {dist}'s check no longer applies, nor will what it adds later"
+                    "{user} removes `verification:runners`, so {dist}'s check no longer applies, nor will what it adds later"
                 ),
                 format!(
-                    "{user} replaces `host-bridge:shells` from {dist} without its commands `ksh`, `nu`; what {dist} adds to it later won't apply (`overrides` relaxes a check without replacing it)"
+                    "{user} replaces `verification:shells` from {dist} without its commands `ksh`, `nu`; what {dist} adds to it later won't apply (`overrides` relaxes a check without replacing it)"
                 ),
                 format!(
-                    "{user} replaces `host-bridge:shells` from {dist} with `warn` in place of `refuse`"
+                    "{user} replaces `verification:shells` from {dist} with `warn` in place of `refuse`"
                 ),
             ]
         );
@@ -1085,11 +1108,11 @@ mod tests {
         );
         // The check in effect is the user's; the distribution's is hidden.
         assert_eq!(
-            checks.checks["host-bridge:shells"].files,
+            checks.checks["verification:shells"].files,
             [user.clone(), dist.clone()]
         );
-        assert!(!checks.checks.contains_key("host-bridge:runners"));
-        assert_eq!(checks.checks["host-bridge:same"].reason, "mine");
+        assert!(!checks.checks.contains_key("verification:runners"));
+        assert_eq!(checks.checks["verification:same"].reason, "mine");
     }
 
     #[cfg(unix)]
@@ -1151,7 +1174,7 @@ mod tests {
         );
         dir.write(
             "home/setup.yaml",
-            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
         );
         let options = LoadOptions {
             project_dir: Some(dir.path().join("proj")),
@@ -1191,7 +1214,7 @@ mod tests {
         dir.write(
             "home/setup.yaml",
             &format!(
-                "scoter:\n  paths:\n    verified-dir: {}\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+                "verification:\n  paths:\n    store: {}\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
                 verified.display()
             ),
         );
@@ -1321,7 +1344,7 @@ mod tests {
         let setup = std::fs::read_to_string(dir.path().join("home/setup.yaml")).unwrap();
         dir.write(
             "home/setup.yaml",
-            &format!("{setup}network-gateway:\n  values:\n    name: squid\n"),
+            &format!("{setup}dev-env:\n  values:\n    network-gateway-name: squid\n"),
         );
         assert!(load_all_with_env(&options, env).is_ok());
     }
@@ -1395,6 +1418,86 @@ mod tests {
         );
     }
 
+    // ---- the project's id and branch ----
+
+    #[test]
+    fn project_id_and_branch() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nworkspace:\n  paths:\n    per-branch: /w/${scoter:project-id}/${scoter:project-branch}\n",
+        );
+        let env = || Env {
+            scoter_home: Some(dir.path().join("home")),
+            ..Env::default()
+        };
+        let options = LoadOptions {
+            project_dir: Some(dir.path().join("proj")),
+            project_branch: Some("feature/../x".to_string()),
+            ..LoadOptions::default()
+        };
+        let universal = build(&load_all_with_env(&options, env()).unwrap()).unwrap();
+        let id = crate::config::system::environment_id(&dir.path().join("proj"));
+        let active = &universal.active_config_locations;
+        assert_eq!(active.project_id.as_deref(), Some(id.as_str()));
+        assert_eq!(active.project_branch.as_deref(), Some("feature-..-x"));
+        assert_eq!(
+            universal.resolved["workspace"].paths["per-branch"],
+            Some(format!("/w/{id}/feature-..-x"))
+        );
+        // Carried over by a later run from the universal file.
+        let first = dir.write("first.json", &to_json(&universal));
+        let again = LoadOptions {
+            universal: Some(first),
+            no_setup_search: true,
+            ..LoadOptions::default()
+        };
+        let carried = build(&load_all_with_env(&again, env()).unwrap()).unwrap();
+        assert_eq!(
+            carried.active_config_locations.project_branch.as_deref(),
+            Some("feature-..-x")
+        );
+        assert_eq!(
+            carried.active_config_locations.project_id.as_deref(),
+            Some(id.as_str())
+        );
+        // With the same project given again too (a review's runs do); not
+        // with another.
+        let same = LoadOptions {
+            project_dir: Some(dir.path().join("proj")),
+            ..again.clone()
+        };
+        let carried = build(&load_all_with_env(&same, env()).unwrap()).unwrap();
+        assert_eq!(
+            carried.active_config_locations.project_branch.as_deref(),
+            Some("feature-..-x")
+        );
+        dir.write("other/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("other/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "other/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        let other = LoadOptions {
+            project_dir: Some(dir.path().join("other")),
+            ..again.clone()
+        };
+        let carried = build(&load_all_with_env(&other, env()).unwrap()).unwrap();
+        assert_eq!(carried.active_config_locations.project_branch, None);
+        // The setup can't set them.
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n    project-id: mine\n",
+        );
+        assert!(load_all_with_env(&options, env()).is_err());
+    }
+
     // ---- review files ----
 
     #[test]
@@ -1411,7 +1514,7 @@ mod tests {
         dir.write(
             "home/setup.yaml",
             &format!(
-                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\nnetwork-gateway:\n  values:\n    name: squid\n",
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\ndev-env:\n  values:\n    network-gateway-name: squid\n",
                 dir.path().join("mine").display()
             ),
         );
@@ -1499,7 +1602,7 @@ mod tests {
                 "expires-at: \"2000-01-01T00:00:00Z\"\n",
                 "$comment: \"for the release\"\n",
                 "egress:\n  - {host: \"github.com\", protocol: \"tls\", $comment: \"read only\"}\n",
-                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"host-bridge:shells\"]}\n",
+                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"verification:shells\"]}\n",
             ),
         );
         let load_with = |file: &Path| {
@@ -1520,7 +1623,7 @@ mod tests {
         let data = &section["data"];
         assert_eq!(data["$comment"], "for the release");
         assert_eq!(data["egress"][0]["$comment"], "read only");
-        assert_eq!(data["commands"][0]["$override"][0], "host-bridge:shells");
+        assert_eq!(data["commands"][0]["$override"][0], "verification:shells");
         // Nothing is accepted from it.
         assert!(universal.review.is_none());
         assert!(universal.host_brokered.is_empty());

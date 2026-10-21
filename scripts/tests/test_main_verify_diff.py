@@ -104,8 +104,8 @@ class ReReviewTest(DistTest):
         self.assertIn('    # args: [{any: {prefix: "src/"}}]', lines)
         # The shell: refused by the setup, but the user's override is kept, so it isn't commented out.
         self.assertIn('  - command: "sh"', lines)
-        self.assertIn('    $override: ["host-bridge:shells"]', lines)
-        self.assertTrue(any("you overrode host-bridge:shells here" in line for line in lines))
+        self.assertIn('    $override: ["verification:shells"]', lines)
+        self.assertTrue(any("you overrode verification:shells here" in line for line in lines))
         # The Dockerfile's change.
         self.assertIn("  #scoter:   env/Dockerfile  ", text)
         self.assertIn("  #scoter:     | +LABEL x=y", lines)
@@ -121,7 +121,7 @@ class ReReviewTest(DistTest):
             [(c["command"], c["args"]) for c in accepted["commands"]],
             [("ls", ["-l", {"any": {}}]), ("sh", ["-c", {"any": {}}])],
         )
-        self.assertEqual(accepted["overrides"]["commands"], [{"index": 1, "checks": ["host-bridge:shells"]}])
+        self.assertEqual(accepted["overrides"]["commands"], [{"index": 1, "checks": ["verification:shells"]}])
         self.assertEqual([r["host"] for r in accepted["egress"]], ["registry.npmjs.org", "github.com"])
 
     def test_nothing_changed(self) -> None:

@@ -462,7 +462,7 @@ def check_egress(
         rules = gateway.rules_of(entries if entries is not None else config.project_egress())
     except gateway.RuleErr as err:
         return [Finding(Severity.REFUSE, "egress", str(err))]
-    data_out = config.value_list("scoter", DATA_OUT_HOSTS)
+    data_out = config.value_list("verification", DATA_OUT_HOSTS)
     findings: list[Finding] = []
     for i, rule in enumerate(rules):
         key = f"egress[{i}]"
@@ -566,7 +566,7 @@ def check_project_files(config: UserConfig) -> list[Finding]:
     if project is None or files_name is None or file_name is None:
         return []
     files_dir = Path(os.path.realpath(project / files_name))
-    secrets = config.value_list("scoter", SECRET_FILES)
+    secrets = config.value_list("verification", SECRET_FILES)
     builds = config.dev_container_parent_builds() if config.has_dev_container() else []
     local_tags = [tag for tag, _ in builds]
     dirs: list[Path | None] = [config.active_location("dev-container-path")]

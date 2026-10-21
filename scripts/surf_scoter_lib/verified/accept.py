@@ -12,7 +12,7 @@ An acceptance keeps, in the verified store:
 * `suggestion.json`: the project file and dev container it was reviewed from,
   and the suggestion as the review wrote it (`review`), which the next
   review compares with (step 17);
-* `containers.json`: the build's `dev-containers-verified` containers, each
+* `containers.json`: the build's `verification: verified-containers` containers, each
   directory's manifest (their contents as blobs), for the run to build from
   (step 18);
 
@@ -22,7 +22,6 @@ contents as blobs) and the setup values it was reviewed under.
 import datetime
 import json
 import os
-from pathlib import Path
 
 from .. import jdata
 from ..err import VerifiedStoreErr
@@ -31,7 +30,7 @@ from . import lookup, records, snapshot, store
 
 REVIEW_FILE = "review.yaml"
 SUGGESTION_FILE = "suggestion.json"
-# The `dev-containers-verified` containers the build uses, as accepted: each
+# The `verification: verified-containers` containers the build uses, as accepted: each
 # directory's manifest, their contents in the store, for the run to build from.
 CONTAINERS_FILE = "containers.json"
 CONTAINERS_SCHEMA = "surf-scoter-accepted-containers-1"
@@ -56,11 +55,11 @@ def store_acceptance(
     next review compares with (step 17).
     """
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None:
         raise VerifiedStoreErr("there's no project to accept")
     if verified is None:
-        raise VerifiedStoreErr("the setup gives no `scoter: paths: verified-dir` to keep it in")
+        raise VerifiedStoreErr("the setup gives no `verification: paths: store` to keep it in")
     project_dir = os.path.realpath(project)
     containers = lookup.verified_container_snapshots(config)
     acceptance = records.Acceptance(
@@ -80,7 +79,7 @@ def store_acceptance(
         "review": suggested,
     }
     verified_store = store.VerifiedStore.open(verified, create=True)
-    env_id = store.environment_id(Path(project_dir))
+    env_id = store.project_id(config, project_dir)
     with verified_store.locked():
         record = records.load_environment(verified_store, project_dir, env_id)
         if record is None:

@@ -80,9 +80,9 @@ class BuildTest(unittest.TestCase):
             "resolved": {
                 "scoter": {"values": {
                     "project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml",
-                    "verified-expiry-days": 10,
                 }},
-                "network-gateway": {"values": {"name": "squid"}},
+                "verification": {"values": {"expiry-days": 10}},
+                "dev-env": {"values": {"network-gateway-name": "squid"}},
             },
             "current-project-setup": {
                 "egress": [{"host": "registry.npmjs.org", "protocol": "tls"}],
@@ -103,7 +103,7 @@ class BuildTest(unittest.TestCase):
                 ],
             },
             "host-command-checks": {"checks": {
-                "host-bridge:shells": {
+                "verification:shells": {
                     "files": [], "action": "refuse",
                     "reason": "A shell runs anything. \x1b[31mDanger\x1b[0m \u202e",
                     "commands": {"sh": str(self.bin / "sh")}, "name-patterns": [], "options": [],
@@ -137,7 +137,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn(f'    program: "{self.bin / "aws"}"', lines)
         self.assertIn('    args: ["s3", {any: {prefix: "s3://b/"}}]', lines)
         self.assertIn('  # - command: "sh"', lines)
-        self.assertIn('    # $override: ["host-bridge:shells"]', lines)
+        self.assertIn('    # $override: ["verification:shells"]', lines)
         self.assertIn('  # - command: "gone"', lines)
         gone = text[text.index('# - command: "gone"'):]
         self.assertNotIn("$override", gone.split("\n\n")[0])
@@ -153,9 +153,9 @@ class BuildTest(unittest.TestCase):
         report = checks.check_project(config, str(self.bin))
         def build(notes: list[str] | None) -> list[str]:
             return review.build(config, review.Context(report=report, now=NOW, setup_notes=notes)).splitlines()
-        lines = build(["`x:y` overrides `host-bridge:shells` for `sh`, with `warn`"])
+        lines = build(["`x:y` overrides `verification:shells` for `sh`, with `warn`"])
         self.assertIn("#scoter: Your setup's host command checks (as `scoter user-setup` shows them):", lines)
-        self.assertIn("#scoter:   `x:y` overrides `host-bridge:shells` for `sh`, with `warn`", lines)
+        self.assertIn("#scoter:   `x:y` overrides `verification:shells` for `sh`, with `warn`", lines)
         self.assertIn("#scoter: Your setup's host command checks: none removed, replaced or overridden.", build([]))
         self.assertFalse(any("host command checks" in line for line in build(None)))
 

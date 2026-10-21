@@ -30,8 +30,8 @@ def run_kill(
 ) -> int:
     """Stop the environment `host`, or the project's one."""
     try:
-        file = config.require_path("dev-env", "running-env-config")
-        lock_file = config.require_path("dev-env", "running-env-config-lock")
+        file = config.require_path("scoter", "running-envs")
+        lock_file = config.require_path("scoter", "running-envs-lock")
         env = _choose(config, ActiveEnvironmentSet.read(file), host)
     except SurfScoterErr as err:
         print(err, file=sys.stderr)

@@ -100,20 +100,34 @@ pub const DISTRIBUTION_DIR: &str = "distribution-dir";
 /// program changed it.
 pub const DISTRIBUTION_BIN_DIR: &str = "distribution-bin-dir";
 pub const CWD: &str = "cwd";
-/// Where the user's accepted (verified) project settings are kept.  Set by
-/// the setup files, not the tool; it decides what a project may do, so it
-/// must be absolute and outside the project.
-pub const VERIFIED_DIR: &str = "verified-dir";
+/// The setup section for what a review checks, and where acceptances are kept.
+pub const VERIFICATION_SECTION: &str = "verification";
+/// Where the user's acceptances of projects' settings are kept, in the
+/// `verification` section's `paths`.  Set by the setup files, not the tool;
+/// it decides what a project may do, so it must be absolute and outside the
+/// project.
+pub const VERIFIED_STORE: &str = "store";
 /// Where the tools keep their own state, such as the running environments.
-/// Like `verified-dir`, it must be absolute and outside the project.
+/// Like `verification:store`, it must be absolute and outside the project.
 pub const STATE_DIR: &str = "state-dir";
 /// The root of the repository holding the project, found by `scoter` from
 /// the setup's VCS sections and given to the generator (`--vcs-root`).
 pub const VCS_ROOT: &str = "vcs-root";
+/// The project's id, the same for the same project directory: its name and a
+/// hash of its canonical path (`environment_id`).  The verified store names
+/// the project's directory by it, and the setup can use it to name a
+/// workspace outside the project.
+pub const PROJECT_ID: &str = "project-id";
+/// The project's branch (`--project-branch`, from the VCS section's
+/// `current-branch`), made safe as a single path part (`path_part`).  Not
+/// set without a branch.
+pub const PROJECT_BRANCH: &str = "project-branch";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 10] = [
+const TOOL_ONLY_KEYS: [&str; 12] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
+    PROJECT_ID,
+    PROJECT_BRANCH,
     VCS_ROOT,
     DEV_CONTAINER_PATH,
     DEV_CONTAINER_WORKSPACE_DIR,
@@ -392,6 +406,9 @@ pub struct SetupOptions<'a> {
     pub project_config: Option<&'a Path>,
     /// The root of the repository holding the project: `scoter:vcs-root`.
     pub vcs_root: Option<&'a Path>,
+    /// The project's branch, as the VCS gave it: `scoter:project-branch`,
+    /// once made safe as a path part.
+    pub project_branch: Option<&'a str>,
     /// The dev container's mounts: `scoter:dev-container-workspace-dir` and
     /// `scoter:dev-container-settings-dir`.
     pub dev_container_workspace_dir: Option<&'a Path>,
@@ -579,8 +596,9 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     files.extend(base_files);
     files.sort_by_key(|f| f.source);
 
-    let mut tool_values: Vec<(&str, String)> = Vec::new();
-    let mut add = |key, value: Option<String>| tool_values.extend(value.map(|v| (key, v)));
+    let mut tool_values: Vec<(&str, Entry)> = Vec::new();
+    let mut add =
+        |key, value: Option<String>| tool_values.extend(value.map(|v| (key, Entry::Path(v))));
     add(PROJECT_CONFIG, options.project_config.map(path_text));
     add(PROJECT_DIR, options.project_dir.map(path_text));
     add(VCS_ROOT, options.vcs_root.map(path_text));
@@ -596,6 +614,19 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     add(USER_DIR, inputs.user_dir.clone());
     add(DISTRIBUTION_DIR, inputs.distribution_dir.clone());
     add(CWD, env.cwd.as_deref().map(path_text));
+    // Text, not paths: names to build paths from.
+    let text = |value: String| Entry::Value(ScalarValue::String(value));
+    tool_values.extend(
+        options
+            .project_dir
+            .map(|dir| (PROJECT_ID, text(environment_id(dir)))),
+    );
+    tool_values.extend(
+        options
+            .project_branch
+            .and_then(path_part)
+            .map(|branch| (PROJECT_BRANCH, text(branch))),
+    );
     let merge = |files: &[SetupFile]| {
         SystemConfig::merge(files, &tool_values, env.clone(), options.project_dir)
     };
@@ -606,11 +637,11 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     // referred to.
     let given = inputs.distribution_dir.is_some();
     let uses_cwd = !given && {
-        let elsewhere: Vec<(&str, String)> = tool_values
+        let elsewhere: Vec<(&str, Entry)> = tool_values
             .iter()
             .filter(|(key, _)| *key != CWD)
             .cloned()
-            .chain([(CWD, "/surf-scoter-not-the-cwd".to_string())])
+            .chain([(CWD, Entry::Path("/surf-scoter-not-the-cwd".to_string()))])
             .collect();
         SystemConfig::merge(&files, &elsewhere, env.clone(), options.project_dir)
             .get(SCOTER_SECTION, DISTRIBUTION_DIR)
@@ -695,14 +726,18 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     // The accepted project settings decide what a project may do, and the
     // state says which environments run where, so neither can be kept where
     // the project, or the container, could change them.
-    for (key, what) in [
-        (VERIFIED_DIR, "the accepted project settings are"),
-        (STATE_DIR, "the tools' state is"),
+    for (section, key, what) in [
+        (
+            VERIFICATION_SECTION,
+            VERIFIED_STORE,
+            "the accepted project settings are",
+        ),
+        (SCOTER_SECTION, STATE_DIR, "the tools' state is"),
     ] {
-        let Some(dir) = config.get_path(SCOTER_SECTION, key) else {
+        let Some(dir) = config.get_path(section, key) else {
             continue;
         };
-        let setting = format!("`{SCOTER_SECTION}:{key}` {}", dir.display());
+        let setting = format!("`{section}:{key}` {}", dir.display());
         if !dir.is_absolute() {
             errors.push(ConfigError::new(
                 None,
@@ -968,6 +1003,71 @@ fn find_var<'a>(
 /// may not have (`project-dir` without a project, say).
 fn is_location(section: &str, key: &str) -> bool {
     is_tool_only(section, key) || (section == SCOTER_SECTION && key == DISTRIBUTION_DIR)
+}
+
+/// The project's id: `NAME-HASH`, from the project directory's canonical path,
+/// exactly as the verified store works it out (`store.environment_id` in the
+/// scripts' library).
+///
+/// `NAME` is the directory's name, lower-cased, with each run of anything
+/// outside `[a-z0-9-]` made one `-`, cut to 32 characters and trimmed of `-`
+/// (`project` if that leaves nothing).  `HASH` is the first 12 hex digits of
+/// the SHA-256 of the canonical path's bytes.
+pub fn environment_id(project_dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let base = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut name = String::new();
+    let mut in_run = false;
+    for c in base.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+            name.push(c);
+            in_run = false;
+        } else if !in_run {
+            name.push('-');
+            in_run = true;
+        }
+    }
+    let name: String = name.chars().take(32).collect();
+    let name = name.trim_matches('-');
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        canonical.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = canonical.to_string_lossy().into_owned().into_bytes();
+    let digest = Sha256::digest(&bytes);
+    let hash: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("{}-{hash}", if name.is_empty() { "project" } else { name })
+}
+
+/// `text` made safe as one path part, or None if nothing's left.
+///
+/// A branch name is the project's to choose (`../../.ssh`, or one holding a
+/// newline or `${...}`), so only letters, digits, `.`, `_` and `-` are kept,
+/// each run of anything else made one `-`; `-` and `.` are trimmed from the
+/// ends (so `.` and `..` leave nothing), and it's cut to 64 characters.
+pub fn path_part(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_run = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+            in_run = false;
+        } else if !in_run {
+            out.push('-');
+            in_run = true;
+        }
+    }
+    let cut: String = out.chars().take(64).collect();
+    let part = cut.trim_matches(|c| c == '-' || c == '.');
+    (!part.is_empty()).then(|| part.to_string())
 }
 
 /// The message for a reference to a location this run doesn't have.
@@ -1403,7 +1503,7 @@ impl SystemConfig {
     /// sets, which win.
     fn merge(
         files: &[SetupFile],
-        tool_values: &[(&str, String)],
+        tool_values: &[(&str, Entry)],
         env: Env,
         project_dir: Option<&Path>,
     ) -> Self {
@@ -1424,7 +1524,7 @@ impl SystemConfig {
             scoter.insert(
                 key.to_string(),
                 Setting {
-                    value: Entry::Path(value.clone()),
+                    value: value.clone(),
                     file: None,
                 },
             );
@@ -2659,6 +2759,43 @@ mod tests {
     const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n";
 
     #[test]
+    fn environment_id_matches_the_store() {
+        // The same as the scripts' `store.environment_id` gives for these.
+        for (dir, id) in [
+            (
+                "/no/such/My Project!! (copy)",
+                "my-project-copy-c593c7ec2d55",
+            ),
+            (
+                "/no/such/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-y",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-06211fd163da",
+            ),
+            ("/no/such/!!!", "project-b94ae0807dcf"),
+        ] {
+            assert_eq!(environment_id(Path::new(dir)), id, "{dir}");
+        }
+    }
+
+    #[test]
+    fn path_part_is_one_safe_name() {
+        for (branch, part) in [
+            ("main", Some("main")),
+            ("feature/x", Some("feature-x")),
+            ("../../.ssh", Some("ssh")),
+            ("..", None),
+            (".", None),
+            ("", None),
+            ("a\nb", Some("a-b")),
+            ("${scoter:state-dir}", Some("scoter-state-dir")),
+            ("detached at 0123456789ab", Some("detached-at-0123456789ab")),
+            ("release-1.2_rc", Some("release-1.2_rc")),
+        ] {
+            assert_eq!(path_part(branch).as_deref(), part, "{branch:?}");
+        }
+        assert_eq!(path_part(&"b".repeat(100)).unwrap().len(), 64);
+    }
+
+    #[test]
     fn no_user_setup_from_the_project() {
         let dir = TempDir::new();
         // A repository, with the project in `client`.
@@ -2777,7 +2914,7 @@ mod tests {
         let load_with_verified = |verified: &str| {
             dir.write(
                 "home/setup.yaml",
-                &format!("{PROJECT_FILES_SETUP}  paths:\n    verified-dir: {verified}\n"),
+                &format!("{PROJECT_FILES_SETUP}verification:\n  paths:\n    store: {verified}\n"),
             );
             let env = Env {
                 scoter_home: Some(dir.path().join("home")),
@@ -2789,7 +2926,7 @@ mod tests {
         assert_eq!(
             load_with_verified(&outside)
                 .unwrap()
-                .get_path(SCOTER_SECTION, VERIFIED_DIR),
+                .get_path(VERIFICATION_SECTION, VERIFIED_STORE),
             Some(PathBuf::from(&outside))
         );
         for (verified, location) in [
@@ -2808,7 +2945,7 @@ mod tests {
         let errors = load_with_verified("relative/v").unwrap_err();
         assert_eq!(
             errors,
-            [": `scoter:verified-dir` relative/v must be an absolute path"]
+            [": `verification:store` relative/v must be an absolute path"]
         );
 
         // The state directory is checked the same way.

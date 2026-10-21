@@ -15,7 +15,7 @@
 //!     program: "/usr/local/bin/aws"
 //!     args: ["s3", "ls"]
 //!     $comment: "A note the user keeps."
-//!     $override: ["host-bridge:shells"]
+//!     $override: ["verification:shells"]
 //! dev-container:
 //!   use: "project"
 //!   images: {"debian:bookworm": "debian@sha256:..."}
@@ -543,7 +543,7 @@ mod tests {
             "commands:\n",
             "  - command: \"sh\"\n    program: \"/usr/bin/sh\"\n    args: [\"-c\", {any: {}}]\n",
             "    env: {allow: [\"AWS_*\"]}\n",
-            "    $override: [\"host-bridge:shells\"]\n",
+            "    $override: [\"verification:shells\"]\n",
             "dev-container:\n  use: {name: \"my-env\"}\n  images: {\"debian:bookworm\": \"debian@sha256:abc\"}\n",
         ))
         .unwrap();
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(review.commands[0].env_plan.set["HOME"], "@HOME@");
         assert_eq!(
             review.command_overrides,
-            BTreeMap::from([(0, vec!["host-bridge:shells".to_string()])])
+            BTreeMap::from([(0, vec!["verification:shells".to_string()])])
         );
         assert_eq!(
             review.container_use,
@@ -570,7 +570,7 @@ mod tests {
         assert!(accepted["commands"][0].get("$override").is_none());
         assert_eq!(
             accepted["overrides"]["commands"][0]["checks"][0],
-            "host-bridge:shells"
+            "verification:shells"
         );
         assert_eq!(accepted["dev-container"]["use"]["name"], "my-env");
         // What it gives is what the generator reads back.

@@ -383,7 +383,7 @@ def snapshot_project(
 
 
 def snapshot_dir(directory: Path, limits: SnapshotLimits) -> Snapshot:
-    """Every file in a container directory outside the project (`dev-containers-verified`)."""
+    """Every file in a container directory outside the project (`verification: verified-containers`)."""
     reader = _Reader(limits)
     reader.read_dir(Path(os.path.realpath(directory)), "")
     return reader.snapshot(ParsedFiles(), "")
