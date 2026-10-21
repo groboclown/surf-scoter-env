@@ -1717,9 +1717,11 @@ Step 18 (batch B) added `value-lists: drop-env` and gave `git-vcs` one (`GIT_*`)
 
 From step 4: `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
 
-## Remove the `--bin-dir` and `--sub-cmd-dir` arguments
+## ~~Remove the `--bin-dir` and `--sub-cmd-dir` arguments~~
 
-With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.
+~~With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.~~
+
+Done: [`scoter.py`](../../scoter.py) has neither option.  The generator runs from the distribution's `bin` (`--distribution-dir`, or the directory `scoter` is in), and the sub-commands are found, and listed by `help`, in the universal file's `distribution-bin-dir`, which the generator sets to the distribution directory's `bin`.  `scoter.py` no longer overwrites that value after the generator's runs; the generator's `distribution-bin-dir` setting, and its carrying a universal file's value over for the same distribution directory, are unchanged.  `find_bin_dir`, and the `bin_dir` and `script_dir` parameters of `generate_config`, `reprocess_config`, `list_sub_commands` and `run_sub_command`, are gone.  **Tests:** the Python and Rust suites, and integration tests 01 and 05, which run the sandbox's `scoter` end to end.
 
 ## ~~Compare the "egress-refused-wildcards" setting with Browser public suffix list~~
 

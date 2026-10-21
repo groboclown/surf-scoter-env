@@ -63,14 +63,9 @@ def load_config(
     project is loaded as it suggests, without the user's accepted settings:
     for `verify`, which reviews the suggestion.
     """
-    bin_dir = args.bin_dir
-    distribution_dir = args.distribution_dir
-
-    dist_dir = require_global_dist_dir(distribution_dir)
-    resolved_bin_dir = find_bin_dir(bin_dir, dist_dir)
+    dist_dir = require_global_dist_dir(args.distribution_dir)
     # Phase 1: the setup alone, which says how to find the project.
     settings = generate_config(
-        bin_dir=resolved_bin_dir,
         distribution_dir=dist_dir,
         project_dir=None,
         dev_container_workspace_dir=None,
@@ -94,7 +89,6 @@ def load_config(
     if project_dir:
         # Phase 2: with the project, and the repository it's in.
         settings = reprocess_config(
-            resolved_bin_dir,
             dist_dir,
             project_dir,
             vcs_root[0] if vcs_root else None,
@@ -110,7 +104,6 @@ def load_config(
         if isinstance(notice, str):
             print(notice, file=sys.stderr)
         settings = reprocess_config(
-            resolved_bin_dir,
             dist_dir,
             project_dir,
             vcs_root[0] if vcs_root else None,
@@ -118,11 +111,6 @@ def load_config(
             accepted_settings=accepted if isinstance(accepted, str) else None,
             project_branch=branch,
         )
-
-    # Overwrite the bin dir if it was explicitly set.
-    active_locs = settings["active-config-locations"]
-    if isinstance(active_locs, dict):
-        active_locs["distribution-bin-dir"] = str(resolved_bin_dir)
 
     return settings
 
@@ -311,7 +299,6 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
 
 
 def reprocess_config(
-    bin_dir: Path,
     dist_dir: Path,
     project_dir: Path,
     vcs_root: Path | None,
@@ -330,7 +317,6 @@ def reprocess_config(
 
     try:
         return generate_config(
-            bin_dir=bin_dir,
             distribution_dir=dist_dir,
             project_dir=str(project_dir),
             vcs_root=str(vcs_root) if vcs_root else None,
@@ -403,15 +389,6 @@ def require_global_dist_dir(distribution_dir: str | None) -> Path:
     )
 
 
-def find_bin_dir(bin_dir: str | None, dist_dir: Path) -> Path:
-    """Find the bin/ directory."""
-    if bin_dir:
-        if not os.path.isdir(bin_dir):
-            raise ConfigErr(f"Could not find bin directory '{bin_dir}'")
-        return Path(bin_dir)
-    return dist_dir / DISTRIBUTION_BIN_DIR
-
-
 def command_env(settings: DictJsonData, section: str) -> dict[str, str]:
     """The environment for a section's `runs` commands: this one, less its `value-lists: drop-env`.
 
@@ -460,7 +437,6 @@ def _dist_bin_dir(config: DictJsonData) -> Path:
 
 def generate_config(
     *,
-    bin_dir: Path | None,
     distribution_dir: Path,
     project_dir: str | None,
     dev_container_workspace_dir: str | None,
@@ -477,10 +453,7 @@ def generate_config(
     `accepted_settings` (the user's accepted settings); without them, there
     are none.
     """
-    if bin_dir:
-        gen_uc = _require_exe(bin_dir / GEN_SCOTER_UC_EXEC)
-    else:
-        gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
+    gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
     args: list[str] = [str(gen_uc), "--distribution-dir", str(distribution_dir)]
     if project_dir:
         args.extend(("--project-dir", project_dir))
@@ -567,12 +540,9 @@ def _is_windows() -> bool:
 # ---------------------------------------------------------------------
 # Sub Command Handlers
 
-def list_sub_commands(config: DictJsonData, script_dir: str | None) -> list[str]:
-    """Get the list of all sub-commands."""
-    if script_dir:
-        bin_dir = Path(script_dir)
-    else:
-        bin_dir = _dist_bin_dir(config)
+def list_sub_commands(config: DictJsonData) -> list[str]:
+    """Get the list of all sub-commands: the distribution's bin directory's scripts."""
+    bin_dir = _dist_bin_dir(config)
     ret: list[str] = []
     for name in os.listdir(bin_dir):
         if name.startswith(SUB_CMD_PREFIX) and name.endswith(SUB_CMD_SUFFIX):
@@ -618,16 +588,9 @@ def sub_command_prefix(config: DictJsonData, cmd_file: Path) -> list[str]:
     return [str(cmd_file) if part == "{x:script}" else part for part in cmd]
 
 
-def run_sub_command(
-    config: DictJsonData,
-    argv: Sequence[str],
-    script_dir: str | None,
-) -> int:
-    """Run the sub-command."""
-    if script_dir:
-        bin_dir = Path(script_dir)
-    else:
-        bin_dir = _dist_bin_dir(config)
+def run_sub_command(config: DictJsonData, argv: Sequence[str]) -> int:
+    """Run the sub-command, from the distribution's bin directory."""
+    bin_dir = _dist_bin_dir(config)
     cmd_file = bin_dir / (SUB_CMD_PREFIX + argv[0].replace("-", "_") + SUB_CMD_SUFFIX)
     if not cmd_file.is_file():
         return 1
@@ -699,24 +662,6 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         dest="distribution_dir",
         help="Set the directory where you have Surf Scoter installed.",
     )
-    parser.add_argument(
-        "--bin-dir",
-        action="store",
-        dest="bin_dir",
-        help=(
-            "Point to the directory storing the Surf Scoter binary files.  "
-            "Defaults to the 'bin' directory inside the distribution."
-        ),
-    )
-    parser.add_argument(
-        "--sub-cmd-dir",
-        action="store",
-        dest="sub_cmd_dir",
-        help=(
-            "Point to the directory storing the Surf Scoter sub-command files.  "
-            "Defaults to the 'bin' directory inside the distribution."
-        ),
-    )
 
     parser.add_argument(
         "cmd",
@@ -754,7 +699,7 @@ def main(argv: Sequence[str]) -> int:
     sub_cmd_args = args.cmd_args
     if not sub_cmd or sub_cmd == "help":
         print("All supported sub-commands:")
-        for sub in list_sub_commands(config, args.sub_cmd_dir):
+        for sub in list_sub_commands(config):
             print(f"  {sub}")
         return 0
     if sub_cmd == "show-suc":
@@ -762,7 +707,7 @@ def main(argv: Sequence[str]) -> int:
         return 0
 
     try:
-        return run_sub_command(config, [sub_cmd, *sub_cmd_args], args.sub_cmd_dir)
+        return run_sub_command(config, [sub_cmd, *sub_cmd_args])
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1

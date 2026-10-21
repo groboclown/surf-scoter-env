@@ -223,7 +223,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             print("Running the host-bridge process.")
             print("Press 'ctrl-c' to stop and tear down the environment.")
             # Start scoter-host, from the distribution's bin directory (which
-            # `scoter` sets, `--bin-dir` included).
+            # the generator sets, from the distribution directory).
             scoter_host = fileutil.require_exe(config.get_dist_bin_dir() / defaults.SCOTER_HOST_EXEC)
             print([scoter_host, "--universal", str(universal_config_file), host])
             res = subprocess.run(  # nosec: B603  # We checked the input above.
