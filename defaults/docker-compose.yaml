@@ -24,7 +24,8 @@ services:
     restart: unless-stopped
 
   gateway:
-    # The local developer places their allowed-domains.txt file in this directory.
+    # Its configuration comes from the project's egress rules, made by the setup's
+    # `network-gateway: runs: write-config`.
     image: ${NETWORK_GATEWAY}
     container_name: ${NETWORK_GATEWAY_NAME}
     network_mode: "service:firewall"
@@ -41,7 +42,7 @@ services:
         max-size: 10m   # the access log goes to stdout
     restart: unless-stopped
     volumes:
-      - ${SETTINGS_HOST}/allowed-domains.txt:/user-space/allowed-domains.txt:ro
+      - ${GATEWAY_CONFIG_HOST}:${GATEWAY_CONFIG_CONTAINER}:ro
 
   dev:
     # The local developer places their Dockerfile in this directory.

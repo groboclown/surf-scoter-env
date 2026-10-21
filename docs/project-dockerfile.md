@@ -74,6 +74,10 @@ parents:
     # A parent pulled from a repository: only its dev-env.yaml is read, and
     # this Dockerfile's `FROM` pulls the image.
     - file: ../vendor/published-env/dev-env.yaml
+    # A parent built locally, found by name in the `dev-containers-search`
+    # directories, such as one your Surf Scoter installation provides.
+    - name: dev-env
+      tag: local-surf-scoter-env/dev-env:build
 # Overrides of the parents' values.
 sshd-port: 2222
 ```
@@ -81,9 +85,10 @@ sshd-port: 2222
 Each entry is one of:
 
 * `dir` and `tag` - a local container directory, with its own `Dockerfile`, built with that tag before this image.  Use several for a multi-stage `Dockerfile` with several local parents.  Its `dev-env.yaml` is optional: without one, the parent adds no values and has no parents to build; say, a project's CI build image, with this `dev-env.yaml` adding the SSH setup on top.
+* `name` and `tag` - a local parent like `dir`, found by name: the first of the system configuration's `dev-containers-search` directories holding `NAME/Dockerfile` (its `NAME/dev-env.yaml` is optional, as for `dir`).  Use it to build on a container your installation, or your own setup, provides, without a path that only works on one computer.  `NAME` is a single directory name.
 * `file` - a published parent's `dev-env.yaml`.  It isn't built, and neither are any parents it lists, as its image already holds them.  (Reading it from a URL may come later.)
 
-Paths are relative to the directory holding this `dev-env.yaml`.
+Paths are relative to the directory holding this `dev-env.yaml`.  Once symlinks are resolved, each `dir`, `name` and `file` parent must be inside the project's `.surf-scoter.d` or one of the system configuration's `dev-containers-search` directories (see [the system configuration](system-config-file.md)), so a project can't build from, or read, anything else on your computer.
 
 Parents may have parents of their own, and the same parent may be reached more than once, but no image may be its own parent, and a local parent always has the same tag.
 

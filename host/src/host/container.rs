@@ -141,10 +141,11 @@ mod tests {
         let file = dir.path().join("setup.yaml");
         std::fs::write(&file, setup).unwrap();
         let env = Env {
+            scoter_home: Some(dir.path().to_path_buf()),
             path: Some(path.into()),
             ..Env::default()
         };
-        system::load(Some(&file), None, None, env).unwrap()
+        system::load(None, None, env).unwrap()
     }
 
     /// The directory holding `sh`, for a PATH.

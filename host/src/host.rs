@@ -65,6 +65,20 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             return EXIT_FAILURE;
         }
     };
+    // The universal file decides what runs here: it must be the user's
+    // alone, and its accepted settings must still be the store's, unexpired.
+    let problems = config::accepted::check_for_run(
+        &cli.universal,
+        config.accepted.as_ref(),
+        &config.system,
+        config::accepted::now(),
+    );
+    if !problems.is_empty() {
+        for e in &problems {
+            eprintln!("scoter-host: {e}");
+        }
+        return EXIT_FAILURE;
+    }
     let universal = cli.universal.display();
     // Both are there when there's a project file.
     let (Some(mut project), Some(dev_container)) = (config.project, config.dev_container) else {
@@ -513,27 +527,40 @@ mod tests {
                 std::fs::write(&path, text).unwrap();
                 path
             };
-            write("env/Dockerfile", "FROM scratch\n");
+            // The user's setup file must be outside the project, and its workspace.
+            write("project/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
             write(
-                "env/dev-env.yaml",
+                "project/.surf-scoter.d/env/dev-env.yaml",
                 "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
             );
             TestProject {
-                project: write("scoter.yaml", "container:\n  dev-container-path: env\n"),
-                setup: write("setup.yaml", "docker:\n  programs:\n    exec: /bin/sh\n"),
+                project: write(
+                    "project/.surf-scoter.d/project.yaml",
+                    "container:\n  dev-container-path: env\n",
+                ),
+                setup: write(
+                    "home/setup.yaml",
+                    "docker:\n  programs:\n    exec: /bin/sh\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+                ),
             }
         }
 
         /// The universal configuration file, as `gen-scoter-uc` would write it.
         fn universal(&self, with_project: bool, workspace: Option<&Path>) -> PathBuf {
             let options = LoadOptions {
-                project: with_project.then(|| self.project.clone()),
-                user_setup: vec![self.setup.clone()],
+                project_dir: with_project
+                    .then(|| self.project.parent().and_then(Path::parent))
+                    .flatten()
+                    .map(Path::to_path_buf),
                 dev_container_workspace_dir: workspace.map(Path::to_path_buf),
-                no_setup_search: true,
                 ..LoadOptions::default()
             };
-            let config = config::load_all(&options).unwrap();
+            // The setup file as the user's, and nothing else.
+            let env = config::system::Env {
+                scoter_home: self.setup.parent().map(Path::to_path_buf),
+                ..config::system::Env::default()
+            };
+            let config = config::load_all_with_env(&options, env).unwrap();
             let json =
                 scoter_host::universal::to_json(&scoter_host::universal::build(&config).unwrap());
             let path = self.project.with_file_name(format!(
@@ -541,6 +568,11 @@ mod tests {
                 workspace.is_some()
             ));
             std::fs::write(&path, json).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
             path
         }
     }
@@ -563,7 +595,8 @@ mod tests {
     fn run_needs_the_project_and_workspace() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
-        let ws = std::env::temp_dir();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
         assert_eq!(
             run(universal_args(&test.universal(false, Some(&ws)), "dev")),
             EXIT_FAILURE
@@ -586,7 +619,9 @@ mod tests {
     fn run_rejects_bad_container_name() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
-        let universal = test.universal(true, Some(&std::env::temp_dir()));
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let universal = test.universal(true, Some(&ws));
         assert_eq!(
             run(universal_args(&universal, "--privileged=x")),
             EXIT_USAGE
@@ -673,6 +708,20 @@ mod tests {
         )
         .unwrap()
         .commands;
+        // As the universal configuration file gives them: the absolute program.
+        let echo = config::command::find_executable(
+            std::path::Path::new("echo"),
+            std::env::var_os("PATH").as_deref(),
+            None,
+        )
+        .map(|p| p.display().to_string());
+        let commands = commands
+            .into_iter()
+            .map(|rule| config::project::CommandRule {
+                program: echo.clone(),
+                ..rule
+            })
+            .collect();
         let workspace = Workspace {
             host: std::env::temp_dir(),
             container: "/workspace".to_string(),

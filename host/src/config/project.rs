@@ -1,5 +1,12 @@
 //! The project configuration file, shared by everyone working on the project.
 //!
+//! It lives in the project's files directory (the system configuration's
+//! `scoter` `values: project-files-dir`, normally `.surf-scoter.d`), as
+//! `values: project-file-name` (normally `project.yaml`), with the project's
+//! dev containers.  The project directory is the one holding that directory;
+//! the tools are given the project directory, and the system configuration
+//! says where the file is in it.
+//!
 //! The host bypass exists so the container can perform an action that needs
 //! privileges the container doesn't have (credentials, the Docker daemon, and
 //! so on).  Because those actions run on the host, everything they touch on
@@ -15,8 +22,8 @@
 //!
 //! container:
 //!   # The dev container: a directory with a Dockerfile and dev-env.yaml,
-//!   # relative to this file...
-//!   dev-container-path: ./.scoter/dev-env
+//!   # relative to this file, inside the project's files directory...
+//!   dev-container-path: ./dev-env
 //!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers-search`.
 //!   # dev-container: dev-env
 //!
@@ -31,7 +38,7 @@
 //!     args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd}}]
 //!   - command: aws
 //!     # optional; the executable to run on the host (default: `command`, found on the PATH)
-//!     program: /usr/local/bin/aws
+//!     program: aws
 //!     args: [codebuild, start-build, --project-name, {any: {}}]
 //!     # optional; added to the project's `env`
 //!     env:
@@ -108,9 +115,11 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use yaml_serde::Value;
 
+use super::egress::{self, EgressRule};
 use super::environment::{EnvPlan, EnvRules};
+use super::host_commands::command_name_problem;
 use super::pattern::WorkspacePattern;
-use super::read::{parse_yaml, read_limited, tag_errors};
+use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
 
 /// The project configuration file.
@@ -122,8 +131,13 @@ pub struct ProjectConfig {
     /// How the project's files are kept, for the `scoter` script: any
     /// non-empty text.
     pub vcs: Option<String>,
+    /// The network destinations the dev container needs.
+    pub egress: Vec<EgressRule>,
     /// The environment rules for every command.
     pub env: EnvRules,
+    /// `env` worked out against the system configuration (`${section:key}`
+    /// expanded, `@NAME@` left), by `config::load_all`; empty until then.
+    pub env_resolved: EnvPlan,
     /// The allowed forms of commands, in match order.  Anything not listed is refused.
     pub commands: Commands,
     /// Each of `commands` as written in the file.
@@ -133,7 +147,8 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    /// The directory holding the file; relative paths start here.
+    /// The directory holding the file (the project files directory); relative
+    /// paths start here.
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new(""))
     }
@@ -168,7 +183,9 @@ pub(crate) type ParsedCommands = (Commands, Vec<Value>);
 pub struct CommandRule {
     /// The name the client was run as.
     pub command: String,
-    /// The host executable; defaults to `command`, found on the host's PATH.
+    /// The host program's name; defaults to `command`.  In the project file
+    /// it's a name the host looks up; in the universal configuration file's
+    /// `host-brokered`, the executable found.
     #[serde(default)]
     pub program: Option<String>,
     /// One token per argument.
@@ -186,6 +203,10 @@ pub struct CommandRule {
     /// nothing comes through.
     #[serde(skip)]
     pub env_plan: EnvPlan,
+    /// This command's own `env`, worked out as the project's `env_resolved`
+    /// is, before it's merged into `env_plan`.
+    #[serde(skip)]
+    pub env_resolved: EnvPlan,
     /// The program wasn't found when the universal configuration file was
     /// made (its `host-brokered` `program` is `null`): requests for it are
     /// refused.
@@ -299,9 +320,28 @@ pub(crate) fn load_checked(
     Option<ContainerRef>,
 ) {
     let path = super::absolute(path);
-    match read_limited(&path) {
+    if let Err(m) = check_location(&path) {
+        return (Err(vec![ConfigError::new(Some(&path), "", m)]), None);
+    }
+    match read_regular_file(&path) {
         Ok(text) => parse_checked(&text, &path),
         Err(m) => (Err(vec![ConfigError::new(Some(&path), "", m)]), None),
+    }
+}
+
+/// The directory holding the project file must not be a symlink: everything
+/// the tools read from the project, and the build context of its dev
+/// containers, stays in there.  (Its name is checked by `config::load_all`.)
+fn check_location(path: &Path) -> Result<(), String> {
+    let Some(files_dir) = path.parent() else {
+        return Ok(());
+    };
+    match files_dir.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("the project file's directory is a symlink; it must be a directory".to_string())
+        }
+        // A missing directory is reported when the file is read.
+        _ => Ok(()),
     }
 }
 
@@ -333,6 +373,8 @@ fn parse_checked(
             None,
         );
     }
+    let mut problems: Vec<(String, String)> = Vec::new();
+    text_problems(&value, "", &mut problems);
     let raw = value.clone();
     let map = match value {
         Value::Mapping(map) => map,
@@ -356,11 +398,11 @@ fn parse_checked(
         }
     };
 
-    let mut problems: Vec<(String, String)> = Vec::new();
     let mut container = None;
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
     let mut env = EnvRules::default();
+    let mut egress_rules = Vec::new();
     let mut vcs = None;
     let mut has_container = false;
     for (key, value) in map {
@@ -370,8 +412,10 @@ fn parse_checked(
                 container = parse_container(value, &mut problems);
             }
             Some("commands") => {
-                (commands, raw_commands) = parse_commands(value, "commands", &mut problems)
+                (commands, raw_commands) = parse_commands(value, "commands", &mut problems);
+                check_names(&commands, &mut problems);
             }
+            Some("egress") => egress_rules = egress::parse(value, &mut problems),
             Some("env") => env = parse_env(value, &mut problems),
             Some("vcs") => match value {
                 Value::String(text) if !text.is_empty() => vcs = Some(text),
@@ -392,7 +436,9 @@ fn parse_checked(
             path: path.to_path_buf(),
             container: container.clone(),
             vcs,
+            egress: egress_rules,
             env,
+            env_resolved: EnvPlan::default(),
             commands,
             raw_commands,
             raw,
@@ -403,6 +449,84 @@ fn parse_checked(
             .collect()),
     };
     (result, container)
+}
+
+/// Every string and key in the file without control characters (none of
+/// the fields needs one, and a newline in a value could look like more
+/// lines on the review), and no `<<` keys: YAML merge keys, which the tools
+/// don't apply, so they'd only mislead.
+pub(crate) fn text_problems(value: &Value, key: &str, problems: &mut Vec<(String, String)>) {
+    let control = |text: &str| text.chars().any(char::is_control);
+    match value {
+        Value::String(text) if control(text) => problems.push((
+            key.to_string(),
+            "has a control character, such as a newline; none of the fields needs one".to_string(),
+        )),
+        Value::Sequence(items) => {
+            for (i, item) in items.iter().enumerate() {
+                text_problems(item, &index_key(key, i), problems);
+            }
+        }
+        Value::Mapping(map) => {
+            for (name, item) in map {
+                let shown = name
+                    .as_str()
+                    .map_or_else(|| format!("{name:?}"), str::to_string);
+                let at = child_key(key, &shown);
+                match name.as_str() {
+                    Some("<<") => problems.push((
+                        at,
+                        "is a YAML merge key, which isn't supported; write the values out"
+                            .to_string(),
+                    )),
+                    Some(name) if control(name) => problems.push((
+                        at,
+                        "the key has a control character, such as a newline".to_string(),
+                    )),
+                    _ => text_problems(item, &at, problems),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Each command's `command` and `program` are names, never paths.
+fn check_names(commands: &Commands, problems: &mut Vec<(String, String)>) {
+    for (i, rule) in commands.iter().enumerate() {
+        let key = index_key("commands", i);
+        if let Some(problem) = command_name_problem(&rule.command) {
+            problems.push((child_key(&key, "command"), problem));
+        }
+        if let Some(problem) = rule.program.as_deref().and_then(command_name_problem) {
+            problems.push((child_key(&key, "program"), problem));
+        }
+    }
+}
+
+impl ProjectConfig {
+    /// The `egress` rules whose wildcard is on one of `refused` (the setup's
+    /// `scoter: value-lists: egress-refused-wildcards`: public suffixes and
+    /// shared hosting, where `*.` would allow names anyone can register).
+    pub fn wildcard_problems(&self, refused: &[String]) -> Vec<ConfigError> {
+        self.egress
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rule)| {
+                let domain = rule.wildcard_domain()?;
+                refused.iter().any(|r| r == domain).then(|| {
+                    ConfigError::new(
+                        Some(&self.path),
+                        &format!("{}.host", index_key("egress", i)),
+                        format!(
+                            "'{}' would allow every name under `{domain}`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)",
+                            rule.host
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option<ContainerRef> {
@@ -444,7 +568,7 @@ fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option
     None
 }
 
-fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
+pub(crate) fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
     if value.is_null() {
         return EnvRules::default();
     }
@@ -460,7 +584,7 @@ fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
     }
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
@@ -571,6 +695,7 @@ impl PathOptions {
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+    use std::fs;
 
     const PROJECT: &str = "/proj/scoter.yaml";
     const CONTAINER: &str = "container:\n  dev-container: dev-env\n";
@@ -642,7 +767,9 @@ mod tests {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
                 vcs: None,
+                egress: Vec::new(),
                 env: EnvRules::default(),
+                env_resolved: EnvPlan::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
                 raw: parse_yaml(CONTAINER).unwrap(),
@@ -761,20 +888,52 @@ mod tests {
     #[test]
     fn load_reads_file() {
         let dir = TempDir::new();
-        let path = dir.write("scoter.yaml", CONTAINER);
-        assert_eq!(load(&path).unwrap().path, path);
+        let path = dir.write("proj/.surf-scoter.d/project.yaml", CONTAINER);
+        let project = load(&path).unwrap();
+        assert_eq!(project.path, path);
+        assert_eq!(project.dir(), dir.path().join("proj/.surf-scoter.d"));
     }
 
     #[test]
     fn load_missing_file() {
-        let errors = load(Path::new("/nonexistent/scoter/project.yaml")).unwrap_err();
+        let errors = load(Path::new("/nonexistent/.surf-scoter.d/project.yaml")).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0]
                 .to_string()
-                .starts_with("/nonexistent/scoter/project.yaml: cannot read the file: "),
+                .starts_with("/nonexistent/.surf-scoter.d/project.yaml: cannot read the file: "),
             "{}",
             errors[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_symlinks() {
+        let dir = TempDir::new();
+        let real = dir.write("elsewhere/project.yaml", CONTAINER);
+
+        // The project file itself.
+        fs::create_dir_all(dir.path().join("a/.surf-scoter.d")).unwrap();
+        let link = dir.path().join("a/.surf-scoter.d/project.yaml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let errors = load(&link).unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "the file is a symlink; it must be a regular file"
+        );
+
+        // The directory holding it.
+        fs::create_dir_all(dir.path().join("b")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("elsewhere"),
+            dir.path().join("b/.surf-scoter.d"),
+        )
+        .unwrap();
+        let errors = load(&dir.path().join("b/.surf-scoter.d/project.yaml")).unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "the project file's directory is a symlink; it must be a directory"
         );
     }
 
@@ -850,7 +1009,7 @@ mod tests {
             "  - command: aws\n",
             "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd}}]\n",
             "  - command: aws\n",
-            "    program: /usr/local/bin/aws\n",
+            "    program: aws2\n",
             "    args: [codebuild, start-build, --project-name, {any: {}}]\n",
         ))
         .unwrap();
@@ -869,11 +1028,12 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    env_resolved: EnvPlan::default(),
                     unavailable: false,
                 },
                 CommandRule {
                     command: "aws".to_string(),
-                    program: Some("/usr/local/bin/aws".to_string()),
+                    program: Some("aws2".to_string()),
                     args: vec![
                         lit("codebuild"),
                         lit("start-build"),
@@ -883,6 +1043,7 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    env_resolved: EnvPlan::default(),
                     unavailable: false,
                 },
             ]
@@ -1027,8 +1188,135 @@ mod tests {
         let text =
             format!("{CONTAINER}commands:\n  - command: aws\n    program: ''\n    args: []\n");
         assert_eq!(error(&text), "commands[0]: program must not be empty");
-        // Any non-empty program is accepted, including Windows paths.
-        parse_text(&format!("{CONTAINER}commands:\n  - command: aws\n    program: 'C:\\aws\\aws.exe'\n    args: []\n")).unwrap();
+        // A name, never a path.
+        let with = |program: &str| {
+            format!(
+                "{CONTAINER}commands:\n  - command: aws\n    program: '{program}'\n    args: []\n"
+            )
+        };
+        parse_text(&with("aws2")).unwrap();
+        for path in [
+            "/usr/local/bin/aws",
+            "C:\\aws\\aws.exe",
+            "./aws",
+            "C:aws",
+            "NUL",
+        ] {
+            let message = error(&with(path));
+            assert!(
+                message.starts_with("commands[0].program: "),
+                "{path}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_command_name_rules() {
+        let with = |command: &str| {
+            format!("{CONTAINER}commands:\n  - command: '{command}'\n    args: []\n")
+        };
+        for (command, problem) in [
+            ("-x", "can't start with `-`"),
+            ("a b", "must be ASCII"),
+            ("caf\u{e9}", "must be ASCII"),
+            ("aws:stream", "can't have a `:`"),
+            ("con.exe", "is a Windows device name"),
+        ] {
+            let message = error(&with(command));
+            assert!(
+                message.starts_with("commands[0].command: ") && message.contains(problem),
+                "{command}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_without_control_characters() {
+        let text =
+            format!("{CONTAINER}vcs: \"git\\n# reviewed: safe\"\nenv:\n  set:\n    \"A\\tB\": x\n");
+        let errors = parse_text(&text).unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                "vcs: has a control character, such as a newline; none of the fields needs one",
+                "env.set.A\tB: the key has a control character, such as a newline",
+            ]
+        );
+    }
+
+    #[test]
+    fn yaml_hazards() {
+        // Merge keys aren't applied, so they're refused rather than misread.
+        let merged =
+            format!("{CONTAINER}x-base: &base {{HOME: /h}}\nenv:\n  set:\n    <<: *base\n");
+        let errors = parse_text(&merged).unwrap_err();
+        assert!(
+            errors.contains(
+                &"env.set.<<: is a YAML merge key, which isn't supported; write the values out"
+                    .to_string()
+            ),
+            "{errors:?}"
+        );
+        // Duplicate keys, at any depth.
+        let errors = parse_text(&format!("{CONTAINER}vcs: git\nvcs: hg\n")).unwrap_err();
+        assert!(
+            errors[0].contains("duplicate entry with key \"vcs\""),
+            "{errors:?}"
+        );
+        let errors =
+            parse_text(&format!("{CONTAINER}env:\n  set:\n    A: x\n    A: y\n")).unwrap_err();
+        assert!(
+            errors[0].contains("duplicate entry with key \"A\""),
+            "{errors:?}"
+        );
+        // An alias bomb stops at the library's expansion limit.
+        let mut bomb = String::from("a: &a [x, x, x, x, x, x, x, x, x]\n");
+        for (name, prev) in [
+            ("b", "a"),
+            ("c", "b"),
+            ("d", "c"),
+            ("e", "d"),
+            ("f", "e"),
+            ("g", "f"),
+        ] {
+            let refs = vec![format!("*{prev}"); 9].join(", ");
+            bomb.push_str(&format!("{name}: &{name} [{refs}]\n"));
+        }
+        let errors = parse_text(&format!("{CONTAINER}{bomb}")).unwrap_err();
+        assert!(
+            errors[0].contains("repetition limit exceeded"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn parse_egress() {
+        let config = parse_text(&format!(
+            "{CONTAINER}egress:\n  - {{host: '*.pkg.dev', protocol: tls}}\n  - {{host: a.example.com, protocol: https, methods: [GET]}}\n"
+        ))
+        .unwrap();
+        assert_eq!(config.egress.len(), 2);
+        let refused = |list: &[&str]| -> Vec<String> {
+            config
+                .wildcard_problems(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .into_iter()
+                .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
+                .collect()
+        };
+        assert!(refused(&["github.io"]).is_empty());
+        assert_eq!(
+            refused(&["github.io", "pkg.dev"]),
+            [
+                "egress[0].host: '*.pkg.dev' would allow every name under `pkg.dev`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+            ]
+        );
+        let errors = parse_text(&format!(
+            "{CONTAINER}egress:\n  - {{host: '*.com', protocol: tls}}\n  - {{host: x.example.com, protocol: tls, methods: [GET]}}\n"
+        ))
+        .unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with("egress[0].host: "), "{errors:?}");
+        assert!(errors[1].starts_with("egress[1].methods: "), "{errors:?}");
     }
 
     // ---- cwd ----

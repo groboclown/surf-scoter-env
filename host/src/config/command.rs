@@ -170,6 +170,11 @@ pub fn split_words(text: &str) -> Result<Vec<String>, String> {
 /// name an executable file; a bare name is searched for in `path_var` (the
 /// `PATH`).  `path_ext` (Windows' `PATHEXT`, `;`-separated) gives extensions
 /// to try as well.
+///
+/// Only the `PATH`'s absolute directories are searched.  A relative one (or
+/// an empty one, which shells read as `.`) is relative to wherever the tool
+/// runs, which is likely the project, so a program found there could be the
+/// project's.
 pub fn find_executable(
     program: &Path,
     path_var: Option<&OsStr>,
@@ -184,7 +189,7 @@ pub fn find_executable(
             .find(|p| is_executable(p));
     }
     std::env::split_paths(path_var?)
-        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter(|dir| dir.is_absolute())
         .flat_map(|dir| with_extensions(&dir.join(program), path_ext))
         .find(|p| is_executable(p))
 }
@@ -328,6 +333,36 @@ mod tests {
             std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_entries_are_skipped() {
+        let dir = TempDir::new();
+        let tool = dir.write("bin/tool", "#!/bin/sh\n");
+        make_executable(&tool, true);
+        let other = dir.write("abs/tool", "#!/bin/sh\n");
+        make_executable(&other, true);
+        // `bin` as a path relative to the current directory: one that would
+        // find the tool, if relative entries were searched.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(dir.path().join("bin").strip_prefix("/").unwrap());
+        assert!(relative.is_relative() && relative.join("tool").is_file());
+        let path_var = std::env::join_paths([relative.clone()]).unwrap();
+        assert_eq!(
+            find_executable(Path::new("tool"), Some(&path_var), None),
+            None
+        );
+        // The next absolute entry still counts.
+        let path_var = std::env::join_paths([relative, dir.path().join("abs")]).unwrap();
+        assert_eq!(
+            find_executable(Path::new("tool"), Some(&path_var), None),
+            Some(other)
+        );
     }
 
     #[cfg(unix)]

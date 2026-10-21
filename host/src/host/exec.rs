@@ -25,18 +25,26 @@ use std::time::Duration;
 use scoter_host::config::command::find_executable;
 use surf_scoter_env_launcher::comm::client_host::{self, Command};
 
-/// `program` as a path: a bare name is found on the host's `PATH`.
-fn find_on_host(program: &str) -> Option<PathBuf> {
-    let path_ext = if cfg!(windows) {
-        std::env::var_os("PATHEXT")
-    } else {
-        None
-    };
-    find_executable(
-        Path::new(program),
-        std::env::var_os("PATH").as_deref(),
-        path_ext.as_deref(),
-    )
+/// The accepted executable `program`, as long as it's still there.
+///
+/// It's the absolute path the universal configuration file gives (the
+/// review resolved it, or the generator found it); nothing is looked up on
+/// this program's `PATH`, so what runs doesn't depend on the environment
+/// `scoter-host` started with (BRIDGE-11).  A path that's no longer an
+/// executable file is refused, rather than looked for elsewhere.
+fn accepted_executable(program: &str) -> Result<PathBuf, String> {
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        return Err(format!(
+            "cannot run {program}: the program must be an absolute path"
+        ));
+    }
+    // No `PATHEXT`: the accepted path already has its extension, if any.
+    find_executable(path, None, None).ok_or_else(|| {
+        format!(
+            "cannot run {program}: it isn't an executable file any more; review the project again"
+        )
+    })
 }
 
 /// Exit code when the request isn't allowed.
@@ -153,16 +161,9 @@ pub(crate) fn run<R: Read + Send + 'static, S: FrameSink>(
         Some(dir) => dir.as_path(),
         None => temp_path.expect("a temporary working directory"),
     };
-    // Found on the host's `PATH`: the process's own environment may have none.
-    let Some(program) = find_on_host(&request.program) else {
-        return fail(
-            sink,
-            &format!(
-                "cannot run {}: no such program on the host",
-                request.program
-            ),
-            EXIT_START_FAILED,
-        );
+    let program = match accepted_executable(&request.program) {
+        Ok(program) => program,
+        Err(message) => return fail(sink, &message, EXIT_START_FAILED),
     };
     let child = Process::new(&program)
         .args(request.host_args(temp_path))
@@ -505,9 +506,20 @@ mod tests {
         }
     }
 
+    /// `name` as the absolute path the universal configuration file would
+    /// give: found on this test's `PATH`, as the generator would.
+    fn host_program(name: &str) -> String {
+        if Path::new(name).is_absolute() {
+            return name.to_string();
+        }
+        find_executable(Path::new(name), std::env::var_os("PATH").as_deref(), None)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| name.to_string())
+    }
+
     fn request(program: &str, args: &[&str]) -> ExecRequest {
         ExecRequest {
-            program: program.to_string(),
+            program: host_program(program),
             args: args.iter().map(|s| Arg::Plain(s.to_string())).collect(),
             cwd: None,
             envs: BTreeMap::new(),
@@ -591,6 +603,56 @@ mod tests {
     }
 
     #[test]
+    fn only_absolute_executables_run() {
+        assert!(
+            accepted_executable("echo")
+                .unwrap_err()
+                .contains("must be an absolute path")
+        );
+        assert!(
+            accepted_executable("bin/echo")
+                .unwrap_err()
+                .contains("must be an absolute path")
+        );
+        assert!(
+            accepted_executable("/nonexistent/program")
+                .unwrap_err()
+                .contains("isn't an executable file any more")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = TempDir::new().unwrap();
+            let program = dir.path().join("tool");
+            std::fs::write(&program, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let text = program.display().to_string();
+            assert_eq!(accepted_executable(&text), Ok(program.clone()));
+            // Removed after acceptance: refused, not looked for elsewhere.
+            std::fs::remove_file(&program).unwrap();
+            assert!(accepted_executable(&text).is_err());
+            // Not executable.
+            std::fs::write(&program, "").unwrap();
+            assert!(accepted_executable(&text).is_err());
+        }
+    }
+
+    #[test]
+    fn a_bare_name_isnt_run() {
+        let sink = VecSink::default();
+        let (input, _w) = idle_client();
+        let req = ExecRequest {
+            program: "echo".to_string(),
+            args: vec![],
+            cwd: None,
+            envs: BTreeMap::new(),
+        };
+        assert_eq!(run(&req, input, &sink), EXIT_START_FAILED);
+        let stderr = String::from_utf8(sink.stderr()).unwrap();
+        assert!(stderr.contains("must be an absolute path"), "{stderr}");
+    }
+
+    #[test]
     fn start_failure() {
         let sink = VecSink::default();
         let (input, _w) = idle_client();
@@ -637,7 +699,7 @@ mod tests {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
             let req = ExecRequest {
-                program: "echo".to_string(),
+                program: host_program("echo"),
                 args: vec![
                     Arg::Plain("to".to_string()),
                     Arg::HostPath(PathBuf::from("/home/me/ws/out.txt")),
@@ -666,7 +728,7 @@ mod tests {
                 name: n.map(str::to_string),
             }));
             let req = ExecRequest {
-                program: "sh".to_string(),
+                program: host_program("sh"),
                 args,
                 cwd,
                 envs: BTreeMap::new(),

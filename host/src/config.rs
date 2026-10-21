@@ -17,12 +17,16 @@
 //! setup files again, and its project file is used unless another is given.
 //! That allows building the configuration up in steps.
 
+pub mod accepted;
 pub mod command;
 pub mod dev_env;
+pub mod egress;
 pub mod environment;
+pub mod host_commands;
 pub mod pattern;
 pub mod project;
 pub mod read;
+pub mod review;
 pub mod system;
 
 use std::fmt;
@@ -30,9 +34,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use accepted::AcceptedSettings;
 use dev_env::DevContainer;
 use environment::{EnvPlan, EnvRules};
-use project::{ContainerRef, ProjectConfig};
+use project::ProjectConfig;
+use review::{ContainerUse, Review};
 use system::{Env, LoadedFrom, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
 
 use crate::universal::ActiveConfigLocations;
@@ -40,27 +46,131 @@ use crate::universal::ActiveConfigLocations;
 /// The `scoter` section's `path-lists` key searched for a `dev-container: NAME`.
 pub const DEV_CONTAINERS_SEARCH: &str = "dev-containers-search";
 
+/// The checks on a review against the run: it's for this project, it
+/// hasn't expired, and a container the user chose is one of theirs.
+fn review_problems(review: &Review, system: &SystemConfig) -> Vec<ConfigError> {
+    if review.rejected {
+        return Vec::new();
+    }
+    let error = |key: &str, message: String| ConfigError::new(Some(&review.file), key, message);
+    let mut errors = Vec::new();
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let project_dir = system.get_path(system::SCOTER_SECTION, system::PROJECT_DIR);
+    if project_dir.as_deref().map(canonical) != Some(canonical(&review.project_dir)) {
+        errors.push(error(
+            "project-dir",
+            "isn't this run's project; leave it as the review gave it".to_string(),
+        ));
+    }
+    if review.expires_at <= accepted::now() {
+        errors.push(error("expires-at", "must be in the future".to_string()));
+    }
+    if let ContainerUse::Name(name) = &review.container_use
+        && find_user_container(name, system).is_none()
+    {
+        errors.push(error("dev-container.use", no_user_container(name)));
+    }
+    errors
+}
+
+/// The `dev-containers-search` directories that hold the user's own
+/// containers: those outside the project directory and its repository, which
+/// the project controls.  The default search list starts with the project's
+/// own files directory.
+fn user_containers_search(system: &SystemConfig) -> Vec<PathBuf> {
+    let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    let project: Vec<PathBuf> = [system::PROJECT_DIR, system::VCS_ROOT]
+        .into_iter()
+        .filter_map(|key| system.get_path(system::SCOTER_SECTION, key))
+        .map(canonical)
+        .collect();
+    system
+        .path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH)
+        .into_iter()
+        .filter(|dir| {
+            let dir = canonical(dir.clone());
+            !project.iter().any(|p| dir.starts_with(p))
+        })
+        .collect()
+}
+
+/// The search directory holding the user's own container `name`, if any.
+fn find_user_container(name: &str, system: &SystemConfig) -> Option<PathBuf> {
+    user_containers_search(system).into_iter().find(|dir| {
+        dir.join(name).join(dev_env::DOCKERFILE).is_file()
+            && dir.join(name).join(dev_env::DEV_ENV_FILE).is_file()
+    })
+}
+
+fn no_user_container(name: &str) -> String {
+    format!(
+        "there's no container '{name}' in your `dev-containers-search` directories outside the project"
+    )
+}
+
+/// The user's own container, `name`, which the accepted settings use
+/// instead of the project's.  It and its parents are looked for only
+/// outside the project, so a name can't lead back into the project's files.
+fn user_container(
+    name: &str,
+    accepted: &AcceptedSettings,
+    project_file: &Path,
+    system: &SystemConfig,
+) -> Result<DevContainer, Vec<ConfigError>> {
+    if find_user_container(name, system).is_none() {
+        return Err(vec![ConfigError::new(
+            Some(&accepted.file),
+            "dev-container.use",
+            no_user_container(name),
+        )]);
+    }
+    dev_env::find(
+        &project::ContainerRef::Name(name.to_string()),
+        project_file,
+        &user_containers_search(system),
+    )
+}
+
+/// The `scoter` section's `value-lists` key listing the domains an egress
+/// wildcard (`*.`) can't be on.
+pub const EGRESS_REFUSED_WILDCARDS: &str = "egress-refused-wildcards";
+
+/// The project's egress wildcards on a domain the setup refuses them on.
+fn egress_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
+    project.wildcard_problems(&system.value_list(system::SCOTER_SECTION, EGRESS_REFUSED_WILDCARDS))
+}
+
+/// The `scoter` section's `values` key naming the project files directory.
+pub use system::PROJECT_FILES_DIR;
+
 /// Where to find the configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadOptions {
-    /// The project configuration file, if any.
-    pub project: Option<PathBuf>,
-    /// The project directory, in place of the project file's (`--project-dir`).
+    /// The project directory (`--project-dir`), if any: the directory holding
+    /// the project files directory, with the project file in it.
     pub project_dir: Option<PathBuf>,
+    /// The root of the repository holding the project (`--vcs-root`), as
+    /// `scoter` found it from the setup's VCS sections.  It must hold the
+    /// project directory.
+    pub vcs_root: Option<PathBuf>,
     /// The dev container's mounts: the project workspace (`--dev-container-workspace-dir`)
     /// and the settings directory (`--dev-container-settings-dir`).
     pub dev_container_workspace_dir: Option<PathBuf>,
     pub dev_container_settings_dir: Option<PathBuf>,
-    /// Extra system setup files, with the highest priority (`--user-setup`),
-    /// in the order given: a later one wins.  Only these are read from a
-    /// project; the tools never look for them there.
-    pub user_setup: Vec<PathBuf>,
     /// Where a distribution installed Surf Scoter, if it did.
     pub distribution_dir: Option<PathBuf>,
     /// A universal configuration file to start from.
     pub universal: Option<PathBuf>,
     /// Don't look for the user's setup file or the install directory's.
     pub no_setup_search: bool,
+    /// The user's accepted settings for the project (`--accepted-settings`):
+    /// an `accepted.json` in the verified store.
+    pub accepted_settings: Option<PathBuf>,
+    /// The user's review file for the project (`--review`).
+    pub review: Option<PathBuf>,
+    /// The review file of an earlier acceptance (`--previous-review`), for a
+    /// new review to start from: read, but not checked against the run.
+    pub previous_review: Option<PathBuf>,
 }
 
 /// What `load_all` uses from a universal configuration file: the setup, and
@@ -76,12 +186,24 @@ struct UniversalInput {
     /// The project file and `dev-env.yaml`, as written; only
     /// `load_universal` uses them.
     #[serde(default)]
-    project: Option<serde_json::Value>,
+    current_project_setup: Option<serde_json::Value>,
     #[serde(default)]
     dev_container: Option<serde_json::Value>,
     /// The commands, as they run.
     #[serde(default)]
     host_brokered: Vec<serde_json::Value>,
+    /// The accepted settings `host-brokered` was built from: the store's
+    /// file, and its contents.
+    #[serde(default)]
+    accepted_settings: Option<AcceptedInput>,
+}
+
+/// A universal configuration file's `accepted-settings`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedInput {
+    file: PathBuf,
+    contents: serde_json::Value,
 }
 
 impl UniversalInput {
@@ -117,6 +239,12 @@ pub struct FullConfig {
     pub project: Option<ProjectConfig>,
     /// The project's dev container; present whenever `project` is.
     pub dev_container: Option<DevContainer>,
+    /// The user's accepted settings for the project, when given.
+    pub accepted: Option<AcceptedSettings>,
+    /// The user's review file for the project, when given.
+    pub review: Option<Review>,
+    /// An earlier acceptance's review file, when given.
+    pub previous_review: Option<Review>,
 }
 
 /// Read the whole configuration, using the process environment to find the
@@ -160,13 +288,13 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     // JSON is YAML, so the contents are read as the files would be.
     let as_yaml = |contents: &serde_json::Value| read::parse_yaml(&contents.to_string());
 
-    let project = match (&universal.project, &active.project_config) {
+    let project = match (&universal.current_project_setup, &active.project_config) {
         (Some(contents), Some(file)) => project::parse(&contents.to_string(), Path::new(file))
             .map_err(|e| errors.extend(e))
             .ok(),
         (None, None) => None,
         _ => {
-            errors.push(mismatch("project", "project-config"));
+            errors.push(mismatch("current-project-setup", "project-config"));
             None
         }
     };
@@ -187,7 +315,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             None
         }
     };
-    if universal.project.is_some() && universal.dev_container.is_none() {
+    if universal.current_project_setup.is_some() && universal.dev_container.is_none() {
         errors.push(ConfigError::new(
             Some(&path),
             "dev-container",
@@ -204,6 +332,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     let setup = SetupOptions {
         project_dir: path_of(&active.project_dir),
         project_config: path_of(&active.project_config),
+        vcs_root: path_of(&active.vcs_root),
         dev_container_workspace_dir: path_of(&active.dev_container_workspace_dir),
         dev_container_settings_dir: path_of(&active.dev_container_settings_dir),
         dev_container: universal.dev_container.is_some(),
@@ -234,7 +363,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         // Commands without any project; a project that's wrong is reported above.
         (None, Ok((commands, _)))
             if !commands.is_empty()
-                && universal.project.is_none()
+                && universal.current_project_setup.is_none()
                 && active.project_config.is_none() =>
         {
             errors.push(mismatch("host-brokered", "project-config"))
@@ -242,11 +371,22 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         (None, Ok(_)) => {}
         (_, Err(e)) => errors.extend(e),
     }
+    if let (Some(system), Some(project)) = (&system, &project) {
+        errors.extend(egress_problems(project, system));
+    }
+    let accepted = universal.accepted_settings.and_then(|input| {
+        accepted::parse(input.contents, &input.file)
+            .map_err(|e| errors.extend(e))
+            .ok()
+    });
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
             project,
             dev_container,
+            accepted,
+            review: None,
+            previous_review: None,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -260,47 +400,22 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         .as_deref()
         .and_then(|path| read_universal(path).map_err(|e| errors.push(e)).ok());
     let universal_inputs = universal.as_ref().map(UniversalInput::inputs);
-    let project_path = options
-        .project
-        .as_deref()
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            let active = &universal.as_ref()?.active_config_locations;
-            active.project_config.as_ref().map(PathBuf::from)
-        })
-        .map(|p| absolute(&p));
-    let (mut project, container) = match project_path.as_deref() {
-        Some(path) => {
-            let (project, container) = project::load_checked(path);
-            (project.map_err(|e| errors.extend(e)).ok(), container)
-        }
-        None => (None, None),
-    };
-    let project_file_dir = || {
-        project_path
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-    };
+    // Given, or carried over from the universal file.
     let project_dir = match &options.project_dir {
-        Some(dir) => {
-            let dir = absolute(dir);
-            if !dir.is_dir() {
-                errors.push(ConfigError::new(
-                    Some(&dir),
-                    "",
-                    "the --project-dir directory doesn't exist",
-                ));
-            }
-            Some(dir)
+        // Without the directory, there's no project to read.
+        Some(dir) if !tidy_dir(dir).is_dir() => {
+            errors.push(ConfigError::new(
+                Some(&tidy_dir(dir)),
+                "",
+                "the --project-dir directory doesn't exist",
+            ));
+            None
         }
-        // A project file given this time has its own directory.
-        None if options.project.is_some() => project_file_dir(),
+        Some(dir) => Some(tidy_dir(dir)),
         None => universal
             .as_ref()
             .and_then(|u| u.active_config_locations.project_dir.as_ref())
-            .map(PathBuf::from)
-            .or_else(project_file_dir),
+            .map(PathBuf::from),
     };
     // Given, or else carried over.  They needn't exist yet.
     let carried = |given: &Option<PathBuf>,
@@ -315,20 +430,52 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     let dev_container_workspace_dir = carried(&options.dev_container_workspace_dir, |a| {
         &a.dev_container_workspace_dir
     });
+    // Given, or carried over with the project it was found for.
+    let vcs_root = match &options.vcs_root {
+        Some(root) => Some(tidy_dir(root)),
+        None if options.project_dir.is_some() => None,
+        None => universal
+            .as_ref()
+            .and_then(|u| u.active_config_locations.vcs_root.as_ref())
+            .map(PathBuf::from),
+    };
+    if let Some(root) = &vcs_root {
+        if !root.is_dir() {
+            errors.push(ConfigError::new(
+                Some(root),
+                "",
+                "the --vcs-root directory doesn't exist",
+            ));
+        } else if let Some(project) = project_dir.as_deref()
+            && !project.starts_with(root)
+        {
+            errors.push(ConfigError::new(
+                Some(root),
+                "",
+                format!(
+                    "the --vcs-root directory doesn't hold the project directory {}",
+                    project.display()
+                ),
+            ));
+        }
+    }
     let dev_container_settings_dir = carried(&options.dev_container_settings_dir, |a| {
         &a.dev_container_settings_dir
     });
     let setup = SetupOptions {
-        user_setup: &options.user_setup,
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
-        project_config: project_path.as_deref(),
+        // Worked out from the project directory, with the setup.
+        project_config: None,
+        find_project_config: true,
+        vcs_root: vcs_root.as_deref(),
         dev_container_workspace_dir: dev_container_workspace_dir.as_deref(),
         dev_container_settings_dir: dev_container_settings_dir.as_deref(),
-        dev_container: container.is_some(),
+        // A project always has one.
+        dev_container: project_dir.is_some(),
         no_search: options.no_setup_search,
-        // Only a project file given this time is recorded.
-        given_project_config: options.project.as_ref().and(project_path.as_deref()),
+        // Only a project given this time is recorded.
+        record_project: options.project_dir.is_some(),
         base: universal
             .as_ref()
             .zip(universal_path.as_deref())
@@ -349,12 +496,21 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             .map_err(|e| errors.extend(e))
             .ok()
     };
+    // The project file, where the setup says it is in the project directory.
+    let project_path = system
+        .as_ref()
+        .and_then(|system| system.get_path(system::SCOTER_SECTION, system::PROJECT_CONFIG));
+    let (mut project, container) = match project_path.as_deref() {
+        Some(path) => {
+            let (project, container) = project::load_checked(path);
+            (project.map_err(|e| errors.extend(e)).ok(), container)
+        }
+        None => (None, None),
+    };
     let lookup = match (&container, &system) {
         (Some(_), Some(system)) => {
             Some(system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH))
         }
-        // A path doesn't need the system configuration.
-        (Some(ContainerRef::Path(_)), None) => Some(Vec::new()),
         _ => None,
     };
     let dev_container = match (&container, project_path.as_deref(), lookup) {
@@ -369,12 +525,65 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     // After the dev container, as `env` values can refer to it.
     if let (Some(system), Some(project)) = (&system, &mut project) {
         errors.extend(plan_environments(project, system));
+        errors.extend(egress_problems(project, system));
+    }
+    // Checked against the project and the setup in effect.
+    let accepted = options.accepted_settings.as_deref().and_then(|file| {
+        let read = accepted::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()?;
+        if let Some(system) = &system {
+            let problems = read.check(system);
+            if !problems.is_empty() {
+                errors.extend(problems);
+                return None;
+            }
+        }
+        Some(read)
+    });
+    let review = options.review.as_deref().and_then(|file| {
+        let read = review::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()?;
+        if let Some(system) = &system {
+            let problems = review_problems(&read, system);
+            if !problems.is_empty() {
+                errors.extend(problems);
+                return None;
+            }
+        }
+        Some(read)
+    });
+    // An earlier acceptance's review: it only seeds a new review, and has
+    // usually expired, so it isn't checked against the run.
+    let previous_review = options.previous_review.as_deref().and_then(|file| {
+        review::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()
+    });
+    // The user's own container, when the accepted settings name one, in
+    // place of the project's.
+    let mut dev_container = dev_container;
+    if let (Some(accepted), Some(system), Some(path)) =
+        (&accepted, &mut system, project_path.as_deref())
+        && let Some(name) = &accepted.container_name
+    {
+        match user_container(name, accepted, path, system) {
+            Ok(dev) => {
+                system.set_dev_container_path(&dev.dir);
+                dev_container = Some(dev);
+            }
+            Err(e) => errors.extend(e),
+        }
     }
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
             project,
             dev_container,
+            accepted,
+            review,
+            previous_review,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -400,10 +609,11 @@ fn brokered_commands(
     for (i, (rule, entry)) in commands.iter_mut().zip(entries).enumerate() {
         match entry.get("program") {
             Some(serde_json::Value::Null) => rule.unavailable = true,
-            Some(_) => {}
-            None => errors.push(error(
+            // `scoter-host` runs it as it is, never looking it up.
+            Some(serde_json::Value::String(program)) if Path::new(program).is_absolute() => {}
+            _ => errors.push(error(
                 &index_key(KEY, i),
-                "needs `program`: the program found, or null".to_string(),
+                "needs `program`: the absolute path of the program found, or null".to_string(),
             )),
         }
         rule.env_plan = EnvPlan::as_written(&rule.env);
@@ -458,19 +668,24 @@ fn plan_environments(project: &mut ProjectConfig, system: &SystemConfig) -> Vec<
             .unwrap_or_default()
     };
     let common = resolve(&project.env, "env");
-    let plans: Vec<EnvPlan> = project
+    let own: Vec<EnvPlan> = project
         .commands
         .iter()
         .enumerate()
-        .map(|(i, rule)| {
-            let key = child_key(&index_key("commands", i), "env");
-            common.merged(&resolve(&rule.env, &key))
-        })
+        .map(|(i, rule)| resolve(&rule.env, &child_key(&index_key("commands", i), "env")))
         .collect();
-    for (rule, plan) in project.commands.iter_mut().zip(plans) {
-        rule.env_plan = plan;
+    for (rule, own) in project.commands.iter_mut().zip(own) {
+        rule.env_plan = common.merged(&own);
+        rule.env_resolved = own;
     }
+    project.env_resolved = common;
     errors
+}
+
+/// A directory made absolute and canonical, so `-d ../other` reads as the
+/// directory it is; as given (made absolute) if it can't be resolved.
+fn tidy_dir(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| absolute(dir))
 }
 
 /// `path` made absolute (without resolving symlinks).
@@ -546,6 +761,36 @@ pub(crate) mod testing {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::ConfigError;
+    use super::system::{self, Env, SystemConfig};
+
+    /// `env`, with `dir` as `SURF_SCOTER_HOME`: the user's setup file is
+    /// `dir/setup.yaml`.
+    pub(crate) fn home_env(dir: &Path, env: Env) -> Env {
+        Env {
+            scoter_home: Some(dir.to_path_buf()),
+            ..env
+        }
+    }
+
+    /// Load the system configuration with `file` (named `setup.yaml` or
+    /// `setup.yml`) as the user's setup file.
+    pub(crate) fn load_setup(
+        file: &Path,
+        distribution_dir: Option<&Path>,
+        project_dir: Option<&Path>,
+        env: Env,
+    ) -> Result<SystemConfig, Vec<ConfigError>> {
+        let name = file.file_name().and_then(|n| n.to_str());
+        assert!(
+            matches!(name, Some("setup.yaml" | "setup.yml")),
+            "{} must be named setup.yaml",
+            file.display()
+        );
+        let env = home_env(file.parent().unwrap(), env);
+        system::load(distribution_dir, project_dir, env)
+    }
+
     /// A uniquely named directory, removed (with its contents) on drop.
     pub(crate) struct TempDir(PathBuf);
 
@@ -593,13 +838,33 @@ mod tests {
         dir.write(&format!("{at}/dev-env.yaml"), DEV_ENV);
     }
 
+    /// The setup every project needs: the name of its files directory, as
+    /// the distribution's setup file gives it.
+    const FILES_DIR_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n";
+
+    /// The user's setup file, as `env` finds it.
+    fn user_setup(dir: &TempDir) -> PathBuf {
+        dir.path().join("home/setup.yaml")
+    }
+
+    /// The environment, with `home` in `dir` as `SURF_SCOTER_HOME`.
+    fn env(dir: &TempDir) -> Env {
+        testing::home_env(&dir.path().join("home"), Env::default())
+    }
+
+    /// Options for `project`, with the user's setup file (see `env`) naming
+    /// the project files directory, then `setup`, which mustn't have a
+    /// `scoter` section.
     fn options(dir: &TempDir, project: Option<&str>, setup: Option<&str>) -> LoadOptions {
+        dir.write(
+            "home/setup.yaml",
+            &format!("{FILES_DIR_SETUP}{}", setup.unwrap_or("")),
+        );
         LoadOptions {
-            project: project.map(|p| dir.write("project/scoter.yaml", p)),
-            user_setup: setup
-                .map(|s| dir.write("setup.yaml", s))
-                .into_iter()
-                .collect(),
+            project_dir: project.map(|p| {
+                dir.write("project/.surf-scoter.d/project.yaml", p);
+                dir.path().join("project")
+            }),
             ..LoadOptions::default()
         }
     }
@@ -615,45 +880,121 @@ mod tests {
     #[test]
     fn load_with_dev_container_path() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
+        dev_container(&dir, "project/.surf-scoter.d/env");
         let opts = options(&dir, Some("container:\n  dev-container-path: env\n"), None);
-        let config = load_all_with_env(&opts, Env::default()).unwrap();
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             config.project.unwrap().path,
-            dir.path().join("project/scoter.yaml")
+            dir.path().join("project/.surf-scoter.d/project.yaml")
         );
         let dev = config.dev_container.unwrap();
-        assert_eq!(dev.dir, dir.path().join("project/env"));
+        assert_eq!(dev.dir, dir.path().join("project/.surf-scoter.d/env"));
         assert_eq!(dev.env.broker_bin, "/usr/local/bin/scoter-container");
-        assert_eq!(config.system.files(), &[] as &[PathBuf]);
+        assert_eq!(config.system.files(), &[user_setup(&dir)]);
+    }
+
+    #[test]
+    fn load_finds_the_project_file_with_the_setup() {
+        let dir = TempDir::new();
+        dev_container(&dir, "project/.surf-scoter.d/env");
+        let project = "container:\n  dev-container-path: env\n";
+        let set = |text: &str| dir.write("home/setup.yaml", text);
+
+        // The setup must name the files directory, and the file.
+        let opts = options(&dir, Some(project), None);
+        for (setup, key) in [
+            (
+                "scoter:\n  values:\n    project-file-name: project.yaml\n",
+                "project-files-dir`, the directory holding the project file",
+            ),
+            (
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n",
+                "project-file-name`, the project file's name",
+            ),
+        ] {
+            set(setup);
+            let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+            assert_eq!(
+                errors,
+                [format!(
+                    ": the system configuration sets no `scoter` `values: {key}"
+                )]
+            );
+        }
+
+        // Other names work.
+        dev_container(&dir, "other/.scoter-files/env");
+        dir.write("other/.scoter-files/main.yaml", project);
+        set(
+            "scoter:\n  values:\n    project-files-dir: .scoter-files\n    project-file-name: main.yaml\n",
+        );
+        let other = LoadOptions {
+            project_dir: Some(dir.path().join("other")),
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&other, env(&dir)).unwrap();
+        assert_eq!(
+            config.project.unwrap().path,
+            dir.path().join("other/.scoter-files/main.yaml")
+        );
+        assert_eq!(
+            config.dev_container.unwrap().dir,
+            dir.path().join("other/.scoter-files/env")
+        );
+
+        // The project directory must hold the project file.
+        set(FILES_DIR_SETUP);
+        let errors = messages(load_all_with_env(&other, env(&dir)).unwrap_err());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with(": cannot read the file: "),
+            "{errors:?}"
+        );
+
+        // Each must be a single name.
+        for key in ["project-files-dir", "project-file-name"] {
+            for bad in ["''", "a/b", "'..'", "5"] {
+                set(&FILES_DIR_SETUP.replace(
+                    &format!("{key}: "),
+                    &format!("{key}: {bad}\n    was-{key}: "),
+                ));
+                let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+                assert_eq!(errors.len(), 1, "{key} {bad}: {errors:?}");
+                assert!(
+                    errors[0].starts_with(&format!(
+                        ": the system configuration's `scoter` `values: {key}`"
+                    )),
+                    "{key} {bad}: {errors:?}"
+                );
+            }
+        }
     }
 
     #[test]
     fn load_with_dev_container_name() {
         let dir = TempDir::new();
         dev_container(&dir, "containers/dev-env");
-        let setup = format!(
-            "scoter:\n  path-lists:\n    dev-containers-search:\n      - ./missing\n      - {}/containers\n",
-            dir.path().display()
+        let opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
+        dir.write(
+            "home/setup.yaml",
+            &format!(
+                "{FILES_DIR_SETUP}  path-lists:\n    dev-containers-search:\n      - ./missing\n      - {}/containers\n",
+                dir.path().display()
+            ),
         );
-        let opts = options(
-            &dir,
-            Some("container:\n  dev-container: dev-env\n"),
-            Some(&setup),
-        );
-        let config = load_all_with_env(&opts, Env::default()).unwrap();
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             config.dev_container.unwrap().dir,
             dir.path().join("containers/dev-env")
         );
-        assert_eq!(config.system.files(), &[dir.path().join("setup.yaml")]);
+        assert_eq!(config.system.files(), &[user_setup(&dir)]);
     }
 
     #[test]
     fn load_without_project() {
         let dir = TempDir::new();
         let opts = options(&dir, None, Some("ssh:\n  paths:\n    home: /h\n"));
-        let config = load_all_with_env(&opts, Env::default()).unwrap();
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert!(config.project.is_none());
         assert!(config.dev_container.is_none());
         assert_eq!(config.system.get("ssh", "home").as_deref(), Some("/h"));
@@ -663,7 +1004,7 @@ mod tests {
     fn load_dev_container_name_not_found() {
         let dir = TempDir::new();
         let opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
-        let errors = messages(load_all_with_env(&opts, Env::default()).unwrap_err());
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
             errors[0].starts_with("container.dev-container: can't find dev container 'dev-env'"),
@@ -674,8 +1015,11 @@ mod tests {
     #[test]
     fn load_gathers_errors_from_every_file() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
-        dir.write("project/env/dev-env.yaml", "user: ''\nsshd-port: 0\n");
+        dev_container(&dir, "project/.surf-scoter.d/env");
+        dir.write(
+            "project/.surf-scoter.d/env/dev-env.yaml",
+            "user: ''\nsshd-port: 0\n",
+        );
         let opts = options(
             &dir,
             Some(concat!(
@@ -687,21 +1031,10 @@ mod tests {
             )),
             Some("ssh:\n  paths:\n    a: ${nope}\n    b: ${ssh:missing}\n"),
         );
-        let errors = messages(load_all_with_env(&opts, Env::default()).unwrap_err());
-        // 3 command entries + 2 references + 4 dev-env.yaml fields.
-        assert_eq!(errors.len(), 9, "{errors:#?}");
-        assert!(
-            errors.iter().any(|e| e.starts_with("commands[0]: ")),
-            "{errors:#?}"
-        );
-        assert!(
-            errors.iter().any(|e| e.starts_with("commands[1]: ")),
-            "{errors:#?}"
-        );
-        assert!(
-            errors.iter().any(|e| e.starts_with("commands[2]: ")),
-            "{errors:#?}"
-        );
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+        // 2 references.  The project isn't read: without the system
+        // configuration, where its file is in the project directory isn't known.
+        assert_eq!(errors.len(), 2, "{errors:#?}");
         assert!(
             errors
                 .iter()
@@ -714,6 +1047,30 @@ mod tests {
                 .any(|e| e == "ssh.paths.b: unknown reference `${ssh:missing}`"),
             "{errors:#?}"
         );
+
+        // With the system configuration whole, the dev container's errors are
+        // gathered too: 3 command entries + 4 dev-env.yaml fields.
+        let opts = options(
+            &dir,
+            Some(concat!(
+                "container:\n  dev-container-path: env\n",
+                "commands:\n",
+                "  - {command: a/b, args: []}\n",
+                "  - {command: ok, args: [5]}\n",
+                "  - {command: ok, program: '', args: []}\n",
+            )),
+            None,
+        );
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+        assert_eq!(errors.len(), 7, "{errors:#?}");
+        for i in 0..3 {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.starts_with(&format!("commands[{i}]: "))),
+                "{errors:#?}"
+            );
+        }
         assert!(
             errors.iter().any(|e| e.starts_with("sshd-port: ")),
             "{errors:#?}"
@@ -728,40 +1085,38 @@ mod tests {
             Some("container: {dev-container: a, dev-container-path: b}\n"),
             None,
         );
-        let errors = messages(load_all_with_env(&opts, Env::default()).unwrap_err());
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
         assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
     #[test]
     fn load_in_two_steps() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
-        let setup = dir.write(
-            "setup.yaml",
-            "a:\n  paths:\n    local: ./here\n  values:\n    project-file: ./scoter.yaml\n",
+        dev_container(&dir, "project/.surf-scoter.d/env");
+        dir.write(
+            "home/setup.yaml",
+            &format!(
+                "a:\n  paths:\n    local: ./here\n  values:\n    project-file: ./scoter.yaml\n{FILES_DIR_SETUP}"
+            ),
         );
-        let first = LoadOptions {
-            user_setup: vec![setup],
-            ..LoadOptions::default()
-        };
-        let first = load_all_with_env(&first, Env::default()).unwrap();
+        let first = load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap();
         assert!(first.project.is_none());
         assert_eq!(first.system.get("a", "local").as_deref(), Some("./here"));
-        let universal = crate::universal::build(&first).unwrap();
+        let universal = crate::universal::build_brokering_project(&first).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
-        // The second step adds the project file found with the first's help.
+        // The second step adds the project found with the first's help.
         let project = dir.write(
-            "project/scoter.yaml",
+            "project/.surf-scoter.d/project.yaml",
             "container:\n  dev-container-path: env\n",
         );
         let second = LoadOptions {
-            project: Some(project.clone()),
+            project_dir: Some(dir.path().join("project")),
             universal: Some(first_file.clone()),
             no_setup_search: true,
             ..LoadOptions::default()
         };
-        let second = load_all_with_env(&second, Env::default()).unwrap();
+        let second = load_all_with_env(&second, env(&dir)).unwrap();
         assert_eq!(second.project.as_ref().unwrap().path, project);
         assert_eq!(
             second.system.get("a", "local"),
@@ -769,40 +1124,41 @@ mod tests {
         );
         assert!(second.dev_container.is_some());
 
-        // The project file given is recorded, most recent first.
-        let universal = crate::universal::build(&second).unwrap();
+        // The project given is recorded, most recent first.
+        let universal = crate::universal::build_brokering_project(&second).unwrap();
         assert_eq!(
             universal.loaded_from.project_config,
             [project.display().to_string()]
         );
         let second_file = dir.write("second.json", &crate::universal::to_json(&universal));
 
-        // Without `--config`, the most recent project file is used, and the
+        // Without `--project-dir`, the most recent project is used, and the
         // record is left as it is.
         let third = LoadOptions {
             universal: Some(second_file.clone()),
             no_setup_search: true,
             ..LoadOptions::default()
         };
-        let third = load_all_with_env(&third, Env::default()).unwrap();
+        let third = load_all_with_env(&third, env(&dir)).unwrap();
         assert_eq!(third.project.as_ref().unwrap().path, project);
         assert_eq!(
             third.system.loaded_from().project_config,
             [project.display().to_string()]
         );
 
-        // Another project file goes first.
+        // Another project goes first.
+        dev_container(&dir, "other/.surf-scoter.d/env");
         let other = dir.write(
-            "project/other.yaml",
+            "other/.surf-scoter.d/project.yaml",
             "container:\n  dev-container-path: env\n",
         );
         let fourth = LoadOptions {
-            project: Some(other.clone()),
+            project_dir: Some(dir.path().join("other")),
             universal: Some(second_file),
             no_setup_search: true,
             ..LoadOptions::default()
         };
-        let fourth = load_all_with_env(&fourth, Env::default()).unwrap();
+        let fourth = load_all_with_env(&fourth, env(&dir)).unwrap();
         assert_eq!(fourth.project.unwrap().path, other);
         assert_eq!(
             fourth.system.loaded_from().project_config,
@@ -822,7 +1178,7 @@ mod tests {
             ..Env::default()
         };
         let first = load_all_with_env(&LoadOptions::default(), env.clone()).unwrap();
-        let universal = crate::universal::build(&first).unwrap();
+        let universal = crate::universal::build_brokering_project(&first).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
         // The user file is gone, and isn't looked for: the record stands in.
@@ -855,11 +1211,78 @@ mod tests {
     }
 
     #[test]
+    fn vcs_root_given() {
+        let dir = TempDir::new();
+        dev_container(&dir, "repo/project/.surf-scoter.d/env");
+        dir.write(
+            "repo/project/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: env\n",
+        );
+        let mut opts = options(&dir, None, None);
+        opts.project_dir = Some(dir.path().join("repo/project"));
+        let vcs_root = |config: &FullConfig| {
+            config
+                .system
+                .get_path(system::SCOTER_SECTION, system::VCS_ROOT)
+        };
+
+        // It holds the project, and is recorded; `..` is worked out.
+        opts.vcs_root = Some(dir.path().join("repo/project/.."));
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
+        assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
+        assert_eq!(
+            universal.active_config_locations.vcs_root,
+            Some(dir.path().join("repo").display().to_string())
+        );
+        // The project directory itself can be the root.
+        opts.vcs_root = Some(dir.path().join("repo/project"));
+        assert!(load_all_with_env(&opts, env(&dir)).is_ok());
+
+        // It carries over with the project, but not to a project given again.
+        opts.vcs_root = Some(dir.path().join("repo"));
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
+        let first = dir.write(
+            "first.json",
+            &crate::universal::to_json(
+                &crate::universal::build_brokering_project(&config).unwrap(),
+            ),
+        );
+        let again = LoadOptions {
+            universal: Some(first.clone()),
+            no_setup_search: true,
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
+        assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
+        let again = LoadOptions {
+            project_dir: Some(dir.path().join("repo/project")),
+            ..again
+        };
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
+        assert_eq!(vcs_root(&config), None);
+
+        // It must hold the project directory, and exist.
+        std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
+        for (root, message) in [
+            ("elsewhere", "doesn't hold the project directory"),
+            (
+                "repo/project/.surf-scoter.d",
+                "doesn't hold the project directory",
+            ),
+            ("missing", "the --vcs-root directory doesn't exist"),
+        ] {
+            opts.vcs_root = Some(dir.path().join(root));
+            let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+            assert_eq!(errors.len(), 1, "{root}: {errors:?}");
+            assert!(errors[0].contains(message), "{root}: {errors:?}");
+        }
+    }
+
+    #[test]
     fn project_dir_given() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
-        let elsewhere = dir.path().join("elsewhere");
-        std::fs::create_dir_all(&elsewhere).unwrap();
+        dev_container(&dir, "project/.surf-scoter.d/env");
         let project_dir = |config: &FullConfig| {
             config
                 .system
@@ -870,42 +1293,64 @@ mod tests {
             Some("container:\n  dev-container-path: env\n"),
             Some("a:\n  paths:\n    x: ./x\n"),
         );
-        let config = load_all_with_env(&opts, Env::default()).unwrap();
+        let ran_in = Env {
+            cwd: Some(dir.path().join("somewhere/else")),
+            ..env(&dir)
+        };
+        let config = load_all_with_env(&opts, ran_in.clone()).unwrap();
+        // The project file is in it, and `./` paths start there.
         assert_eq!(project_dir(&config), Some(dir.path().join("project")));
-
-        // `./` paths start there; the project file's own paths don't.
-        opts.project_dir = Some(elsewhere.clone());
-        let config = load_all_with_env(&opts, Env::default()).unwrap();
-        assert_eq!(project_dir(&config), Some(elsewhere.clone()));
-        assert_eq!(config.system.get_path("a", "x"), Some(elsewhere.join("x")));
         assert_eq!(
-            config.dev_container.as_ref().unwrap().dir,
-            dir.path().join("project/env")
+            config.project.as_ref().unwrap().path,
+            dir.path().join("project/.surf-scoter.d/project.yaml")
+        );
+        assert_eq!(
+            config.system.get_path("a", "x"),
+            Some(dir.path().join("project/x"))
+        );
+        // `cwd` is still where the tool ran.
+        assert_eq!(
+            config.system.get_path(system::SCOTER_SECTION, system::CWD),
+            Some(dir.path().join("somewhere/else"))
         );
 
-        // It carries over, unless another project file is given.
-        let universal = crate::universal::build(&config).unwrap();
+        // Given with `..`, it's the directory it names.
+        let roundabout = LoadOptions {
+            project_dir: Some(dir.path().join("somewhere/../project")),
+            ..opts.clone()
+        };
+        std::fs::create_dir_all(dir.path().join("somewhere")).unwrap();
+        let config = load_all_with_env(&roundabout, env(&dir)).unwrap();
+        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        assert_eq!(
+            config.project.as_ref().unwrap().path,
+            dir.path().join("project/.surf-scoter.d/project.yaml")
+        );
+
+        // It carries over, unless another project is given.
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
         let first = dir.write("first.json", &crate::universal::to_json(&universal));
         let again = LoadOptions {
             universal: Some(first.clone()),
             no_setup_search: true,
             ..LoadOptions::default()
         };
-        let config = load_all_with_env(&again, Env::default()).unwrap();
-        assert_eq!(project_dir(&config), Some(elsewhere));
-        let other = dir.write(
-            "project/other.yaml",
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
+        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        dev_container(&dir, "other/.surf-scoter.d/env");
+        dir.write(
+            "other/.surf-scoter.d/project.yaml",
             "container:\n  dev-container-path: env\n",
         );
         let again = LoadOptions {
-            project: Some(other),
+            project_dir: Some(dir.path().join("other")),
             ..again
         };
-        let config = load_all_with_env(&again, Env::default()).unwrap();
-        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
+        assert_eq!(project_dir(&config), Some(dir.path().join("other")));
 
         opts.project_dir = Some(dir.path().join("missing"));
-        let errors = load_all_with_env(&opts, Env::default()).unwrap_err();
+        let errors = load_all_with_env(&opts, env(&dir)).unwrap_err();
         assert_eq!(
             errors.to_string(),
             format!(
@@ -925,7 +1370,7 @@ mod tests {
             dev_container_settings_dir: Some(PathBuf::from("relative/settings")),
             ..LoadOptions::default()
         };
-        let config = load_all_with_env(&first, Env::default()).unwrap();
+        let config = load_all_with_env(&first, env(&dir)).unwrap();
         assert_eq!(
             get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
             Some(dir.path().join("ws"))
@@ -935,7 +1380,7 @@ mod tests {
             get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
             Some(settings.clone())
         );
-        let universal = crate::universal::build(&config).unwrap();
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
         assert_eq!(
             universal.active_config_locations.dev_container_settings_dir,
             Some(settings.display().to_string())
@@ -949,7 +1394,7 @@ mod tests {
             dev_container_workspace_dir: Some(dir.path().join("other")),
             ..LoadOptions::default()
         };
-        let config = load_all_with_env(&again, Env::default()).unwrap();
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
         assert_eq!(
             get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
             Some(dir.path().join("other"))
@@ -960,14 +1405,14 @@ mod tests {
         );
 
         // Without them, they're not set.
-        let config = load_all_with_env(&LoadOptions::default(), Env::default()).unwrap();
+        let config = load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap();
         assert_eq!(get(&config, system::DEV_CONTAINER_WORKSPACE_DIR), None);
     }
 
     #[test]
     fn command_environments_are_worked_out() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
+        dev_container(&dir, "project/.surf-scoter.d/env");
         let opts = options(
             &dir,
             Some(concat!(
@@ -982,7 +1427,7 @@ mod tests {
         );
         let env = Env {
             vars: HashMap::from([("HOME".to_string(), "/home/me".to_string())]),
-            ..Env::default()
+            ..env(&dir)
         };
         let config = load_all_with_env(&opts, env).unwrap();
         let mut project = config.project.unwrap();
@@ -1000,14 +1445,17 @@ mod tests {
         assert_eq!(two.set["TOOL"], "own");
         assert_eq!(
             two.set["DEV"],
-            dir.path().join("project/env").display().to_string()
+            dir.path()
+                .join("project/.surf-scoter.d/env")
+                .display()
+                .to_string()
         );
     }
 
     #[test]
     fn command_environment_errors() {
         let dir = TempDir::new();
-        dev_container(&dir, "project/env");
+        dev_container(&dir, "project/.surf-scoter.d/env");
         let opts = options(
             &dir,
             Some(concat!(
@@ -1019,7 +1467,7 @@ mod tests {
             )),
             None,
         );
-        let errors = messages(load_all_with_env(&opts, Env::default()).unwrap_err());
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
         // The project's block is reported once, not per command.
         assert_eq!(
             errors,
@@ -1033,26 +1481,31 @@ mod tests {
     /// A universal configuration file for a project with a dev container,
     /// made in `dir`, as `gen-scoter-uc` would; and the files it came from.
     fn universal_for(dir: &TempDir, env: Env) -> (PathBuf, Vec<PathBuf>) {
-        dev_container(dir, "project/env");
+        dev_container(dir, "project/.surf-scoter.d/env");
+        dir.write(
+            "project/.surf-scoter.d/project.yaml",
+            concat!(
+                "container:\n  dev-container-path: env\n",
+                "env:\n  allow: [LANG]\n  set: {LOCAL: '${a:local}', HOME: '@HOME@'}\n",
+                "commands:\n  - {command: one, args: [x]}\n",
+            ),
+        );
         let opts = LoadOptions {
-            project: Some(dir.write(
-                "project/scoter.yaml",
-                concat!(
-                    "container:\n  dev-container-path: env\n",
-                    "env:\n  allow: [LANG]\n  set: {LOCAL: '${a:local}', HOME: '@HOME@'}\n",
-                    "commands:\n  - {command: one, args: [x]}\n",
-                ),
-            )),
-            user_setup: vec![dir.write("setup.yaml", "a:\n  paths:\n    local: ./here\n")],
-            no_setup_search: true,
+            project_dir: Some(dir.path().join("project")),
             ..LoadOptions::default()
         };
+        dir.write(
+            "home/setup.yaml",
+            &format!("a:\n  paths:\n    local: ./here\n{FILES_DIR_SETUP}"),
+        );
+        let env = testing::home_env(&dir.path().join("home"), env);
         let config = load_all_with_env(&opts, env).unwrap();
-        let json = crate::universal::to_json(&crate::universal::build(&config).unwrap());
+        let json =
+            crate::universal::to_json(&crate::universal::build_brokering_project(&config).unwrap());
         let sources = vec![
-            dir.path().join("project/scoter.yaml"),
-            dir.path().join("project/env/dev-env.yaml"),
-            dir.path().join("setup.yaml"),
+            dir.path().join("project/.surf-scoter.d/project.yaml"),
+            dir.path().join("project/.surf-scoter.d/env/dev-env.yaml"),
+            dir.path().join("home/setup.yaml"),
         ];
         (dir.write("universal.json", &json), sources)
     }
@@ -1081,7 +1534,10 @@ mod tests {
         let mut config = load_universal_with_env(&universal, now).unwrap();
         expand_host_environments(config.project.as_mut().unwrap(), &config.system).unwrap();
         let project = config.project.as_ref().unwrap();
-        assert_eq!(project.path, dir.path().join("project/scoter.yaml"));
+        assert_eq!(
+            project.path,
+            dir.path().join("project/.surf-scoter.d/project.yaml")
+        );
         assert_eq!(
             project.commands[0].args,
             expected.project.as_ref().unwrap().commands[0].args
@@ -1107,7 +1563,7 @@ mod tests {
             config
                 .system
                 .get_path(system::SCOTER_SECTION, system::DEV_CONTAINER_PATH),
-            Some(dir.path().join("project/env"))
+            Some(dir.path().join("project/.surf-scoter.d/env"))
         );
     }
 
@@ -1123,8 +1579,10 @@ mod tests {
             messages(load_universal_with_env(&file, Env::default()).unwrap_err())
         };
         assert_eq!(
-            edit(&|j| j["project"] = serde_json::Value::Null),
-            ["project: goes with `active-config-locations.project-config`, which doesn't match it"]
+            edit(&|j| j["current-project-setup"] = serde_json::Value::Null),
+            [
+                "current-project-setup: goes with `active-config-locations.project-config`, which doesn't match it"
+            ]
         );
         assert_eq!(
             edit(&|j| j["active-config-locations"]["dev-container-path"] = serde_json::Value::Null),
@@ -1135,7 +1593,7 @@ mod tests {
         // The contents are checked as the files would be.
         let errors = edit(&|j| j["dev-container"]["sshd-port"] = serde_json::json!("nope"));
         assert!(errors[0].starts_with("sshd-port: "), "{errors:?}");
-        let errors = edit(&|j| j["project"]["commands"] = serde_json::json!("nope"));
+        let errors = edit(&|j| j["current-project-setup"]["commands"] = serde_json::json!("nope"));
         assert_eq!(errors, ["commands: must be a list of entries"]);
 
         // Without a project, there's none, nor a dev container.
@@ -1143,8 +1601,8 @@ mod tests {
             &dir.write(
                 "plain.json",
                 &crate::universal::to_json(
-                    &crate::universal::build(
-                        &load_all_with_env(&LoadOptions::default(), Env::default()).unwrap(),
+                    &crate::universal::build_brokering_project(
+                        &load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap(),
                     )
                     .unwrap(),
                 ),
@@ -1200,7 +1658,15 @@ mod tests {
         );
         assert_eq!(
             errors,
-            ["host-brokered[0]: needs `program`: the program found, or null"]
+            ["host-brokered[0]: needs `program`: the absolute path of the program found, or null"]
+        );
+        // A relative program would be found wherever scoter-host runs.
+        let errors = messages(
+            load(&|j| j["host-brokered"][0]["program"] = serde_json::json!("bin/one")).unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            ["host-brokered[0]: needs `program`: the absolute path of the program found, or null"]
         );
         let errors = messages(
             load(&|j| j["host-brokered"][0]["shell"] = serde_json::json!(true)).unwrap_err(),
@@ -1219,7 +1685,7 @@ mod tests {
             universal: Some(bad.clone()),
             ..LoadOptions::default()
         };
-        let errors = load_all_with_env(&options, Env::default()).unwrap_err();
+        let errors = load_all_with_env(&options, env(&dir)).unwrap_err();
         assert_eq!(errors.0.len(), 1, "{errors}");
         assert_eq!(errors.0[0].file.as_deref(), Some(bad.as_path()));
         assert!(
@@ -1232,7 +1698,7 @@ mod tests {
             universal: Some(dir.path().join("missing.json")),
             ..LoadOptions::default()
         };
-        assert!(load_all_with_env(&options, Env::default()).is_err());
+        assert!(load_all_with_env(&options, env(&dir)).is_err());
     }
 
     #[test]

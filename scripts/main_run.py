@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,11 +19,27 @@ from surf_scoter_lib import (
     defaults,
     fileutil,
     gen_parser,
+    generator,
     jdata,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib.err import ConfigErr
+from surf_scoter_lib.err import ConfigErr, VerifiedStoreErr
 from surf_scoter_lib.ssh_config import SshConfig
+from surf_scoter_lib.verified import staging
+
+# The network gateway's configuration, in the resources directory.
+GATEWAY_CONFIG_FILE = "gateway-config"
+
+# Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`.
+SUC_COPY_DIR = "environments"
+SUC_COPY_FILE = "suc.json"
+# The accepted copy of the project's files, staged to build from, beside it.
+BUILD_DIR = "build"
+
+NOT_ACCEPTED = (
+    "You haven't accepted this project's settings.  "
+    "Run `scoter verify` to review them, then run again."
+)
 
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
@@ -30,6 +47,11 @@ from surf_scoter_lib.ssh_config import SshConfig
 
 def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     """Start the dev environment."""
+    # Nothing runs from a project the user hasn't accepted: not its host
+    # commands, its egress rules, or its container.
+    if config.accepted_settings_file() is None:
+        print(NOT_ACCEPTED, file=sys.stderr)
+        return 1
     vcs_section = config.get_vcs_section()
 
     # Prepare the active environment set for writing.
@@ -38,6 +60,8 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         config.require_path("dev-env", "running-env-config"),
         config.require_path("dev-env", "running-env-config-lock"),
     )
+    # Set once reserved: the environment's directory is named after it.
+    host = ""
     try:
         # -- Discovery
         # Configure the sshd port.  It might be dynamic.
@@ -53,9 +77,16 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         host_suffix = active_envs.reserve_environ(host_prefix)
         host = host_prefix + host_suffix
 
+        # -- Stage the accepted copy of the project's files to build from.
+        plan = _stage_accepted(config, host)
+        if plan is None:
+            active_envs.close()
+            return 1
+
         # -- Build the containers
-        image_tags = _build_containers(config, host) # (dev-env, firewall, gateway)
+        image_tags = _build_containers(config, host, plan) # (dev-env, firewall, gateway)
         if not image_tags:
+            _remove_environment_dir(config, host)
             active_envs.close()
             return 1
 
@@ -101,12 +132,6 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         # The file should already exist from the user setup.
         _add_known_host(config, host, host_key_file)
 
-        allowed_domains_file = config.require_path("dev-env", "allowed-domains")
-        if allowed_domains_file.exists():
-            allowed_domains_file.copy(setup_dir / defaults.ALLOWED_DOMAINS_FILE_NAME)
-        else:
-            fileutil.touch(setup_dir / defaults.ALLOWED_DOMAINS_FILE_NAME, 0o666)
-
         # Write the host-bridge command list into the setup directory.
         with open(setup_dir / defaults.BRIDGE_COMMANDS_FILE_NAME, "w", encoding="utf-8") as inp:
             inp.write("\n".join(config.project_bridge_commands()))
@@ -116,11 +141,14 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         resources_dir.mkdir(exist_ok=True)
         _ignore_directory(config, vcs_section, resources_dir)
 
+        # The network gateway's configuration, from the egress rules.
+        gateway_config = _write_gateway_config(config, resources_dir / GATEWAY_CONFIG_FILE)
+
         # Setup the .env file in the resources directory.
         _write_docker_compose_env_file(
             config=config, file=resources_dir / defaults.COMPOSE_ENV_FILENAME,
             host=host, workspace_dir=workspace_dir,
-            settings_dir=setup_dir,
+            settings_dir=setup_dir, gateway_config=gateway_config,
         )
 
         # Setup the docker-compose file in the resources directory.
@@ -128,11 +156,16 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             resources_dir / defaults.DOCKER_COMPOSE_FILENAME
         )
 
-        # Save off a copy of the config file
-        universal_config_file = resources_dir / "suc.json"
-        config.save(universal_config_file)
+        # scoter-host's copy of the configuration: it decides what runs on
+        # this computer, so it's private, and outside the project.
+        universal_config_file = fileutil.write_private(
+            config.require_path("scoter", "state-dir"),
+            (SUC_COPY_DIR, host, SUC_COPY_FILE),
+            config.dumps().encode("utf-8"),
+        )
     except:
         print("Aborting execution.", file=sys.stderr)
+        _remove_environment_dir(config, host)
         # Close without saving.
         active_envs.close()
         raise
@@ -231,6 +264,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     active_envs.rm_environ_by_host(host)
     active_envs.save(close=True)
 
+    # scoter-host's copy of the configuration.
+    fileutil.rm(universal_config_file.parent)
+
     # Clean up the setup and resource directories.
     #_rm(setup_dir)
     #_rm(resources_dir)
@@ -239,23 +275,61 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_containers(config: UserConfig, host: str) -> tuple[str, str, str] | None:
+def _environment_dir(config: UserConfig, host: str) -> Path:
+    return config.require_path("scoter", "state-dir") / SUC_COPY_DIR / host
+
+
+def _remove_environment_dir(config: UserConfig, host: str | None) -> None:
+    if host:
+        fileutil.rm(_environment_dir(config, host))
+
+
+def _stage_accepted(config: UserConfig, host: str) -> staging.BuildPlan | None:
+    """Stage the accepted copy of the project's files; None, having said why, if it can't be."""
+    directory = _environment_dir(config, host)
+    # A run that crashed may have left one behind.
+    fileutil.rm(directory)
+    build_dir = fileutil.private_dir(
+        config.require_path("scoter", "state-dir"), (SUC_COPY_DIR, host, BUILD_DIR),
+    )
+    try:
+        plan = staging.prepare(
+            config, build_dir, generator.run, datetime.datetime.now(datetime.UTC),
+        )
+    except staging.StagingErr as err:
+        print(err, file=sys.stderr)
+        if err.reverify:
+            print("Run `scoter verify` to review the project's settings, then run again.", file=sys.stderr)
+        plan = None
+    except (OSError, VerifiedStoreErr) as err:
+        print(f"Couldn't stage the accepted copy of the project's files: {err}", file=sys.stderr)
+        plan = None
+    if plan is None:
+        # `prepare` gives None only without accepted settings, checked at the start.
+        fileutil.rm(directory)
+    return plan
+
+
+def _build_containers(
+    config: UserConfig, host: str, plan: staging.BuildPlan,
+) -> tuple[str, str, str] | None:
     # Build the dev-env container + firewall-router + network-gateway.
     ret = (
         config.require_value("dev-env", "dev-env-image-prefix") + host,
         config.require_value("dev-env", "firewall-router-image"),
         config.require_value("dev-env", "network-gateway-image"),
     )
-    # The dev-env's local parents come first, lowest first.
+    # The dev-env's local parents come first, lowest first.  The project's
+    # build from the accepted copy (`plan`), never the live files.
     containers: list[tuple[str, str, Path | None]] = [
         ("dev-env parent", tag, path)
-        for tag, path in config.dev_container_parent_builds()
+        for tag, path in plan.parents
     ]
     containers += [
         (
             "dev-env",
             ret[0],
-            config.active_location("dev-container-path"),
+            plan.dev_container,
         ),
         (
             "firewall-router",
@@ -573,10 +647,51 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
     return host_prefix
 
 
+def _write_gateway_config(config: UserConfig, output: Path) -> Path:
+    """Write the network gateway's configuration from the egress rules, with the setup's
+    `network-gateway: runs: write-config`; the file written.
+
+    The gateway enforces what it can of each rule.  When it can't enforce one,
+    it writes nothing, and the environment doesn't start: a rule is never
+    dropped, or loosened into something broader.
+    """
+    with tempfile.TemporaryDirectory(prefix="surf-scoter-") as directory:
+        universal = Path(directory) / "universal.json"
+        fd = os.open(universal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(config.dumps())
+        res = config.run_command(
+            "network-gateway", "write-config",
+            check=False,
+            template={"universal": str(universal), "output": str(output)},
+        )
+    try:
+        report = json.loads(res.stdout or b"{}")
+    except ValueError as err:
+        raise ConfigErr(f"The network gateway's `write-config` printed something that isn't JSON: {err}") from err
+    refused = report.get("refused") if isinstance(report, dict) else None
+    if refused:
+        print(
+            f"The network gateway ({report.get('gateway')}) can't enforce these egress rules, "
+            "so the environment won't start:",
+            file=sys.stderr,
+        )
+        for entry in refused:
+            rule = entry.get("rule", {}) if isinstance(entry, dict) else {}
+            print(
+                f"  * {rule.get('host')} ({rule.get('protocol')}, port {rule.get('port')}): "
+                f"{entry.get('reason') if isinstance(entry, dict) else entry}",
+                file=sys.stderr,
+            )
+    if res.returncode != 0:
+        raise ConfigErr("Couldn't make the network gateway's configuration.")
+    return output
+
+
 def _write_docker_compose_env_file(
     *,
     config: UserConfig, file: Path,
-    host: str, workspace_dir: Path, settings_dir: Path,
+    host: str, workspace_dir: Path, settings_dir: Path, gateway_config: Path,
 ) -> None:
     # Write all the settings to the docker-compose file.
     # 90% of this have well-defined meanings that all docker-compose must use.
@@ -599,10 +714,12 @@ def _write_docker_compose_env_file(
         # File paths
         "WORKSPACE_HOST": str(workspace_dir),
         "SETTINGS_HOST": str(settings_dir),
+        "GATEWAY_CONFIG_HOST": str(gateway_config),
 
         # Mount points
         "WORKSPACE_CONTAINER": mounts["workspace"],
         "SETTINGS_CONTAINER": mounts["setup"],
+        "GATEWAY_CONFIG_CONTAINER": config.require_value("network-gateway", "config-mount"),
 
         # Limits
         "PIDS_LIMIT": config.require_value("dev-env", "pids-limit"),

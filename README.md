@@ -19,8 +19,8 @@ These are the things you need to do to keep Surf Scoter's protections working.  
 
 If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the files that decide what its container can do.  They define how the container can communicate outside its sandbox, which means it can do things you're not ready for.
 
-- **The project configuration file** (`.surf-scoter.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
-- **The allowed domain list** (`.surf-scoter/allowed-domains.txt`) says where the container may connect.
+- **The project configuration file** (`.surf-scoter.d/project.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
+- **The egress rules** (`egress` in `.surf-scoter.d/project.yaml`) say where the container may connect.
 - **The dev container's `Dockerfile` and `dev-env.yaml`** build and run the container.  Look for multi-line values in `dev-env.yaml`, a final `USER` other than an unprivileged user, and downloads in `RUN` steps.
 
 Review changes to these files whenever they come back from the workspace, too.  They change what the *next* environment may do.
@@ -50,7 +50,7 @@ For strongest safety, treat the workspace as untrusted from the host side:
 
 ### Keep the network tight
 
-- Keep the allowed domain list as short as the work permits.  Prefer exact hosts (`registry.npmjs.org`) to wildcards (`.npmjs.org`).
+- Keep the egress rules as short as the work permits.  Prefer exact hosts (`registry.npmjs.org`) to wildcards (`*.npmjs.org`).
 - Keep your IDE's automatic port forwarding off (see [Connecting through VS Code](#connecting-through-vs-code)).
 - Check the gateway log now and then (`podman logs HOSTNAME-ng`).  Denied requests show what the code in the container *tried* to reach.
 - If you change the network settings, recheck every [required network property](docs/security/network.md#required-properties).  The [settings documentation](docs/security/settings.md) has a checklist.

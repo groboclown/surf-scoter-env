@@ -669,13 +669,13 @@ mod tests {
     #[test]
     fn first_matching_entry_wins() {
         let commands = parse_commands(concat!(
-            "  - {command: cp, program: /bin/first, args: [{any: {}}]}\n",
-            "  - {command: cp, program: /bin/second, args: [{path: {within: cwd}}]}\n",
+            "  - {command: cp, program: first, args: [{any: {}}]}\n",
+            "  - {command: cp, program: second, args: [{path: {within: cwd}}]}\n",
         ));
         assert_eq!(
             analyze(&invocation(&["cp", "x"]), &commands, &workspace()),
             Decision::Allow(ExecRequest {
-                program: "/bin/first".to_string(),
+                program: "first".to_string(),
                 args: vec![plain("x")],
                 cwd: None,
                 envs: BTreeMap::new(),
@@ -686,17 +686,17 @@ mod tests {
     #[test]
     fn program_is_per_entry() {
         let commands = parse_commands(concat!(
-            "  - {command: aws, program: /opt/aws-v1/aws, args: [s3, ls]}\n",
+            "  - {command: aws, program: aws-v1, args: [s3, ls]}\n",
             "  - {command: aws, args: [sts, get-caller-identity]}\n",
-            "  - {command: other, program: /bin/other, args: [s3, ls]}\n",
+            "  - {command: other, program: other-aws, args: [s3, ls]}\n",
         ));
         let program = |args: &[&str]| match analyze(&invocation(args), &commands, &workspace()) {
             Decision::Allow(req) => req.program,
             other => panic!("{other:?}"),
         };
-        assert_eq!(program(&["aws", "s3", "ls"]), "/opt/aws-v1/aws");
+        assert_eq!(program(&["aws", "s3", "ls"]), "aws-v1");
         assert_eq!(program(&["aws", "sts", "get-caller-identity"]), "aws");
-        assert_eq!(program(&["/usr/bin/aws", "s3", "ls"]), "/opt/aws-v1/aws");
+        assert_eq!(program(&["/usr/bin/aws", "s3", "ls"]), "aws-v1");
     }
 
     #[test]
@@ -864,15 +864,15 @@ mod tests {
     fn cwd_later_entry_can_allow_other_directories() {
         let ws = TestWorkspace::new();
         let commands = parse_commands(concat!(
-            "  - {command: docker, program: /bin/a, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
-            "  - {command: docker, program: /bin/b, args: [compose, up], cwd: {allowed-workspace-dirs: [.]}}\n",
+            "  - {command: docker, program: docker-a, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
+            "  - {command: docker, program: docker-b, args: [compose, up], cwd: {allowed-workspace-dirs: [.]}}\n",
         ));
         let program = |cwd: &str| match ws.decide(&commands, cwd) {
             Decision::Allow(req) => req.program,
             other => panic!("{other:?}"),
         };
-        assert_eq!(program("/workspace/services/web"), "/bin/a");
-        assert_eq!(program("/workspace"), "/bin/b");
+        assert_eq!(program("/workspace/services/web"), "docker-a");
+        assert_eq!(program("/workspace"), "docker-b");
         ws.assert_denied_in(&commands, "/workspace/infra");
     }
 

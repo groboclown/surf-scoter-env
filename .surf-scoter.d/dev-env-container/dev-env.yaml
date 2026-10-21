@@ -1,6 +1,6 @@
 # This inherits all settings from the parent.
 
 parents:
-  - dir: ../../../containers/dev-env
+  - name: dev-env
     # This tag comes from the Makefile
     tag: local-surf-scoter-env/dev-env:build

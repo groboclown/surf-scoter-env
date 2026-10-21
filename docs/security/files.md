@@ -12,10 +12,10 @@ This document describes which files the container can see, how they get there, a
 | Host directory | Contents | In the dev container | Who writes it |
 | --- | --- | --- | --- |
 | `.dev-env/workspace` | A clone of your project | Read-write, at `mounts: workspace` (default `/workspace`) | The container |
-| `.dev-env/setup` | SSH host key, `authorized_keys`, allowed domain list, bridge command list | Read-only, at `mounts: setup` (default `/opt/surf-scoter-setup`) | `scoter` on the host |
+| `.dev-env/setup` | SSH host key, `authorized_keys`, bridge command list | Read-only, at `mounts: setup` (default `/opt/surf-scoter-setup`) | `scoter` on the host |
 | `.dev-env/resources` | Compose file, compose `.env`, the universal configuration file | Not mounted | `scoter` on the host |
 
-The gateway container also mounts `setup/allowed-domains.txt`, read-only.  Nothing else from your host is mounted.  In particular, the dev container never gets your home directory, your SSH keys, your cloud credential files, or the container runtime's socket.
+The gateway container also mounts its configuration (`resources/gateway-config`, made from the egress rules), read-only; the dev container doesn't get it.  Nothing else from your host is mounted.  In particular, the dev container never gets your home directory, your SSH keys, your cloud credential files, or the container runtime's socket.
 
 ### The workspace is a clone, not your project
 
@@ -31,7 +31,7 @@ The dev container runs as the image's user (the unprivileged `ubuntu` in the bas
 
 ### The setup directory
 
-The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization, the gateway's allowed domain list, or the list of bridge commands.  The allowed domain list in it is copied from your *project directory* at launch, not from the workspace, so a change the container makes to its own copy has no effect until you bring that change back into your project.
+The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization or the list of bridge commands.  The gateway's allowed hosts come from the egress rules you accepted, read from your *project directory* (not the workspace), so a change the container makes to its own copy of the project file has no effect until you bring that change back into your project, and review it.
 
 
 ## Bringing changes back
@@ -49,7 +49,7 @@ Git runs in your repository, with your configuration and your hooks.  The worksp
 Review what arrives as untrusted code before merging, paying particular attention to:
 
 * build and test scripts, CI workflows, and package manifests with install hooks;
-* `.surf-scoter.yaml` and `.surf-scoter/` (they change what the *next* environment may do; see [the host bridge](host-bridge.md) and [network](network.md));
+* `.surf-scoter.d/` and `.surf-scoter/` (they change what the *next* environment may do; see [the host bridge](host-bridge.md) and [network](network.md));
 * `.vscode/`, `.idea/`, `.editorconfig`, and other files your tools act on when they open a folder;
 * symlinks, which can point at files outside the project once they're on your host.
 

@@ -6,6 +6,8 @@
 //!     - dir: ../base-env
 //!       tag: my-base:latest
 //!     - file: ../published/dev-env.yaml
+//!     - name: dev-env
+//!       tag: local-surf-scoter-env/dev-env:build
 //! user: ubuntu
 //! mounts:
 //!     workspace: /workspace
@@ -20,21 +22,30 @@
 //! merge key by key; anything else is replaced, `null` included.  A `dir`
 //! parent is a local container directory, built with `tag` before this one;
 //! without a `dev-env.yaml` of its own, it adds no values and has no parents
-//! to build.  A `file` parent is only another `dev-env.yaml`, for an image
-//! pulled from a repository.  Parents may have parents, so long as none is its own.
+//! to build.  A `name` parent is a `dir` parent found by name: the first
+//! `dev-containers-search` directory holding `NAME/Dockerfile`.  A `file`
+//! parent is only another `dev-env.yaml`, for an image pulled from a
+//! repository.  Parents may have parents, so long as none is its own.
 //!
 //! Loading resolves all that.  The resulting `DevEnv::raw` holds the merged
 //! values, with every key the tools use, and `parent-builds` in place of
 //! `parents`: the local parents to build, as `{dir, tag}`, in build order.
 //!
 //! Other keys are allowed, and kept in `DevEnv::raw`.
+//!
+//! The dev container, and every parent `dir`, `name` and `file`, must resolve
+//! (following symlinks) to somewhere inside the project files directory (the
+//! one holding the project file) or one of the system configuration's
+//! `dev-containers-search` directories.
+//! Those are the only places the tools build from, so a project can't make
+//! them read, or use as a build context, anything else on the host.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use yaml_serde::{Mapping, Value};
 
-use super::project::ContainerRef;
+use super::project::{ContainerRef, valid_name};
 use super::read::{parse_yaml, read_limited, tag_errors};
 use super::{ConfigError, child_key, index_key};
 
@@ -102,22 +113,44 @@ pub struct ParentBuild {
 
 /// Find the project's dev container.  `project` is the project file, which
 /// `dev-container-path` is relative to; `lookup` holds the directories to
-/// search for a `dev-container` name.
+/// search for a `dev-container` name.  The container and its parents must be
+/// inside the project file's directory or a `lookup` directory.
 pub fn find(
     reference: &ContainerRef,
     project: &Path,
     lookup: &[PathBuf],
 ) -> Result<DevContainer, Vec<ConfigError>> {
+    let base = project.parent().unwrap_or(Path::new(""));
+    // The search list normally holds the project files directory too.
+    let mut roots: Vec<PathBuf> = vec![base.to_path_buf()];
+    for dir in lookup {
+        if !roots.contains(dir) {
+            roots.push(dir.clone());
+        }
+    }
+    let outside = |key: &str, dir: &Path| {
+        vec![ConfigError::new(
+            Some(project),
+            key,
+            outside_message(dir, &roots),
+        )]
+    };
     match reference {
         ContainerRef::Path(path) => {
-            let base = project.parent().unwrap_or(Path::new(""));
-            load(&base.join(path))
+            let dir = base.join(path);
+            if !within(&dir, &roots) {
+                return Err(outside("container.dev-container-path", &dir));
+            }
+            load(&dir, &roots, lookup)
         }
         ContainerRef::Name(name) => {
             for dir in lookup {
                 let candidate = dir.join(name);
                 if candidate.join(DOCKERFILE).is_file() && candidate.join(DEV_ENV_FILE).is_file() {
-                    return load(&candidate);
+                    if !within(&candidate, &roots) {
+                        return Err(outside("container.dev-container", &candidate));
+                    }
+                    return load(&candidate, &roots, lookup);
                 }
             }
             let message = if lookup.is_empty() {
@@ -141,8 +174,36 @@ pub fn find(
     }
 }
 
-/// Read the dev container in `dir`, with its parents.
-pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
+/// Whether `path` resolves (following symlinks) to somewhere inside one of
+/// `roots`.  A path that doesn't exist is reported elsewhere, so it passes.
+fn within(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return true;
+    };
+    roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| path.starts_with(root))
+}
+
+/// The message for a container or parent that isn't inside one of `roots`.
+fn outside_message(path: &Path, roots: &[PathBuf]) -> String {
+    let roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    format!(
+        "{} is outside the project files directory and the `dev-containers-search` directories: {}",
+        path.display(),
+        roots.join(", ")
+    )
+}
+
+/// Read the dev container in `dir`, with its parents, which must all be
+/// inside one of `roots`.  `search` holds the directories a `name` parent
+/// is looked for in (`dev-containers-search`).
+pub fn load(
+    dir: &Path,
+    roots: &[PathBuf],
+    search: &[PathBuf],
+) -> Result<DevContainer, Vec<ConfigError>> {
     if !dir.is_dir() {
         return Err(vec![ConfigError::new(
             Some(dir),
@@ -161,7 +222,7 @@ pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
     // Canonical, so it reads well in messages and the universal configuration.
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let env_file = dir.join(DEV_ENV_FILE);
-    let env = resolve(&env_file).and_then(|value| parse(value, &env_file));
+    let env = resolve(&env_file, roots, search).and_then(|value| parse(value, &env_file));
     match env {
         Ok(env) if errors.is_empty() => Ok(DevContainer { dir, env }),
         Ok(_) => Err(errors),
@@ -174,8 +235,12 @@ pub fn load(dir: &Path) -> Result<DevContainer, Vec<ConfigError>> {
 
 /// Read `file` and all its parents, giving the merged values with
 /// `parent-builds` in place of `parents`.
-fn resolve(file: &Path) -> Result<Value, Vec<ConfigError>> {
-    let mut resolver = Resolver::default();
+fn resolve(file: &Path, roots: &[PathBuf], search: &[PathBuf]) -> Result<Value, Vec<ConfigError>> {
+    let mut resolver = Resolver {
+        roots: roots.to_vec(),
+        search: search.to_vec(),
+        ..Resolver::default()
+    };
     let merged = resolver.values(file);
     let mut builds = Vec::new();
     if resolver.errors.is_empty() {
@@ -238,6 +303,10 @@ struct Resolver {
     /// The files being merged, to find cycles.
     visiting: Vec<PathBuf>,
     errors: Vec<ConfigError>,
+    /// Where parents may be.
+    roots: Vec<PathBuf>,
+    /// Where `name` parents are looked for.
+    search: Vec<PathBuf>,
 }
 
 impl Resolver {
@@ -331,15 +400,21 @@ impl Resolver {
         let node = read_limited(file)
             .and_then(|text| parse_yaml(&text))
             .map_err(|m| vec![ConfigError::new(Some(file), "", m)])
-            .and_then(|value| parse_node(value, file));
+            .and_then(|value| parse_node(value, file, &self.roots, &self.search));
         let node = node.map_err(|e| self.errors.extend(e)).ok();
         self.nodes.insert(file.to_path_buf(), node);
     }
 }
 
 /// Check one `dev-env.yaml` as written, separating its parents from its
-/// values.
-fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
+/// values.  Parents must be inside one of `roots`; `name` parents are looked
+/// for in `search`.
+fn parse_node(
+    value: Value,
+    file: &Path,
+    roots: &[PathBuf],
+    search: &[PathBuf],
+) -> Result<Node, Vec<ConfigError>> {
     let error = |key: &str, message: &str| ConfigError::new(Some(file), key, message);
     let tags = tag_errors(&value);
     if !tags.is_empty() {
@@ -370,13 +445,13 @@ fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
                 let Value::Mapping(entry) = item else {
                     errors.push(error(
                         &key,
-                        "must be a mapping with `dir` and `tag`, or `file`",
+                        "must be a mapping with `dir` and `tag`, `name` and `tag`, or `file`",
                     ));
                     continue;
                 };
                 let mut problems = Vec::new();
-                let parent = match (entry.get("dir"), entry.get("file")) {
-                    (Some(_), None) => {
+                let parent = match (entry.get("dir"), entry.get("name"), entry.get("file")) {
+                    (Some(_), None, None) => {
                         let dir = text_field(entry, &key, "dir", false, &mut problems);
                         let tag = text_field(entry, &key, "tag", false, &mut problems);
                         dir.zip(tag).map(|(dir, tag)| Parent::Local {
@@ -385,7 +460,21 @@ fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
                             key: key.clone(),
                         })
                     }
-                    (None, Some(_)) => {
+                    (None, Some(_), None) => {
+                        let name = text_field(entry, &key, "name", false, &mut problems);
+                        let tag = text_field(entry, &key, "tag", false, &mut problems);
+                        let dir = name.and_then(|name| {
+                            find_by_name(&name, search)
+                                .map_err(|m| problems.push((child_key(&key, "name"), m)))
+                                .ok()
+                        });
+                        dir.zip(tag).map(|(dir, tag)| Parent::Local {
+                            dir,
+                            tag,
+                            key: key.clone(),
+                        })
+                    }
+                    (None, None, Some(_)) => {
                         let path = text_field(entry, &key, "file", false, &mut problems);
                         if entry.contains_key("tag") {
                             problems.push((
@@ -398,12 +487,15 @@ fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
                         })
                     }
                     _ => {
-                        problems.push((key.clone(), "needs one of `dir` or `file`".to_string()));
+                        problems.push((
+                            key.clone(),
+                            "needs one of `dir`, `name` or `file`".to_string(),
+                        ));
                         None
                     }
                 };
                 for k in entry.keys() {
-                    if !matches!(k.as_str(), Some("dir" | "tag" | "file")) {
+                    if !matches!(k.as_str(), Some("dir" | "name" | "tag" | "file")) {
                         problems.push((key.clone(), format!("has an unknown key {k:?}")));
                     }
                 }
@@ -417,6 +509,20 @@ fn parse_node(value: Value, file: &Path) -> Result<Node, Vec<ConfigError>> {
                     }
                     Some(Parent::Published { ref file }) if !file.is_file() => {
                         errors.push(error(&key, &format!("{} doesn't exist", file.display())));
+                    }
+                    Some(Parent::Local { ref dir, .. }) if !within(dir, roots) => {
+                        let field = if entry.contains_key("name") {
+                            "name"
+                        } else {
+                            "dir"
+                        };
+                        errors.push(error(&child_key(&key, field), &outside_message(dir, roots)));
+                    }
+                    Some(Parent::Published { ref file }) if !within(file, roots) => {
+                        errors.push(error(
+                            &child_key(&key, "file"),
+                            &outside_message(file, roots),
+                        ));
                     }
                     Some(p) if problems.is_empty() => parents.push(p),
                     _ => {}
@@ -587,6 +693,33 @@ fn is_env_name(name: &str) -> bool {
 }
 
 /// A required, non-empty string; `absolute` requires an absolute container path.
+/// The `name` parent `name`'s directory: the first of `search` holding
+/// `NAME/Dockerfile`.
+fn find_by_name(name: &str, search: &[PathBuf]) -> Result<PathBuf, String> {
+    if !valid_name(name) {
+        return Err(format!(
+            "'{name}' must be a directory name, without '/' or '\\'"
+        ));
+    }
+    if let Some(dir) = search
+        .iter()
+        .map(|dir| dir.join(name))
+        .find(|dir| dir.join(DOCKERFILE).is_file())
+    {
+        return Ok(dir);
+    }
+    if search.is_empty() {
+        return Err(format!(
+            "can't find parent '{name}': the system configuration sets no `scoter` `path-lists` `dev-containers-search`"
+        ));
+    }
+    let searched: Vec<String> = search.iter().map(|d| d.display().to_string()).collect();
+    Err(format!(
+        "can't find parent '{name}' (a directory with {DOCKERFILE}) in: {}",
+        searched.join(", ")
+    ))
+}
+
 fn text_field(
     map: &Mapping,
     parent: &str,
@@ -610,6 +743,7 @@ fn text_field(
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+    use std::fs;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
 
@@ -620,6 +754,11 @@ mod tests {
                 .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
                 .collect()
         })
+    }
+
+    /// The whole temporary directory as the only allowed root.
+    fn roots(dir: &TempDir) -> Vec<PathBuf> {
+        vec![dir.path().to_path_buf()]
     }
 
     fn container(dir: &TempDir, at: &str) -> PathBuf {
@@ -692,14 +831,9 @@ mod tests {
     #[test]
     fn find_by_path() {
         let dir = TempDir::new();
-        let expected = container(&dir, "proj/.scoter/env");
-        let project = dir.path().join("proj/scoter.yaml");
-        let found = find(
-            &ContainerRef::Path("./.scoter/env".to_string()),
-            &project,
-            &[],
-        )
-        .unwrap();
+        let expected = container(&dir, "proj/.surf-scoter.d/env");
+        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
+        let found = find(&ContainerRef::Path("./env".to_string()), &project, &[]).unwrap();
         assert_eq!(found.dir.canonicalize().unwrap(), expected);
         assert_eq!(found.env.sshd_port, Some(22022));
         // An absolute path is used as is.
@@ -735,6 +869,90 @@ mod tests {
     }
 
     #[test]
+    fn find_outside_errors() {
+        let dir = TempDir::new();
+        let project = dir.write("proj/.surf-scoter.d/project.yaml", "");
+        let outside = container(&dir, "proj/env");
+        let errors = find(&ContainerRef::Path("../env".to_string()), &project, &[]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].key.as_deref(),
+            Some("container.dev-container-path")
+        );
+        assert!(
+            errors[0].message.ends_with(&format!(
+                "is outside the project files directory and the `dev-containers-search` directories: {}",
+                dir.path().join("proj/.surf-scoter.d").display()
+            )),
+            "{}",
+            errors[0]
+        );
+        // An absolute path is no different.
+        let abs = ContainerRef::Path(outside.display().to_string());
+        assert!(find(&abs, &project, &[]).is_err());
+        // A search directory makes it allowed.
+        assert_eq!(
+            find(&abs, &project, &[dir.path().join("proj")])
+                .unwrap()
+                .dir,
+            outside
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_symlink_outside_errors() {
+        let dir = TempDir::new();
+        let outside = container(&dir, "elsewhere/env");
+        fs::create_dir_all(dir.path().join("proj/.surf-scoter.d")).unwrap();
+        fs::create_dir_all(dir.path().join("search")).unwrap();
+        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
+        std::os::unix::fs::symlink(&outside, dir.path().join("proj/.surf-scoter.d/env")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("search/env")).unwrap();
+
+        let errors = find(&ContainerRef::Path("env".to_string()), &project, &[]).unwrap_err();
+        assert_eq!(
+            errors[0].key.as_deref(),
+            Some("container.dev-container-path")
+        );
+        let errors = find(
+            &ContainerRef::Name("env".to_string()),
+            &project,
+            &[dir.path().join("search")],
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].key.as_deref(), Some("container.dev-container"));
+    }
+
+    #[test]
+    fn load_parents_outside_errors() {
+        let dir = TempDir::new();
+        container(&dir, "outside/base");
+        container_with(
+            &dir,
+            "proj/.surf-scoter.d/env",
+            concat!(
+                "parents:\n",
+                "  - {dir: ../../../outside/base, tag: base}\n",
+                "  - {file: ../../../outside/base/dev-env.yaml}\n",
+            ),
+        );
+        let roots = [dir.path().join("proj/.surf-scoter.d")];
+        let errors: Vec<String> = load(&dir.path().join("proj/.surf-scoter.d/env"), &roots, &[])
+            .unwrap_err()
+            .into_iter()
+            .map(|e| e.key.unwrap_or_default())
+            .collect();
+        assert_eq!(errors, ["parents[0].dir", "parents[1].file"]);
+        // With the other directory allowed, it loads.
+        let roots = [
+            dir.path().join("proj/.surf-scoter.d"),
+            dir.path().join("outside"),
+        ];
+        assert!(load(&dir.path().join("proj/.surf-scoter.d/env"), &roots, &[]).is_ok());
+    }
+
+    #[test]
     fn find_by_name_errors() {
         let dir = TempDir::new();
         let project = Path::new("/p/scoter.yaml");
@@ -757,12 +975,12 @@ mod tests {
     #[test]
     fn load_errors() {
         let dir = TempDir::new();
-        let missing = load(&dir.path().join("nothing")).unwrap_err();
+        let missing = load(&dir.path().join("nothing"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(missing.len(), 1);
         assert!(missing[0].message.contains("doesn't exist"));
 
         dir.write("bad/dev-env.yaml", "user: ubuntu\n");
-        let errors = load(&dir.path().join("bad")).unwrap_err();
+        let errors = load(&dir.path().join("bad"), &roots(&dir), &[]).unwrap_err();
         let messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
         // No Dockerfile, plus the three missing fields.
         assert_eq!(messages.len(), 4, "{messages:?}");
@@ -770,7 +988,7 @@ mod tests {
 
         dir.write("big/Dockerfile", "");
         dir.write("big/dev-env.yaml", &"#".repeat(3 * 1024 * 1024));
-        let errors = load(&dir.path().join("big")).unwrap_err();
+        let errors = load(&dir.path().join("big"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors[0].message, "the file is larger than the 2 MB limit");
     }
     #[test]
@@ -851,7 +1069,9 @@ mod tests {
             "env",
             "parents:\n  - {dir: ../base, tag: 'base:latest'}\n",
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir), &[])
+            .unwrap()
+            .env;
         assert_eq!(env.user, "ubuntu");
         assert_eq!(env.sshd_port, Some(22022));
         assert_eq!(env.parent_builds, [build(&base, "base:latest")]);
@@ -884,7 +1104,9 @@ mod tests {
                 "extra: {b: 3}\n",
             ),
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir), &[])
+            .unwrap()
+            .env;
         assert!(env.parent_builds.is_empty());
         // Nearest wins; mappings merge key by key.
         assert_eq!(env.user, "root");
@@ -912,13 +1134,15 @@ mod tests {
             "env",
             &format!("parents: [{{dir: ../ci, tag: 'ci:latest'}}]\n{DEV_ENV}"),
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir), &[])
+            .unwrap()
+            .env;
         assert_eq!(env.parent_builds, [build(&ci, "ci:latest")]);
         assert_eq!(env.user, "ubuntu");
 
         // It adds no values, so this file must give them all.
         container_with(&dir, "bare", "parents: [{dir: ../ci, tag: ci}]\n");
-        let errors = load(&dir.path().join("bare")).unwrap_err();
+        let errors = load(&dir.path().join("bare"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 4, "{errors:?}");
     }
 
@@ -942,7 +1166,9 @@ mod tests {
             "env",
             "parents:\n  - {dir: ../a, tag: a}\n  - {dir: ../b, tag: b}\n",
         );
-        let env = load(&dir.path().join("env")).unwrap().env;
+        let env = load(&dir.path().join("env"), &roots(&dir), &[])
+            .unwrap()
+            .env;
         assert_eq!(
             env.parent_builds,
             [build(&root, "root"), build(&a, "a"), build(&b, "b")]
@@ -956,7 +1182,7 @@ mod tests {
         let dir = TempDir::new();
         container_with(&dir, "x", "parents: [{dir: ../y, tag: y}]\n");
         container_with(&dir, "y", "parents: [{dir: ../x, tag: x}]\n");
-        let errors = load(&dir.path().join("x")).unwrap_err();
+        let errors = load(&dir.path().join("x"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
             errors[0].message.starts_with("is its own parent: "),
@@ -971,7 +1197,7 @@ mod tests {
             "two-tags",
             "parents: [{dir: ../a, tag: a}, {dir: ../root, tag: two}]\n",
         );
-        let errors = load(&dir.path().join("two-tags")).unwrap_err();
+        let errors = load(&dir.path().join("two-tags"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].key.as_deref(), Some("parents[1].tag"));
         assert!(
@@ -995,7 +1221,7 @@ mod tests {
                 "  - text\n",
             ),
         );
-        let errors: Vec<String> = load(&dir.path().join("bad"))
+        let errors: Vec<String> = load(&dir.path().join("bad"), &roots(&dir), &[])
             .unwrap_err()
             .into_iter()
             .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
@@ -1011,17 +1237,142 @@ mod tests {
                 ),
                 format!("parents[1]: {} doesn't exist", at("missing.yaml").display()),
                 "parents[2].tag: is required".to_string(),
-                "parents[3]: needs one of `dir` or `file`".to_string(),
+                "parents[3]: needs one of `dir`, `name` or `file`".to_string(),
                 "parents[4].tag: goes with `dir`; a `file` parent isn't built".to_string(),
                 "parents[4]: has an unknown key String(\"other\")".to_string(),
-                "parents[5]: must be a mapping with `dir` and `tag`, or `file`".to_string(),
+                "parents[5]: must be a mapping with `dir` and `tag`, `name` and `tag`, or `file`"
+                    .to_string(),
             ]
         );
 
         // The merged result must still be whole.
         container_with(&dir, "partial", "user: u\n");
         container_with(&dir, "child", "parents: [{dir: ../partial, tag: p}]\n");
-        let errors = load(&dir.path().join("child")).unwrap_err();
+        let errors = load(&dir.path().join("child"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");
+    }
+
+    // ---- `name` parents ----
+
+    #[test]
+    fn load_name_parent_from_the_second_search_directory() {
+        let dir = TempDir::new();
+        // Not a container: no Dockerfile.
+        dir.write("first/base/dev-env.yaml", DEV_ENV);
+        let base = container_with(&dir, "second/base", "user: from-base\n");
+        container_with(&dir, "third/base", "user: from-third\n");
+        let child = container_with(
+            &dir,
+            "proj/env",
+            "parents: [{name: base, tag: 'base:1'}]\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 1\n",
+        );
+        let search = [
+            dir.path().join("missing"),
+            dir.path().join("first"),
+            dir.path().join("second"),
+            dir.path().join("third"),
+        ];
+        let env = load(&child, &roots(&dir), &search).unwrap().env;
+        assert_eq!(env.user, "from-base");
+        assert_eq!(env.parent_builds, [build(&base, "base:1")]);
+    }
+
+    #[test]
+    fn load_name_parent_errors() {
+        let dir = TempDir::new();
+        let child = container_with(
+            &dir,
+            "proj/env",
+            "parents:\n  - {name: base, tag: b}\n  - {name: ../up, tag: u}\n  - {name: base}\n  - {name: base, dir: ., tag: t}\n",
+        );
+        let search = [dir.path().join("a"), dir.path().join("b")];
+        let errors: Vec<String> = load(&child, &roots(&dir), &search)
+            .unwrap_err()
+            .iter()
+            .map(|e| format!("{}: {}", e.key.as_deref().unwrap_or(""), e.message))
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                format!(
+                    "parents[0].name: can't find parent 'base' (a directory with Dockerfile) in: {}, {}",
+                    search[0].display(),
+                    search[1].display()
+                ),
+                "parents[1].name: '../up' must be a directory name, without '/' or '\\'"
+                    .to_string(),
+                "parents[2].tag: is required".to_string(),
+                format!(
+                    "parents[2].name: can't find parent 'base' (a directory with Dockerfile) in: {}, {}",
+                    search[0].display(),
+                    search[1].display()
+                ),
+                "parents[3]: needs one of `dir`, `name` or `file`".to_string(),
+            ]
+        );
+        let errors = load(&child, &roots(&dir), &[]).unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "can't find parent 'base': the system configuration sets no `scoter` `path-lists` `dev-containers-search`"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_name_parent_through_a_symlink_outside() {
+        let dir = TempDir::new();
+        let outside = container(&dir, "elsewhere/base");
+        fs::create_dir_all(dir.path().join("search")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("search/base")).unwrap();
+        let child = container_with(&dir, "proj/env", "parents: [{name: base, tag: b}]\n");
+        let roots = [dir.path().join("proj"), dir.path().join("search")];
+        let errors = load(&child, &roots, &[dir.path().join("search")]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].key.as_deref(), Some("parents[0].name"));
+        assert!(
+            errors[0]
+                .message
+                .contains("is outside the project files directory"),
+            "{}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn load_name_parent_with_dir_and_file_parents_in_build_order() {
+        let dir = TempDir::new();
+        let low = container_with(&dir, "search/low", "sshd-port: 1\n");
+        let named = container_with(
+            &dir,
+            "search/named",
+            "parents: [{dir: ../low, tag: low}]\nuser: named\n",
+        );
+        let local = container_with(&dir, "proj/local", "user: local\n");
+        dir.write("proj/published.yaml", "sshd-port: 3\n");
+        let child = container_with(
+            &dir,
+            "proj/env",
+            concat!(
+                "parents:\n",
+                "  - {name: named, tag: named}\n",
+                "  - {dir: ../local, tag: local}\n",
+                "  - {file: ../published.yaml}\n",
+                "mounts: {workspace: /w, setup: /s}\nbroker-bin: /b\n",
+            ),
+        );
+        let env = load(&child, &roots(&dir), &[dir.path().join("search")])
+            .unwrap()
+            .env;
+        assert_eq!(
+            env.parent_builds,
+            [
+                build(&low, "low"),
+                build(&named, "named"),
+                build(&local, "local")
+            ]
+        );
+        // Later parents win: `local`'s user, the published file's port.
+        assert_eq!(env.user, "local");
+        assert_eq!(env.sshd_port, Some(3));
     }
 }

@@ -95,10 +95,11 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 `git fetch` from the workspace runs nothing, but what it brings is code the container wrote.  Changes that are easy to miss in review:
 
 * build and test scripts, CI workflows, package manifests with install hooks;
-* `.surf-scoter.yaml`, `.surf-scoter/allowed-domains.txt` and `dev-env.yaml`, which widen what the *next* environment may do;
+* anything in `.surf-scoter.d/` (the project file, and the dev containers' `Dockerfile`, `dev-env.yaml` and build files, and its `egress` rules), which widen what the *next* environment may do;
 * `.vscode/`, `.idea/` and other settings tools act on when they open a folder;
 * symlinks, which point at host files once checked out on the host;
 * `.gitmodules` entries pointing at attacker-controlled repositories.
+* when the project is Surf Scoter itself, its own scripts, `setup.yaml`, containers and host programs, which run on the host if the tools run from that checkout (see [Working on Surf Scoter With Surf Scoter](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
 
 **Red team:** get a change from each category through a realistic review.
 
@@ -109,7 +110,7 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 **Severity:** High.  **Status:** Mitigated.
 **Where:** `_setup_workspace` and `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); the mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
 
-The workspace is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The allowed domain list is copied from the project, not the workspace.  Nothing else from the host is mounted.
+The workspace is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts come from the project, not the workspace.  Nothing else from the host is mounted.
 
 **Red team:** look for anything from the host that reaches the container: project files, environment, mounts added through settings, and anything that shares storage with the project, as in FILE-2.
 
@@ -120,7 +121,7 @@ The workspace is a `git clone`, so it gets no untracked files, ignored files, ho
 **Severity:** Medium (shared computers).  **Status:** Open.
 **Where:** `run_env_runner` in [`main_run.py`](../../scripts/main_run.py), which calls `touch(..., 0o666)`.
 
-`scoter run` sets `authorized_keys` and the SSH host private key to mode `0666`.  When the project has no allowed domain list, it also creates `allowed-domains.txt` with mode `0666`, and keeps whatever an earlier run left in it.  Another local account could read the host key, add a key to `authorized_keys` before the container starts, or add domains to the allowlist for the next run.
+`scoter run` sets `authorized_keys` and the SSH host private key to mode `0666`.  Another local account could read the host key, or add a key to `authorized_keys` before the container starts.  (The allowed domain list it used to create with mode `0666` is gone: the gateway's configuration is made from the egress rules on each run, mode `0644`, in the resources directory.)
 
 **Red team:** as another local account, change each file between `scoter run` writing it and the container reading it, and for the allowlist, between runs.
 

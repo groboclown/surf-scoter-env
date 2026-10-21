@@ -2,28 +2,32 @@
 //! gathered from all its sources, as JSON.  See
 //! `docs/contributors/universal-configuration-file.md`.
 //!
-//! Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR]
+//! Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
 //!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
-//!                      [--user-setup SETUP.yaml]... [--distribution-dir DIR]
+//!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
+//!                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
+//!                      [--previous-review REVIEW.yaml]
 //!                      [--output FILE]
 //!
-//! `--user-setup` may be given more than once, say to add a project's own
-//! setup to the user's; a later one wins.  Setup files are only read from a
-//! project when given this way: they can run any program, so the tools never
-//! look for them there.
+//! The setup files are the user's (found through `SURF_SCOTER_HOME` or
+//! `~/.config`) and the distribution directory's.  They can run any program,
+//! so none is ever read from a project.
 //!
 //! Without `--output`, the JSON goes to stdout.  Problems in the
 //! configuration go to stderr, all of them, and nothing is written.
 //!
+//! `--project-dir` gives the project: the directory holding the project
+//! files directory, with the project file in it (both named by the setup).
+//!
 //! `--universal` starts from a universal configuration file made earlier:
 //! its system setup is used without reading the setup files again, and its
-//! project file unless `--config` gives another.  `--no-setup-search` skips
+//! project unless `--project-dir` gives another.  `--no-setup-search` skips
 //! looking for the user's setup file and the install directory's.  So a
-//! first run can find the setup, and a second can add the project file:
+//! first run can find the setup, and a second can add the project:
 //!
 //!     gen-scoter-uc --output first.json
-//!     gen-scoter-uc --universal first.json --no-setup-search --config PROJECT.yaml
+//!     gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR
 
 use std::ffi::OsString;
 use std::fs;
@@ -37,9 +41,11 @@ const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: gen-scoter-uc [--config PROJECT.yaml] [--project-dir DIR] \
-                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] [--user-setup SETUP.yaml]... \
+const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] \
+                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
+                     [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml] \
+                     [--previous-review REVIEW.yaml] \
                      [--output FILE]";
 
 fn main() {
@@ -54,21 +60,32 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         Ok(None) => {
             println!("{USAGE}");
             println!("Writes the whole Surf Scoter configuration as JSON.");
-            println!("--config gives the project configuration file, if any.");
             println!(
-                "--project-dir gives the project directory, in place of the project file's directory."
+                "--project-dir gives the project, if any: the directory holding the project files directory, with the project file in it."
+            );
+            println!(
+                "--vcs-root gives the root of the repository holding the project, which must hold the project directory."
             );
             println!(
                 "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
             );
             println!(
-                "--user-setup gives a system setup file to read first, and may be repeated (a later one wins); --distribution-dir, where Surf Scoter is installed."
+                "--distribution-dir gives where Surf Scoter is installed; the user's setup file comes from SURF_SCOTER_HOME or ~/.config."
             );
             println!(
                 "--universal starts from a universal configuration file made earlier, without reading its setup files again."
             );
             println!(
                 "--no-setup-search skips looking for the user's and the install directory's setup files."
+            );
+            println!(
+                "--accepted-settings gives the user's accepted settings for the project, from the verified store; host-brokered is built from them."
+            );
+            println!(
+                "--review gives the user's review file for the project; the file's `review` holds what it says, and the accepted settings it gives."
+            );
+            println!(
+                "--previous-review gives an earlier acceptance's review file, which a new review starts from; the file's `previous-review` holds its data as written.  It isn't checked against the run, and nothing is accepted from it."
             );
             println!("--output gives the file to write; otherwise, the JSON goes to stdout.");
             return EXIT_OK;
@@ -126,13 +143,15 @@ struct Cli {
 /// Parse the arguments.  `Ok(None)` means help was requested.
 /// Options take a value as `--name VALUE` or `--name=VALUE`.
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
-    let mut config: Option<OsString> = None;
     let mut project_dir: Option<OsString> = None;
+    let mut vcs_root: Option<OsString> = None;
     let mut dev_container_workspace_dir: Option<OsString> = None;
     let mut dev_container_settings_dir: Option<OsString> = None;
-    let mut user_setup: Vec<PathBuf> = Vec::new();
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
+    let mut accepted_settings: Option<OsString> = None;
+    let mut review: Option<OsString> = None;
+    let mut previous_review: Option<OsString> = None;
     let mut no_setup_search = false;
     let mut output: Option<OsString> = None;
     let mut args = args.into_iter();
@@ -154,24 +173,16 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             Some((name, value)) => (name, Some(OsString::from(value))),
             None => (s, None),
         };
-        if name == "--user-setup" {
-            let value = match inline {
-                Some(value) => value,
-                None => args.next().ok_or_else(|| format!("{name} needs a value"))?,
-            };
-            if value.is_empty() {
-                return Err(format!("{name} needs a value"));
-            }
-            user_setup.push(PathBuf::from(value));
-            continue;
-        }
         let slot = match name {
-            "--config" => &mut config,
             "--project-dir" => &mut project_dir,
+            "--vcs-root" => &mut vcs_root,
             "--dev-container-workspace-dir" => &mut dev_container_workspace_dir,
             "--dev-container-settings-dir" => &mut dev_container_settings_dir,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
+            "--accepted-settings" => &mut accepted_settings,
+            "--review" => &mut review,
+            "--previous-review" => &mut previous_review,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -189,14 +200,16 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     }
     Ok(Some(Cli {
         options: LoadOptions {
-            project: config.map(PathBuf::from),
             project_dir: project_dir.map(PathBuf::from),
+            vcs_root: vcs_root.map(PathBuf::from),
             dev_container_workspace_dir: dev_container_workspace_dir.map(PathBuf::from),
             dev_container_settings_dir: dev_container_settings_dir.map(PathBuf::from),
-            user_setup,
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
             no_setup_search,
+            accepted_settings: accepted_settings.map(PathBuf::from),
+            review: review.map(PathBuf::from),
+            previous_review: previous_review.map(PathBuf::from),
         },
         output: output.map(PathBuf::from),
     }))
@@ -230,33 +243,35 @@ mod tests {
             })),
         );
         let parsed = parse_args(os_args(&[
-            "--config",
-            "p.yaml",
             "--project-dir=proj",
+            "--vcs-root",
+            "/repo",
             "--dev-container-workspace-dir",
             "/ws",
             "--dev-container-settings-dir=settings",
-            "--user-setup=s.yaml",
-            "--user-setup",
-            "project-setup.yaml",
             "--distribution-dir",
             "/opt/scoter",
             "--universal=first.json",
             "--no-setup-search",
+            "--accepted-settings=/v/accepted.json",
+            "--previous-review",
+            "/v/review.yaml",
             "--output=out.json",
         ]));
         assert_eq!(
             parsed,
             Ok(Some(Cli {
                 options: LoadOptions {
-                    project: Some(PathBuf::from("p.yaml")),
                     project_dir: Some(PathBuf::from("proj")),
+                    vcs_root: Some(PathBuf::from("/repo")),
                     dev_container_workspace_dir: Some(PathBuf::from("/ws")),
                     dev_container_settings_dir: Some(PathBuf::from("settings")),
-                    user_setup: vec![PathBuf::from("s.yaml"), PathBuf::from("project-setup.yaml")],
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
+                    accepted_settings: Some(PathBuf::from("/v/accepted.json")),
+                    review: None,
+                    previous_review: Some(PathBuf::from("/v/review.yaml")),
                 },
                 output: Some(PathBuf::from("out.json")),
             })),
@@ -266,14 +281,19 @@ mod tests {
     #[test]
     fn args_help() {
         assert_eq!(parse_args(os_args(&["-h"])), Ok(None));
-        assert_eq!(parse_args(os_args(&["--config", "x", "--help"])), Ok(None));
+        assert_eq!(
+            parse_args(os_args(&["--project-dir", "x", "--help"])),
+            Ok(None)
+        );
     }
 
     #[test]
     fn args_errors() {
         let err = |args: &[&str]| parse_args(os_args(args)).unwrap_err();
         assert_eq!(err(&["project.yaml"]), "unexpected argument 'project.yaml'");
-        assert_eq!(err(&["--config"]), "--config needs a value");
+        assert_eq!(err(&["--project-dir"]), "--project-dir needs a value");
+        // The project is given by its directory.
+        assert_eq!(err(&["--config", "p.yaml"]), "unknown option '--config'");
         assert_eq!(err(&["--output="]), "--output needs a value");
         assert_eq!(
             err(&["--output", "a", "--output", "b"]),
@@ -285,8 +305,11 @@ mod tests {
             "--no-setup-search given more than once"
         );
         assert_eq!(err(&["--universal"]), "--universal needs a value");
-        assert_eq!(err(&["--user-setup"]), "--user-setup needs a value");
-        assert_eq!(err(&["--user-setup="]), "--user-setup needs a value");
+        // Setup files only come from the user's setup and the distribution.
+        assert_eq!(
+            err(&["--user-setup", "s.yaml"]),
+            "unknown option '--user-setup'"
+        );
     }
 
     #[test]
@@ -294,7 +317,7 @@ mod tests {
         assert_eq!(run(os_args(&["--help"])), EXIT_OK);
         assert_eq!(run(os_args(&["extra"])), EXIT_USAGE);
         assert_eq!(
-            run(os_args(&["--config", "/nonexistent/scoter.yaml"])),
+            run(os_args(&["--project-dir", "/nonexistent/project"])),
             EXIT_FAILURE
         );
     }
@@ -302,26 +325,32 @@ mod tests {
     #[test]
     fn run_writes_output_file() {
         let dir = temp_dir("output");
-        fs::create_dir_all(dir.join("env")).unwrap();
-        fs::write(dir.join("env/Dockerfile"), "FROM scratch\n").unwrap();
+        fs::create_dir_all(dir.join(".surf-scoter.d/env")).unwrap();
+        fs::write(dir.join(".surf-scoter.d/env/Dockerfile"), "FROM scratch\n").unwrap();
         fs::write(
-            dir.join("env/dev-env.yaml"),
+            dir.join(".surf-scoter.d/env/dev-env.yaml"),
             "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
         )
         .unwrap();
         fs::write(
-            dir.join("scoter.yaml"),
+            dir.join(".surf-scoter.d/project.yaml"),
             "container:\n  dev-container-path: env\n",
         )
         .unwrap();
-        fs::write(dir.join("setup.yaml"), "ssh:\n  paths:\n    home: ~/.ssh\n").unwrap();
+        fs::write(
+            dir.join("setup.yaml"),
+            "ssh:\n  paths:\n    home: ~/.ssh\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+        )
+        .unwrap();
         let out = dir.join("universal.json");
         let path = |p: &Path| p.display().to_string();
         let code = run(os_args(&[
-            "--config",
-            &path(&dir.join("scoter.yaml")),
-            "--user-setup",
-            &path(&dir.join("setup.yaml")),
+            "--project-dir",
+            &path(&dir),
+            // The setup file as the distribution's, and not the user's own.
+            "--distribution-dir",
+            &path(&dir),
+            "--no-setup-search",
             "--output",
             &path(&out),
         ]));
@@ -398,9 +427,15 @@ mod tests {
     fn run_cannot_write() {
         let dir = temp_dir("unwritable");
         fs::write(dir.join("setup.yaml"), "").unwrap();
-        let setup = dir.join("setup.yaml").display().to_string();
+        let dist = dir.display().to_string();
         let out = dir.join("missing/dir/out.json").display().to_string();
-        let code = run(os_args(&["--user-setup", &setup, "--output", &out]));
+        let code = run(os_args(&[
+            "--distribution-dir",
+            &dist,
+            "--no-setup-search",
+            "--output",
+            &out,
+        ]));
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(code, EXIT_FAILURE);
     }

@@ -11,6 +11,8 @@ from .err import ConfigErr
 
 # The few hard-coded items.
 VCS_SECTION_SUFFIX = "-vcs"
+# The SUC's record of the project file, as written.
+CURRENT_PROJECT_SETUP = "current-project-setup"
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
@@ -75,21 +77,34 @@ class UserConfig:
         return Path(self.__req_str("resolved", section, "paths", key))
 
     def optional_path(self, section: str, key: str) -> Path | None:
-        """Load a path that might exist."""
-        loc = self.__opt_str("resolved", section, "paths", key)
-        if loc:
-            return Path(loc)
-        return None
+        """A section's `paths` location; None when it isn't set, or is null."""
+        loc = self.__find(jdata.find_str, "resolved", section, "paths", key)
+        return Path(loc) if loc else None
 
     def require_value(self, section: str, key: str) -> str:
         """Load a value (as a string) that might exist."""
         return self.__req_str("resolved", section, "values", key)
 
     def active_location(self, name: str) -> Path | None:
-        """Read an active location path."""
-        val = self.__opt_str("active-config-locations", name)
+        """Read an active location path; None when it isn't set.
+
+        The generator writes every location, with null for the ones not set.
+        """
+        locations = self._config.get("active-config-locations")
+        if locations is None:
+            return None
+        if not isinstance(locations, dict):
+            raise ConfigErr(
+                "bad universal configuration file: active-config-locations: expected a mapping"
+            )
+        val = locations.get(name)
         if val is None:
             return None
+        if not isinstance(val, str):
+            raise ConfigErr(
+                f"bad universal configuration file: active-config-locations / {name}: "
+                f"expected string, found {type(val)}"
+            )
         return Path(val)
 
     def require_active_location(self, name: str) -> Path:
@@ -181,18 +196,166 @@ class UserConfig:
         return ret
 
     def project_str(self, *key: jdata.JsonPathPart) -> str | None:
-        """Get the project key."""
-        val = self.__opt_str("project", *key)
-        if val is None:
-            return None
-        return str(val)
+        """Get a key of the project file, as written (the SUC's `current-project-setup`)."""
+        return self.__find(jdata.find_str, CURRENT_PROJECT_SETUP, *key)
 
     def project_bridge_commands(self) -> list[str]:
-        """Get the list of bridge commands."""
+        """The names of the commands the host runs for the container (`host-brokered`), once each."""
         ret: list[str] = []
-        for path in self.__req_list_keys("project", "commands"):
-            ret.append(self.__req_str(*path, "command"))
+        for path in self.__req_list_keys("host-brokered"):
+            name = self.__req_str(*path, "command")
+            if name not in ret:
+                ret.append(name)
         return ret
+
+    def setup_programs(self) -> list[tuple[str, str, str, str]]:
+        """Every setup file's `programs` entries, as written.
+
+        Each is (file, section, key, value), highest priority file first.
+        """
+        ret: list[tuple[str, str, str, str]] = []
+        for file_path in self.__req_list_keys("setup", "files"):
+            file = self.__req_str(*file_path, "file")
+            for section_path in self.__req_dict_keys(*file_path, "sections"):
+                section = str(section_path[-1])
+                for key_path in self.__req_dict_keys(*section_path, "programs"):
+                    value = self.__req_str(*key_path)
+                    ret.append((file, section, str(key_path[-1]), value))
+        return ret
+
+    def host_command_checks(self) -> dict[str, jdata.DictJsonData]:
+        """The setup's `host-commands` checks, by `section:key`, as the generator combined them."""
+        # A universal file from before the checks has none.
+        return {
+            str(path[-1]): self.__req_dict(*path)
+            for path in self.__find(jdata.find_dict_keys, "host-command-checks", "checks")
+        }
+
+    def host_command_notices(self) -> list[str]:
+        """What the generator noticed about the setup's `host-commands` checks, as text.
+
+        Such as a check a setup file removes or replaces, which then misses what
+        the lower priority file adds to it later, or an override that does nothing.
+        Each notice in the file also has an `id`, `parameters` (for translating it)
+        and `sources` (the setup files it's about); this gives its `message`.
+        """
+        return [
+            self.__req_str(*path, "message")
+            for path in self.__find(jdata.find_list_keys, "host-command-checks", "notices")
+        ]
+
+    def project_setup(self) -> jdata.DictJsonData | None:
+        """The project file, as written (`current-project-setup`); None without a project."""
+        return self.__find(jdata.find_dict, CURRENT_PROJECT_SETUP)
+
+    def project_commands(self) -> list[jdata.DictJsonData]:
+        """The project file's `commands`, as written."""
+        return [
+            self.__req_dict(*path)
+            for path in self.__find(jdata.find_list_keys, CURRENT_PROJECT_SETUP, "commands")
+        ]
+
+    def project_env_allow(self) -> list[str]:
+        """The project file's top-level `env` `allow` patterns, as written."""
+        return self.__find(jdata.find_str_list, CURRENT_PROJECT_SETUP, "env", "allow")
+
+    def dev_container(self) -> jdata.DictJsonData | None:
+        """The dev container's `dev-env.yaml`, merged with its parents; None without a project."""
+        return self.__find(jdata.find_dict, "dev-container")
+
+    def has_dev_container(self) -> bool:
+        """Whether the file has the dev container's `dev-env.yaml` (it does with a project)."""
+        return self.dev_container() is not None
+
+    def egress_rules(self) -> list[jdata.DictJsonData]:
+        """The accepted egress rules (`egress.rules`); none without accepted settings."""
+        return [self.__req_dict(*key) for key in self.__find(jdata.find_list_keys, "egress", "rules")]
+
+    def project_egress(self) -> list[jdata.DictJsonData]:
+        """The project file's own egress rules: only a suggestion, for the review."""
+        return [
+            self.__req_dict(*key)
+            for key in self.__find(jdata.find_list_keys, CURRENT_PROJECT_SETUP, "egress")
+        ]
+
+    def host_command_map(self) -> dict[str, str | None]:
+        """Each command name the setup's checks map, with its program (None when it isn't there)."""
+        return {
+            str(path[-1]): self.__find(jdata.find_str, *path, "program")
+            for path in self.__find(jdata.find_dict_keys, "host-command-checks", "command-map")
+        }
+
+    def value_list(self, section: str, key: str) -> list[str]:
+        """A section's `value-lists` list; empty when it isn't set."""
+        return self.__find(jdata.find_str_list, "resolved", section, "value-lists", key)
+
+    def optional_path_list(self, section: str, key: str) -> list[Path]:
+        """A section's `path-lists` list; empty when it isn't set, or has no value."""
+        return [
+            Path(p) for p in self.__find(jdata.find_str_list, "resolved", section, "path-lists", key)
+        ]
+
+    def optional_value(self, section: str, key: str) -> str | None:
+        """A section's `values` text; None when it isn't set, or is null."""
+        return self.__find(jdata.find_str, "resolved", section, "values", key)
+
+    def optional_int_value(self, section: str, key: str) -> int | None:
+        """A section's `values` integer; None when it isn't set, or is null."""
+        return self.__find(jdata.find_int, "resolved", section, "values", key)
+
+    def has_section(self, section: str) -> bool:
+        """Whether the setup has the section."""
+        return self.__find(jdata.find_dict, "resolved", section) is not None
+
+    def accepted_settings_file(self) -> Path | None:
+        """The accepted settings file the generator loaded; None without accepted settings."""
+        file = self.__find(jdata.find_str, "accepted-settings", "file")
+        return None if file is None else Path(file)
+
+    def accepted_container_name(self) -> str | None:
+        """The user's own container the accepted settings use; None for the project's."""
+        choice = self.__find(jdata.find, "accepted-settings", "contents", "dev-container", "use")
+        if isinstance(choice, dict):
+            return jdata.req_str(choice, "name")
+        return None
+
+    def accepted_images(self) -> dict[str, str]:
+        """Each image the accepted settings build from instead of the one the project names."""
+        images = self.__find(jdata.find_dict, "accepted-settings", "contents", "dev-container", "images")
+        return {key: jdata.req_str(images, key) for key in images} if images else {}
+
+    def review_result(self) -> str | None:
+        """The review file's `result` (`accept` or `reject`); None without a review."""
+        return self.__find(jdata.find_str, "review", "result")
+
+    def review_accepted(self) -> jdata.DictJsonData | None:
+        """The accepted settings the review file gives; None when rejected, or without one."""
+        return self.__find(jdata.find_dict, "review", "accepted")
+
+    def raw(self, *path: jdata.JsonPathPart) -> jdata.JsonData:
+        """The file's data at the path, as it is; None when it's missing or null.
+
+        For data kept or compared whole, such as the setup values an acceptance
+        records; read values the tools use through the typed accessors.
+        """
+        return self.__find(jdata.find, *path)
+
+    def resolved_program(self, section: str, key: str) -> str | None:
+        """The program found for a `programs` entry; None if it wasn't found.
+
+        The generator writes null for a program it didn't find.
+        """
+        val: jdata.JsonData = self._config
+        for part in ("resolved", section, "programs", key):
+            if not isinstance(val, dict):
+                return None
+            val = val.get(part)
+        if val is None or isinstance(val, str):
+            return val
+        raise ConfigErr(
+            f"bad universal configuration file: resolved / {section} / programs / {key}: "
+            f"expected string, found {type(val)}"
+        )
 
     def save(self, outfile: str | Path) -> None:
         """Save the current configuration to the given file."""
@@ -217,6 +380,12 @@ class UserConfig:
 
     def __opt_dict(self, *path: jdata.JsonPathPart) -> jdata.DictJsonData | None:
         return UserConfig.__wrap(lambda: jdata.opt_dict(self._config, *path))
+
+    def __find[T](
+        self, lookup: Callable[..., T], *path: jdata.JsonPathPart,
+    ) -> T:
+        """One of jdata's `find_*` lookups (missing or null is fine), as a ConfigErr if it fails."""
+        return UserConfig.__wrap(lambda: lookup(self._config, *path))
 
     def __req_dict_keys(self, *path: jdata.JsonPathPart) -> Sequence[jdata.JsonPath]:
         return UserConfig.__wrap(lambda: jdata.opt_dict_keys(self._config, *path))

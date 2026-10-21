@@ -1,0 +1,18 @@
+
+vcs: git
+
+container:
+  dev-container-path: dev-env-container
+
+# Where the dev container may connect, through the network gateway.
+egress:
+  # Crate access, for the Rust builds.
+  - {host: crates.io, protocol: tls}
+  - {host: index.crates.io, protocol: tls}
+  - {host: static.crates.io, protocol: tls}
+  # Python packages, for script tooling.
+  - {host: pypi.org, protocol: tls}
+  - {host: files.pythonhosted.org, protocol: tls}
+  # Intentionally left out: VS Code download locations.  These should come from
+  # VS Code by the "Local Server Download" and "Download Extensions Locally"
+  # settings.

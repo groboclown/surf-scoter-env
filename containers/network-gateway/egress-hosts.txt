@@ -1,0 +1,3 @@
+# The hosts the dev container may reach, on TCP 443: one pattern per line, for
+# Squid's `dstdom_regex`.  Surf Scoter mounts the list it makes from the
+# project's egress rules over this one, which allows nothing.

@@ -331,8 +331,8 @@ fn host_value(name: &str, system: &SystemConfig) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::system::{self, Env};
-    use crate::config::testing::TempDir;
+    use crate::config::system::Env;
+    use crate::config::testing::{TempDir, load_setup};
     use std::collections::HashMap;
 
     fn system_with(setup: &str, vars: &[(&str, &str)]) -> SystemConfig {
@@ -345,7 +345,7 @@ mod tests {
                 .collect::<HashMap<_, _>>(),
             ..Env::default()
         };
-        system::load(Some(&file), None, None, env).unwrap()
+        load_setup(&file, None, None, env).unwrap()
     }
 
     fn rules(yaml: &str) -> EnvRules {
@@ -518,7 +518,7 @@ mod tests {
             path: Some(dir.path().join("bin").into_os_string()),
             ..Env::default()
         };
-        let system = system::load(Some(&file), None, None, env).unwrap();
+        let system = load_setup(&file, None, None, env).unwrap();
         let plan = EnvPlan::resolve(&rules("set:\n  T: ${t:exec}\n"), &system, "env").unwrap();
         assert_eq!(plan.set["T"], tool.display().to_string());
         let errors = EnvPlan::resolve(&rules("set:\n  G: ${t:gone}\n"), &system, "env");

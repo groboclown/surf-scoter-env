@@ -10,9 +10,9 @@ RUN set -x \
 # Setup the squid configuration file.
 COPY squid.conf /etc/squid/squid.conf
 
-# The default allow list.
-# Squid will read the list from /user-space/allowed-domains.txt, which should be mounted.
-COPY allowed-domains.txt /etc/squid/allowed-domains.txt
+# The allowed hosts.  Surf Scoter mounts its own list over this one, which
+# allows nothing; it's here so the configuration parses.
+COPY egress-hosts.txt /user-space/egress-hosts.txt
 # The block list isn't overwritable.
 COPY blocked-destinations.txt /etc/squid/blocked-destinations.txt
 

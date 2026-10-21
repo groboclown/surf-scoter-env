@@ -2,7 +2,7 @@
 
 The Surf Scoter main script works a bit like other sub-command tools, where it hands sub-command processing to specially constructed child programs, where they must conform to certain standards.
 
-1. The sub-commands run as Python scripts, using the same Python executable that launched the Surf Scoter main script.
+1. The sub-commands run as Python scripts, with the interpreter the system setup names: the `python` section's `runs: sub-command` (by default, `${exec} -E -s {x:script}`, with `programs: exec` normally `python3`).  That needn't be the interpreter that runs the main script; it can be a virtual environment's, if a sub-command needs installed libraries.  `-E` and `-s` mean the scripts don't see `PYTHON*` environment variables or the user's site-packages, so import only from the standard library and the `bin` directory (such as `surf_scoter_lib`), unless the interpreter is a virtual environment's.
 2. The main script searches for the main script using this algorithm:
     1. convert the sub-command name to the filename:
         1. convert `-` characters to `_`,

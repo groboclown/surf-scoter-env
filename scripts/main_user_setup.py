@@ -12,6 +12,7 @@ from surf_scoter_lib import (
     defaults,
     fileutil,
     gen_parser,
+    setup_check,
 )
 
 # ---------------------------------------------------------------------
@@ -22,22 +23,64 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
     """Run the user-space setup.
     
     This performs:
-        1. key file construction, if it doesn't exist.
-        2. Ensure the ssh config file exists.
+        1. a check of the setup files' programs.
+        2. key file construction, if it doesn't exist.
+        3. Ensure the ssh config file exists.
     
     This doesn't construct the Host entry in the config file, because
     that can vary from container to container.
+
+    Problems with the setup files are reported, and make the command fail,
+    but don't stop the rest of the setup.
     """
     interactive = bool(args.interactive)
+    setup_ok = check_setup(config)
+    report_host_command_checks(config)
     gen_key_pair(config, interactive)
     ensure_ssh_config(config, interactive)
     ensure_ssh_known_hosts(config, interactive)
     try_user_home(config, interactive)
-    return 0
+    return 0 if setup_ok else 1
+
+
+def check_setup(config: UserConfig) -> bool:
+    """Report setup file values that could run a project's code on the host."""
+    # Step 1: the setup files' programs.
+    problems = setup_check.check_programs(config)
+    if not problems:
+        print("Good.  None of your setup's programs can come from a project.")
+        return True
+    print(
+        "Some of your setup's programs could run a project's code on your computer, "
+        "with your privileges.  Fix these in your setup files:",
+        file=sys.stderr,
+    )
+    for problem in problems:
+        print(f"  * {problem}", file=sys.stderr)
+    return False
+
+
+def report_host_command_checks(config: UserConfig) -> None:
+    """Report the setup's changes to the host command checks.
+
+    These don't fail the setup: they're choices the user made, shown so they
+    stay deliberate.
+    """
+    report = setup_check.host_command_report(config)
+    count = len(config.host_command_checks())
+    if not report:
+        print(f"Your setup has {count} host command checks, none of them relaxed or replaced.")
+        return
+    print(
+        f"Your setup has {count} host command checks.  "
+        "Some of them are relaxed, replaced or removed; check these are still what you want:"
+    )
+    for line in report:
+        print(f"  * {line}")
 
 
 def gen_key_pair(config: UserConfig, interactive: bool) -> None:
-    # Step 1: generate the key pair.
+    # Step 2: generate the key pair.
     key_file = config.require_path("ssh", "key-file")
     pub_key_file = Path(str(key_file) + defaults.PUB_KEY_EXT)
     if key_file.is_file() and pub_key_file.is_file():
@@ -81,7 +124,7 @@ def gen_key_pair(config: UserConfig, interactive: bool) -> None:
 
 
 def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
-    # Step 2: Ensure the ssh config file exists.
+    # Step 3: Ensure the ssh config file exists.
     ssh_config_file = config.require_path("ssh", "config-file")
     if ssh_config_file.is_file():
         print(f"Good.  You already have the ssh config file ({ssh_config_file})")
@@ -126,7 +169,7 @@ def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
 
 
 def ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
-    # Step 3: Ensure the known-hosts file exists.
+    # Step 4: Ensure the known-hosts file exists.
     known_hosts_file = config.require_path("ssh", "known-hosts")
     if known_hosts_file.exists() and not known_hosts_file.is_file():
         answer = _read_user_input(
@@ -157,7 +200,7 @@ def ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
 
 
 def try_user_home(config: UserConfig, interactive: bool) -> None:
-    # Step 4: Create the ~/.config/surf-scoter.d directory + basic setup
+    # Step 5: Create the ~/.config/surf-scoter.d directory + basic setup
     #  if the user-dir isn't set.
     user_dir = config.optional_path("scoter", "user-dir")
     if not user_dir:
