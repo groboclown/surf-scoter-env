@@ -12,7 +12,7 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
               [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
-              [--unreviewed-project-commands] [--output FILE]
+              [--output FILE]
 ```
 
 * `--vcs-root`: the root of the repository holding the project, which `scoter` finds from the setup's VCS sections (see [Version control roots](../system-config-file.md#version-control-roots)).  It must exist and hold the project directory.  It's the `scoter` location `vcs-root`; setup files can't be read from inside it.  Without a `--project-dir` this time, a `--universal` file's carries over.
@@ -23,7 +23,6 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
 * `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`scoter: paths: verified-dir`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.
 * `--review`: the user's review file for the project (step 12 of [Projects in v1](projects-v1.md)).  It's read as the project file is, its `project-dir` must be this run's, its `expires-at` in the future, and a `dev-container: use: {name: ...}` one of the user's containers.  The file's `review` gets its `result`, and, unless it's `reject`, the accepted settings it gives, in `accepted.json`'s shape.  Nothing runs from a review: `host-brokered` doesn't change.
-* `--unreviewed-project-commands`: build `host-brokered` from the project file's `commands`, as they are.  Nobody has reviewed them, so `scoter` warns on every run that it passes this.  Without it, `host-brokered` is empty.  It's a stand-in until the user's accepted settings feed `host-brokered` (step 8 of [Projects in v1](projects-v1.md)), and goes then.
 * `--output`: the file to write; without it, the JSON goes to stdout.
 
 If the configuration has problems, the program writes all of them to stderr, one per line, writes no JSON, and exits with 1.  Bad arguments exit with 2.
@@ -42,7 +41,7 @@ gen-scoter-uc --universal second.json --no-setup-search --project-dir DIR --vcs-
     --accepted-settings ACCEPTED.json
 ```
 
-The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.  The third adds the accepted settings `find-acceptance` named.  Without any (no acceptance matches), `scoter` gives `--unreviewed-project-commands` instead, until a review can make one (step 15).
+The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.  The third adds the accepted settings `find-acceptance` named.  Without any (no acceptance matches), there are no host commands and no egress rules until the user accepts a review with `scoter verify`.
 
 `scoter` writes each universal file it passes along into a new directory only the user can use, as a file only they can read, and removes it when it's done.
 
@@ -68,7 +67,7 @@ It reads the universal configuration file and **no other file** (but for the acc
 * the dev container's `dev-env.yaml` from its `dev-container`;
 * the locations, `cwd` included, from its `active-config-locations`.
 
-The `current-project-setup` contents are only a record of the project's file, which the review is made from (and, with `--unreviewed-project-commands`, the `host-brokered` list), which, with `scoter-host`'s log, makes the universal file the main artifact for debugging a run.  `scoter-host` still checks them as a project file, but doesn't take its commands from them.
+The `current-project-setup` contents are only a record of the project's file, which the review is made from, and which, with `scoter-host`'s log, makes the universal file the main artifact for debugging a run.  `scoter-host` still checks them as a project file, but doesn't take its commands from them.
 
 So `scoter-host` runs with exactly the configuration its invoker made, even if a file changes after the universal file was written, and the universal file alone recreates the run for debugging or testing.  The contents are checked as the files would be, and each must go with its location (`current-project-setup` with `project-config`, `dev-container` with `dev-container-path`).
 
@@ -279,7 +278,7 @@ The general layout:
     },
 
     // The commands `scoter-host` runs: the accepted settings' `commands`.  Without accepted
-    // settings, empty, unless gen-scoter-uc is given --unreviewed-project-commands.
+    // settings, empty.
     "host-brokered": [
         // This is the `commands` section from the project configuration file.
         // It's nearly verbatim, except for two fields, so each entry says exactly what it does:

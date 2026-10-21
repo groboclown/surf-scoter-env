@@ -57,9 +57,9 @@ def find(config: UserConfig) -> Lookup:
     if record is None:
         return Lookup()
 
-    current = _snapshot(config, Path(project_dir))
+    current = project_snapshot(config, Path(project_dir))
     setup = records.SetupRecord(records.setup_values(
-        config, _vcs_section(config), _verified_containers(config),
+        config, vcs_section(config), verified_containers(config),
     ))
     found = record.find(current.manifest, setup, records.now_utc())
     if found is None:
@@ -78,7 +78,8 @@ def find(config: UserConfig) -> Lookup:
     return Lookup(found.kind, acceptance.id, accepted, notice)
 
 
-def _limits(config: UserConfig) -> snapshot.SnapshotLimits:
+def limits(config: UserConfig) -> snapshot.SnapshotLimits:
+    """The snapshot limits, from the setup's `verified-max-*` values."""
     defaults = snapshot.SnapshotLimits()
     return snapshot.SnapshotLimits(
         max_file_size=config.optional_int_value("scoter", "verified-max-file-size")
@@ -88,7 +89,8 @@ def _limits(config: UserConfig) -> snapshot.SnapshotLimits:
     )
 
 
-def _container_dirs(config: UserConfig) -> list[Path]:
+def container_dirs(config: UserConfig) -> list[Path]:
+    """The container directories the dev container builds from."""
     parents = (
         [directory for _, directory in config.dev_container_parent_builds()]
         if config.has_dev_container() else []
@@ -96,18 +98,20 @@ def _container_dirs(config: UserConfig) -> list[Path]:
     return snapshot.container_dirs(config.active_location("dev-container-path"), parents)
 
 
-def _snapshot(config: UserConfig, project_dir: Path) -> snapshot.Snapshot:
+def project_snapshot(config: UserConfig, project_dir: Path) -> snapshot.Snapshot:
+    """The project's files, as an acceptance records them."""
     files_dir = config.optional_value("scoter", "project-files-dir")
     file_name = config.optional_value("scoter", "project-file-name")
     if files_dir is None or file_name is None:
         raise VerifiedStoreErr("the setup names no project files directory or project file")
     parsed = snapshot.ParsedFiles(project=config.project_setup(), dev_container=config.dev_container())
     return snapshot.snapshot_project(
-        project_dir / files_dir, file_name, _container_dirs(config), parsed, _limits(config),
+        project_dir / files_dir, file_name, container_dirs(config), parsed, limits(config),
     )
 
 
-def _vcs_section(config: UserConfig) -> str | None:
+def vcs_section(config: UserConfig) -> str | None:
+    """The setup section for the project's VCS, if the setup has one."""
     vcs = config.project_str("vcs")
     if vcs is None:
         return None
@@ -115,16 +119,16 @@ def _vcs_section(config: UserConfig) -> str | None:
     return section if config.has_section(section) else None
 
 
-def _verified_containers(config: UserConfig) -> dict[str, str]:
+def verified_containers(config: UserConfig) -> dict[str, str]:
     """The build's container directories in `dev-containers-verified`, with their manifests' ids."""
     roots = [
         Path(os.path.realpath(p)) for p in config.optional_path_list("scoter", "dev-containers-verified")
     ]
     found: dict[str, str] = {}
-    for directory in _container_dirs(config):
+    for directory in container_dirs(config):
         real = Path(os.path.realpath(directory))
         if any(real.is_relative_to(root) for root in roots):
-            found[str(real)] = snapshot.snapshot_dir(real, _limits(config)).manifest.id
+            found[str(real)] = snapshot.snapshot_dir(real, limits(config)).manifest.id
     return found
 
 

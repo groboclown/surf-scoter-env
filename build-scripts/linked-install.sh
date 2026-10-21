@@ -41,8 +41,20 @@ ln -s "${here}/scripts/surf_scoter_lib" .
 cd "${target}"
 ln -s "${here}/containers" .
 ln -s "${here}/defaults" .
-ln "${here}/defaults/setup.yaml" .
 
-# This needs a hard-link, not a symbolic link, because of how the
-# file finds itself.
-ln "${here}/scoter.py" scoter
+# These need a hard-link, not a symbolic link, because of how the
+# file finds itself.  But cross-filesystem hard-links can fail.
+link_fail=0
+if ! ln "${here}/defaults/setup.yaml" . ; then
+    cp "${here}/defaults/setup.yaml" .
+    echo "defaults/setup.yaml : link failed."
+    link_fail=1
+fi
+if ! ln "${here}/scoter.py" scoter ; then
+    ln "${here}/scoter.py" scoter
+    echo "scoter.py : link failed."
+    link_fail=1
+fi
+if [ $link_fail = 1 ] ; then
+    echo "   Changes to failed-link files won't take effect until you run this again."
+fi

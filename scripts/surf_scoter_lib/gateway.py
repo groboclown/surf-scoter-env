@@ -47,8 +47,6 @@ class Report:
     """What the gateway enforces, and what it refuses, and why."""
 
     gateway: str
-    # Where the rules came from: `accepted`, or `project` (unreviewed).
-    source: str
     enforced: list[Rule] = field(default_factory=list)
     refused: list[tuple[Rule, str]] = field(default_factory=list)
 
@@ -56,7 +54,6 @@ class Report:
         """As JSON data, for the caller to show the user."""
         return {
             "gateway": self.gateway,
-            "source": self.source,
             "enforced": [rule.to_json() for rule in self.enforced],
             "refused": [
                 {"rule": rule.to_json(), "reason": reason} for rule, reason in self.refused
@@ -68,13 +65,13 @@ class RuleErr(ValueError):
     """An egress rule isn't what the generator would have let through."""
 
 
-def rules_from(config: UserConfig) -> tuple[list[Rule], str]:
-    """The egress rules in the universal configuration file, and where they came from."""
+def rules_from(config: UserConfig) -> list[Rule]:
+    """The accepted egress rules in the universal configuration file; none without any."""
     try:
-        entries, source = config.egress_rules()
+        entries = config.egress_rules()
     except ConfigErr as err:
         raise RuleErr(str(err)) from err
-    return rules_of(entries), source
+    return rules_of(entries)
 
 
 def rules_of(entries: list[jdata.DictJsonData]) -> list[Rule]:

@@ -267,19 +267,16 @@ class UserConfig:
         """Whether the file has the dev container's `dev-env.yaml` (it does with a project)."""
         return self.dev_container() is not None
 
-    def egress_rules(self) -> tuple[list[jdata.DictJsonData], str]:
-        """The egress rules, and where they came from.
+    def egress_rules(self) -> list[jdata.DictJsonData]:
+        """The accepted egress rules (`egress.rules`); none without accepted settings."""
+        return [self.__req_dict(*key) for key in self.__find(jdata.find_list_keys, "egress", "rules")]
 
-        The accepted ones (`egress.rules`, source `accepted`); or, without
-        accepted settings, the project file's own (source `project`), unreviewed.
-        """
-        if self.__find(jdata.find_dict, "egress") is not None:
-            path: tuple[str, ...] = ("egress", "rules")
-            source = "accepted"
-        else:
-            path = (CURRENT_PROJECT_SETUP, "egress")
-            source = "project"
-        return [self.__req_dict(*key) for key in self.__find(jdata.find_list_keys, *path)], source
+    def project_egress(self) -> list[jdata.DictJsonData]:
+        """The project file's own egress rules: only a suggestion, for the review."""
+        return [
+            self.__req_dict(*key)
+            for key in self.__find(jdata.find_list_keys, CURRENT_PROJECT_SETUP, "egress")
+        ]
 
     def host_command_map(self) -> dict[str, str | None]:
         """Each command name the setup's checks map, with its program (None when it isn't there)."""

@@ -220,24 +220,6 @@ class CheckProjectVcsTest(unittest.TestCase):
             scoter.check_project_vcs(self.settings("git"), None)
 
 
-class WarnUnreviewedCommandsTest(unittest.TestCase):
-    """Test the warning about the project's unreviewed host commands."""
-
-    def warning(self, settings: scoter.DictJsonData) -> str:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            scoter.warn_unreviewed_commands(settings)
-        return err.getvalue()
-
-    def test_warning(self) -> None:
-        """Only when the host runs commands, naming each once."""
-        self.assertEqual(self.warning({"host-brokered": []}), "")
-        self.assertEqual(self.warning({}), "")
-        text = self.warning({"host-brokered": [{"command": "git"}, {"command": "aws"}, {"command": "git"}]})
-        self.assertIn("(aws, git)", text)
-        self.assertIn("can't review them yet", text)
-
-
 class TempFileTest(unittest.TestCase):
     """Test the private temporary configuration files."""
 

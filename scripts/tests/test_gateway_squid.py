@@ -28,14 +28,14 @@ class TranslateTest(unittest.TestCase):
 
     def test_enforced_and_refused(self) -> None:
         """Only `tls` on 443; everything else refused, with its reason."""
-        rules, _ = gateway_squid.gateway.rules_from(gateway_squid.UserConfig({"egress": {"rules": [
+        rules = gateway_squid.gateway.rules_from(gateway_squid.UserConfig({"egress": {"rules": [
             _rule("registry.npmjs.org"),
             _rule("*.pkg.dev"),
             _rule("a.example.com", protocol="https", methods=["GET"]),
             _rule("b.example.com", protocol="http", methods=["GET"]),
             _rule("git.example.com", port=22),
         ]}}))
-        report, text = gateway_squid.translate(rules, "accepted")
+        report, text = gateway_squid.translate(rules)
         self.assertEqual([r.host for r in report.enforced], ["registry.npmjs.org", "*.pkg.dev"])
         reasons = {rule.host: reason for rule, reason in report.refused}
         self.assertIn("looks inside TLS", reasons["a.example.com"])
@@ -57,10 +57,9 @@ class TranslateTest(unittest.TestCase):
         for other in ("pkg.dev", "evilpkg.dev", "pkg.dev.evil.com", "us.pkgXdev"):
             self.assertIsNone(wild.search(other), other)
 
-    def test_unreviewed_note(self) -> None:
-        """The file says when its rules weren't reviewed."""
-        _, text = gateway_squid.translate([], "project")
-        self.assertIn("unreviewed", text)
+    def test_nothing_accepted(self) -> None:
+        """No rules, no hosts: nothing gets out."""
+        _, text = gateway_squid.translate([])
         self.assertEqual([l for l in text.splitlines() if not l.startswith("#")], [])
 
 

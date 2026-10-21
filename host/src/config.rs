@@ -1024,8 +1024,7 @@ mod tests {
         let first = load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap();
         assert!(first.project.is_none());
         assert_eq!(first.system.get("a", "local").as_deref(), Some("./here"));
-        let universal =
-            crate::universal::build(&first, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&first).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
         // The second step adds the project found with the first's help.
@@ -1048,8 +1047,7 @@ mod tests {
         assert!(second.dev_container.is_some());
 
         // The project given is recorded, most recent first.
-        let universal =
-            crate::universal::build(&second, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&second).unwrap();
         assert_eq!(
             universal.loaded_from.project_config,
             [project.display().to_string()]
@@ -1102,8 +1100,7 @@ mod tests {
             ..Env::default()
         };
         let first = load_all_with_env(&LoadOptions::default(), env.clone()).unwrap();
-        let universal =
-            crate::universal::build(&first, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&first).unwrap();
         let first_file = dir.write("first.json", &crate::universal::to_json(&universal));
 
         // The user file is gone, and isn't looked for: the record stands in.
@@ -1155,8 +1152,7 @@ mod tests {
         opts.vcs_root = Some(dir.path().join("repo/project/.."));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
-        let universal =
-            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
         assert_eq!(
             universal.active_config_locations.vcs_root,
             Some(dir.path().join("repo").display().to_string())
@@ -1171,8 +1167,7 @@ mod tests {
         let first = dir.write(
             "first.json",
             &crate::universal::to_json(
-                &crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED)
-                    .unwrap(),
+                &crate::universal::build_brokering_project(&config).unwrap(),
             ),
         );
         let again = LoadOptions {
@@ -1255,8 +1250,7 @@ mod tests {
         );
 
         // It carries over, unless another project is given.
-        let universal =
-            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
         let first = dir.write("first.json", &crate::universal::to_json(&universal));
         let again = LoadOptions {
             universal: Some(first.clone()),
@@ -1308,8 +1302,7 @@ mod tests {
             get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
             Some(settings.clone())
         );
-        let universal =
-            crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap();
+        let universal = crate::universal::build_brokering_project(&config).unwrap();
         assert_eq!(
             universal.active_config_locations.dev_container_settings_dir,
             Some(settings.display().to_string())
@@ -1429,9 +1422,8 @@ mod tests {
         );
         let env = testing::home_env(&dir.path().join("home"), env);
         let config = load_all_with_env(&opts, env).unwrap();
-        let json = crate::universal::to_json(
-            &crate::universal::build(&config, &crate::universal::BuildOptions::UNREVIEWED).unwrap(),
-        );
+        let json =
+            crate::universal::to_json(&crate::universal::build_brokering_project(&config).unwrap());
         let sources = vec![
             dir.path().join("project/.surf-scoter.d/project.yaml"),
             dir.path().join("project/.surf-scoter.d/env/dev-env.yaml"),
@@ -1531,9 +1523,8 @@ mod tests {
             &dir.write(
                 "plain.json",
                 &crate::universal::to_json(
-                    &crate::universal::build(
+                    &crate::universal::build_brokering_project(
                         &load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap(),
-                        &crate::universal::BuildOptions::UNREVIEWED,
                     )
                     .unwrap(),
                 ),

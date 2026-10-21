@@ -430,10 +430,10 @@ def check_egress(
 ) -> list[Finding]:
     """Plain `http`, and hosts that can carry data out whatever the other rules say.
 
-    The rules are `entries` when given (a review's), or else the file's own.
+    The rules are `entries` when given (a review's), or else the project file's.
     """
     try:
-        rules = gateway.rules_of(entries) if entries is not None else gateway.rules_from(config)[0]
+        rules = gateway.rules_of(entries if entries is not None else config.project_egress())
     except gateway.RuleErr as err:
         return [Finding(Severity.REFUSE, "egress", str(err))]
     data_out = config.value_list("scoter", DATA_OUT_HOSTS)

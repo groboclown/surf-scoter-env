@@ -95,8 +95,6 @@ def load_config(args: argparse.Namespace, *, with_project: bool = True) -> DictJ
             settings,
             accepted_settings=accepted if isinstance(accepted, str) else None,
         )
-        if not isinstance(accepted, str):
-            warn_unreviewed_commands(settings)
 
     # Overwrite the bin dir if it was explicitly set.
     active_locs = settings["active-config-locations"]
@@ -264,26 +262,6 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
     return found
 
 
-def warn_unreviewed_commands(settings: DictJsonData) -> None:
-    """Warn that the project's host commands run without a review.
-
-    Until the review of a project's settings exists (steps 8 to 16 of
-    docs/contributors/projects-v1.md), the generator builds the commands
-    from the project file as it is (`--unreviewed-project-commands`).
-    """
-    commands = settings.get("host-brokered")
-    if not isinstance(commands, list) or not commands:
-        return
-    names = sorted({str(c.get("command")) for c in commands if isinstance(c, dict)})
-    print(
-        "Warning: the project's host commands ("
-        + ", ".join(names)
-        + ") come straight from its project file; Surf Scoter can't review them yet.  "
-        "Read the file's `commands` before you run it.",
-        file=sys.stderr,
-    )
-
-
 def reprocess_config(
     bin_dir: Path,
     dist_dir: Path,
@@ -420,8 +398,9 @@ def generate_config(
 ) -> DictJsonData:
     """Run the gen-scoter-uc program.
 
-    With a project, the host commands come from `accepted_settings` (the
-    user's accepted settings); without them, from the project file, unreviewed.
+    With a project, the host commands and egress come only from
+    `accepted_settings` (the user's accepted settings); without them, there
+    are none.
     """
     if bin_dir:
         gen_uc = _require_exe(bin_dir / GEN_SCOTER_UC_EXEC)
@@ -442,10 +421,6 @@ def generate_config(
         args.append("--no-setup-search")
     if accepted_settings:
         args.extend(("--accepted-settings", accepted_settings))
-    elif project_dir:
-        # No acceptance yet: until a review can make one (step 15), the host
-        # commands come from the project file; see `warn_unreviewed_commands`.
-        args.append("--unreviewed-project-commands")
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,

@@ -623,12 +623,6 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
             )
     if res.returncode != 0:
         raise ConfigErr("Couldn't make the network gateway's configuration.")
-    if isinstance(report, dict) and report.get("source") == "project":
-        print(
-            "Warning: the egress rules come straight from the project file; "
-            "Surf Scoter can't review them yet.",
-            file=sys.stderr,
-        )
     return output
 
 

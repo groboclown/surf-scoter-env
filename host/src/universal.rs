@@ -50,11 +50,9 @@ pub struct Universal {
     /// its own (not merged): `{"env": PLAN, "commands": [{"env": PLAN}]}`,
     /// `${section:key}` expanded and `@NAME@` left.  The review shows them.
     pub current_project_resolved: Option<Json>,
-    /// The commands `scoter-host` runs.  Until the accepted settings feed it
-    /// (step 8 of `docs/contributors/projects-v1.md`), it's empty unless
-    /// `BuildOptions::unreviewed_project_commands` builds it from the
-    /// project's `commands`: each with `program` set to the executable found
-    /// on the host, or `null`, and `env` set to the command's whole
+    /// The commands `scoter-host` runs: the accepted settings' `commands`
+    /// (empty without them), each with `program` the absolute executable, or
+    /// `null`, and `env` the command's whole
     /// environment plan: the project's `env` with the command's added, its
     /// `${section:key}` references expanded.  `@NAME@` is left as written,
     /// as it's the environment of the program running the commands.
@@ -136,23 +134,8 @@ pub struct UniversalSection {
     pub values: BTreeMap<String, ScalarValue>,
 }
 
-/// How to build the universal configuration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BuildOptions {
-    /// Build `host-brokered` from the project's `commands`, unreviewed.  A
-    /// stand-in until the accepted settings feed it (step 8).
-    pub unreviewed_project_commands: bool,
-}
-
-impl BuildOptions {
-    /// `host-brokered` from the project's commands, unreviewed.
-    pub const UNREVIEWED: BuildOptions = BuildOptions {
-        unreviewed_project_commands: true,
-    };
-}
-
 /// Gather the universal configuration from a loaded configuration.
-pub fn build(config: &FullConfig, options: &BuildOptions) -> Result<Universal, ConfigErrors> {
+pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     let mut errors = Vec::new();
     let system = &config.system;
 
@@ -201,37 +184,12 @@ pub fn build(config: &FullConfig, options: &BuildOptions) -> Result<Universal, C
         .map_err(|e| errors.extend(e))
         .unwrap_or_default();
 
-    let mut host_brokered = Vec::new();
-    if let Some(accepted) = &config.accepted {
-        // Only the accepted commands run, as accepted.
-        host_brokered = accepted.raw_commands.clone();
-    } else if let Some(project) = config
-        .project
+    // Only the accepted commands run, as accepted: never the project file's.
+    let host_brokered = config
+        .accepted
         .as_ref()
-        .filter(|_| options.unreviewed_project_commands)
-    {
-        for (i, (rule, raw)) in project
-            .commands
-            .iter()
-            .zip(&project.raw_commands)
-            .enumerate()
-        {
-            let key = index_key("commands", i);
-            let mut entry = match yaml_to_json(raw, &project.path, &key, &mut errors) {
-                Json::Object(entry) => entry,
-                // Entries were checked to be mappings when the file was read.
-                _ => Map::new(),
-            };
-            let program = rule.program.as_deref().unwrap_or(&rule.command);
-            let found = system
-                .find_program(program)
-                .map(|p| Json::String(path_text(&p)));
-            entry.insert("program".to_string(), found.unwrap_or(Json::Null));
-            let env = serde_json::to_value(&rule.env_plan).expect("only text is stored");
-            entry.insert("env".to_string(), env);
-            host_brokered.push(Json::Object(entry));
-        }
-    }
+        .map(|accepted| accepted.raw_commands.clone())
+        .unwrap_or_default();
 
     let current_project_setup = config
         .project
@@ -374,6 +332,46 @@ pub(crate) fn yaml_to_json(
     }
 }
 
+/// For tests that need a `host-brokered` list without accepted settings:
+/// the universal configuration, with `host-brokered` made from the
+/// project's commands as they'd be accepted (each program found on the
+/// `PATH`, each environment its whole plan).
+#[cfg(test)]
+pub(crate) fn build_brokering_project(config: &FullConfig) -> Result<Universal, ConfigErrors> {
+    let mut universal = build(config)?;
+    let Some(project) = &config.project else {
+        return Ok(universal);
+    };
+    let mut errors = Vec::new();
+    universal.host_brokered = project
+        .commands
+        .iter()
+        .zip(&project.raw_commands)
+        .enumerate()
+        .map(|(i, (rule, raw))| {
+            let key = index_key("commands", i);
+            let mut entry = match yaml_to_json(raw, &project.path, &key, &mut errors) {
+                Json::Object(entry) => entry,
+                _ => Map::new(),
+            };
+            let program = rule.program.as_deref().unwrap_or(&rule.command);
+            let found = config
+                .system
+                .find_program(program)
+                .map(|p| Json::String(path_text(&p)));
+            entry.insert("program".to_string(), found.unwrap_or(Json::Null));
+            let env = serde_json::to_value(&rule.env_plan).expect("only text is stored");
+            entry.insert("env".to_string(), env);
+            Json::Object(entry)
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(universal)
+    } else {
+        Err(ConfigErrors(errors))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,7 +449,7 @@ mod tests {
                 "  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
             ),
         );
-        let universal = build(&config, &BuildOptions::UNREVIEWED).unwrap();
+        let universal = build_brokering_project(&config).unwrap();
         let p = |path: &PathBuf| path.display().to_string();
         assert_eq!(
             universal.active_config_locations.project_config,
@@ -695,10 +693,8 @@ mod tests {
     fn without_project() {
         let dir = TempDir::new();
         let config = load(&dir, None, "ssh:\n  paths:\n    home: /h/.ssh\n");
-        let json: Json = serde_json::from_str(&to_json(
-            &build(&config, &BuildOptions::UNREVIEWED).unwrap(),
-        ))
-        .unwrap();
+        let json: Json =
+            serde_json::from_str(&to_json(&build_brokering_project(&config).unwrap())).unwrap();
         let active = &json["active-config-locations"];
         assert_eq!(active["project-config"], Json::Null);
         assert!(json.get("project-config").is_none());
@@ -770,7 +766,7 @@ mod tests {
 
     fn combined(dir: &TempDir, user: &str, dist: &str) -> Result<Combined, Vec<String>> {
         let config = load_setups(dir, user, dist)?;
-        build(&config, &BuildOptions::UNREVIEWED)
+        build_brokering_project(&config)
             .map(|u| u.host_command_checks)
             .map_err(error_texts)
     }
@@ -1016,7 +1012,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            error_texts(build(&config, &BuildOptions::UNREVIEWED).unwrap_err()),
+            error_texts(build_brokering_project(&config).unwrap_err()),
             [format!(
                 "p.host-commands.c: `tool` runs {}, which is in the project (`scoter:project-dir`); a host command never runs a program from the project",
                 tool_path.display()
@@ -1098,7 +1094,7 @@ mod tests {
             "b:\n  host-commands:\n    d: {action: refuse, reason: r, commands: [sh]}\n    e: null\n",
         )
         .unwrap();
-        let first = build(&config, &BuildOptions::UNREVIEWED).unwrap();
+        let first = build_brokering_project(&config).unwrap();
         let file = dir.write("universal.json", &to_json(&first));
         let env = Env {
             path: Some(dir.path().join("bin").into_os_string()),
@@ -1106,9 +1102,7 @@ mod tests {
         };
         let again = crate::config::load_universal_with_env(&file, env).unwrap();
         assert_eq!(
-            build(&again, &BuildOptions::UNREVIEWED)
-                .unwrap()
-                .host_command_checks,
+            build_brokering_project(&again).unwrap().host_command_checks,
             first.host_command_checks
         );
         assert_eq!(first.setup, again.system.setup_record().clone());
@@ -1116,7 +1110,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_needs_the_unreviewed_flag() {
+    fn host_brokered_empty_without_accepted_settings() {
         let dir = TempDir::new();
         tool(&dir, "bin/aws");
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
@@ -1128,15 +1122,13 @@ mod tests {
             ),
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
         );
-        let reviewed = build(&config, &BuildOptions::default()).unwrap();
-        assert!(reviewed.host_brokered.is_empty());
+        let universal = build(&config).unwrap();
+        assert!(universal.host_brokered.is_empty());
         // The project is still there, as a record.
         assert_eq!(
-            reviewed.current_project_setup.as_ref().unwrap()["commands"][0]["command"],
+            universal.current_project_setup.as_ref().unwrap()["commands"][0]["command"],
             "aws"
         );
-        let unreviewed = build(&config, &BuildOptions::UNREVIEWED).unwrap();
-        assert_eq!(unreviewed.host_brokered.len(), 1);
     }
 
     #[test]
@@ -1229,8 +1221,7 @@ mod tests {
         let (options, env, accepted) =
             accepted_project(&dir, &aws.display().to_string(), "2999-01-01T00:00:00Z");
         let config = load_all_with_env(&options, env).unwrap();
-        // The flag makes no difference: accepted settings win.
-        let universal = build(&config, &BuildOptions::UNREVIEWED).unwrap();
+        let universal = build(&config).unwrap();
         assert_eq!(universal.host_brokered.len(), 1);
         assert_eq!(universal.host_brokered[0]["command"], "aws");
         assert_eq!(
@@ -1249,7 +1240,7 @@ mod tests {
         );
         // Without accepted settings, there's neither.
         let plain = load(&dir, None, "a:\n  paths:\n    x: /x\n");
-        let universal = build(&plain, &BuildOptions::default()).unwrap();
+        let universal = build(&plain).unwrap();
         assert!(universal.accepted_settings.is_none() && universal.egress.is_none());
     }
 
@@ -1335,11 +1326,7 @@ mod tests {
         let aws = tool(&dir, "bin/aws");
         let (options, env, accepted) =
             accepted_project(&dir, &aws.display().to_string(), "2030-01-01T00:00:00Z");
-        let first = build(
-            &load_all_with_env(&options, env).unwrap(),
-            &BuildOptions::default(),
-        )
-        .unwrap();
+        let first = build(&load_all_with_env(&options, env).unwrap()).unwrap();
         let file = dir.write("suc.json", &to_json(&first));
         let private = |path: &Path, mode: u32| {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
@@ -1442,7 +1429,7 @@ mod tests {
             "commands:\n  - {command: \"aws\", program: \"/usr/local/bin/aws\", args: [\"s3\", \"ls\"]}\n",
             "dev-container:\n  use: {name: \"my-env\"}\n",
         ));
-        let universal = build(&load_with(&review).unwrap(), &BuildOptions::default()).unwrap();
+        let universal = build(&load_with(&review).unwrap()).unwrap();
         let section = universal.review.unwrap();
         assert_eq!(section["result"], "accept");
         assert_eq!(section["accepted"]["vcs"], "git");
@@ -1459,7 +1446,7 @@ mod tests {
         assert!(universal.host_brokered.is_empty());
 
         let rejected = write_review("result: reject\n");
-        let section = build(&load_with(&rejected).unwrap(), &BuildOptions::default())
+        let section = build(&load_with(&rejected).unwrap())
             .unwrap()
             .review
             .unwrap();

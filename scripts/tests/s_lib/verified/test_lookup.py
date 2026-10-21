@@ -46,7 +46,7 @@ class LookupTest(TempDirTest):
     def accept(self, kind: records.Kind = records.Kind.REVIEWED) -> records.Acceptance:
         """Accept the project's files as they are now."""
         config = UserConfig(self.suc())
-        taken = lookup._snapshot(config, self.project)
+        taken = lookup.project_snapshot(config, self.project)
         setup = records.SetupRecord(records.setup_values(config, None, {}))
         now = records.now_utc()
         acceptance = records.Acceptance(
@@ -128,10 +128,10 @@ class LookupTest(TempDirTest):
         outside = self.tmp / "dist" / "base"
         self.write("dist/base/Dockerfile", "FROM scratch\n")
         suc["dev-container"] = {"parent-builds": [{"dir": str(outside), "tag": "base"}]}
-        self.assertEqual(lookup._verified_containers(UserConfig(suc)), {})
+        self.assertEqual(lookup.verified_containers(UserConfig(suc)), {})
         lists = suc["resolved"]["scoter"]["path-lists"]  # type: ignore[index]
         lists["dev-containers-verified"] = [str(self.tmp / "dist")]  # type: ignore[index]
-        found = lookup._verified_containers(UserConfig(suc))
+        found = lookup.verified_containers(UserConfig(suc))
         self.assertEqual(list(found), [str(outside)])
         self.assertEqual(
             found[str(outside)],

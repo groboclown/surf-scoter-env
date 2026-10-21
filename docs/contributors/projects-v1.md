@@ -1182,6 +1182,18 @@ With this step, an acceptance can be made, so remove `gen-scoter-uc --unreviewed
 
 **Tests:** the temporary file replaced by a symlink while the editor is open; an edit that adds a refused program; no terminal.
 
+Completed:
+
+* **The stand-in is gone.**  `gen-scoter-uc --unreviewed-project-commands` is removed, and so are `scoter.py`'s warning and `main_run.py`'s egress warning.  Without an acceptance, `host-brokered` is empty and so are the gateway's rules: `UserConfig.egress_rules` gives only the accepted rules, and the gateway report has no `source`.  The checks read the project file's own rules through the new `project_egress`.
+* **`scoter verify`** ([`main_verify.py`](../../scripts/main_verify.py)) now asks.  It refuses without a terminal (both standard input and output), and `--output FILE` still only writes the review.  It snapshots the project's files first, so the acceptance is for the files the review shows.  It writes the review with `mkstemp` in a `mkdtemp` directory, prints it, and checks it, then asks `[u]se / [e]dit / [D]eny`.  Enter, the end of input and Ctrl-C deny.
+  * **Edit** runs `VISUAL`, or else `EDITOR` (split as a shell would, keeping a Windows path's backslashes), in the temporary directory.  With neither set, Windows falls back to Notepad, by its full path under `SystemRoot`; elsewhere, editing asks you to set one.  The file is then read once: opened with `O_NOFOLLOW` (and `O_NONBLOCK`, so a FIFO can't hang it), and it must be a regular file, owned by the user, with one link, within the generator's size limit.  A link or anything else in its place stops the review, and nothing is stored.
+  * **Every check** writes the bytes read to a fresh private file, so what's checked is what's stored.  It runs `gen-scoter-uc --universal ... --no-setup-search --project-dir ... [--vcs-root ...] --review COPY`, then `checks.check_review`.  The generator's complaints name the file being edited, not the copy.
+  * **Use** is refused while the generator complains or anything is refused; `result: reject` denies.
+* **Storing** ([`verified/accept.py`](../../scripts/surf_scoter_lib/verified/accept.py)): `store_acceptance` puts the snapshot's blobs in the store, under its lock, and writes `accepted.json` (the SUC's `review: accepted`), `review.yaml` (the bytes the user left) and `suggestion.json` (`project` and `dev-container`).  It adds a `reviewed` acceptance, newest first, with the review's `expires-at`, the branch, the snapshot's manifest and the setup values.  Saving prunes to `verified-keep`.  The lookup's snapshot and setup helpers are now public for it (`project_snapshot`, `vcs_section`, `verified_containers`), and so is `records.parse_time`.
+* **By hand**, on a scratch project and distribution, through a pseudo-terminal: used as-is, it's stored, the next lookup matches exactly, and the third generator run brokers the accepted `ls` with its egress rule.  Uncommenting the refused `sh` is refused until it's denied; a symlink swap stops the review with the store unchanged; a broken edit shows the generator's complaint; `result: reject` denies.
+
+**Tests:** in [`test_main_verify.py`](../../scripts/tests/test_main_verify.py): the step's three (the file replaced by a link while the editor is open, an edit that uncomments the refused shell, no terminal); the same edit with its `$override`, stored; use, deny, a broken edit, `result: reject`; the choices; the editor's choice (Notepad on Windows); and `read_once` on a link, a FIFO, a hard-linked file and an oversized one.  The prompt tests run the debug generator, and skip without it.  In [`test_accept.py`](../../scripts/tests/s_lib/verified/test_accept.py): storing, with private files and an exact lookup afterwards; newest first; no `verified-dir`.  In `universal.rs`: `host-brokered` empty without accepted settings.  In `test_gateway.py`: only the accepted rules.
+
 ## 16. Add verification handling in main_run.py
 
 The main_run.py script should then consume the verification section from the SUC, and use the above library to determine if the verification applies to the current settings.
@@ -1240,7 +1252,13 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - ~~Step 14 needs the generator to give the project's split `env`, resolved.~~  Done: `current-project-resolved`.
   - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
 - Step 14:
-  - The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet: that needs the stored `review.yaml` (step 15) and the matching of items (step 17).
+  - The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet.  Step 15 now stores `review.yaml`; the rest needs the matching of items (step 17).
+- Step 15:
+  - The whole review is printed before the prompt; with long Dockerfiles it scrolls away.  A pager, or only the summary with the file opened on request, may read better.
+  - `scoter verify` snapshots the project's files when it starts, after `scoter.py`'s generator run parsed them.  A change in between gives a snapshot that doesn't match the parsed suggestion.  Step 16's check that the staged copy parses to the same `project` and `dev-container` catches it at run time.
+  - Automation passing an already accepted file (the design's `--accept-file`) isn't written.
+  - On Windows, `read_once` has no `O_NOFOLLOW` and skips the owner check.
+  - Use the `PAGER` env (if set) when showing the output.
 
 ## 19. Review the settings format
 

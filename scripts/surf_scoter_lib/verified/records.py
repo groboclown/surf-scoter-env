@@ -52,7 +52,8 @@ class Validity(StrEnum):
     INVALID = "invalid"
 
 
-def _time(text: str) -> datetime.datetime:
+def parse_time(text: str) -> datetime.datetime:
+    """An ISO 8601 (RFC 3339) time, which must have a time zone."""
     value = datetime.datetime.fromisoformat(text)
     if value.tzinfo is None:
         raise ValueError(f"`{text}` has no time zone")
@@ -149,9 +150,9 @@ class Acceptance:
             id=acceptance_id,
             kind=kind,
             from_id=jdata.find_str(data, "from"),
-            accepted_at=_time(jdata.req_str(data, "accepted-at")),
-            expires_at=_time(jdata.req_str(data, "expires-at")),
-            exempt_until=None if exempt is None else _time(exempt),
+            accepted_at=parse_time(jdata.req_str(data, "accepted-at")),
+            expires_at=parse_time(jdata.req_str(data, "expires-at")),
+            exempt_until=None if exempt is None else parse_time(exempt),
             branch=jdata.find_str(data, "branch"),
             suggestion=suggestion,
             setup=SetupRecord.from_json(jdata.req_dict(data, "setup")),

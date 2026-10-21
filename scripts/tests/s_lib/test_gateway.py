@@ -13,20 +13,19 @@ def _rule(host: str, protocol: str = "tls", **extra: object) -> dict[str, object
 class RulesFromTest(unittest.TestCase):
     """Test reading the egress rules from the universal configuration file."""
 
-    def test_accepted_first(self) -> None:
-        """The accepted rules win over the project's; the project's are a stand-in."""
+    def test_accepted_only(self) -> None:
+        """Only the accepted rules; the project's are never used, so without any, none."""
         suc = {
-            "egress": {"gateway": "squid", "rules": [_rule("a.example.com", port=443, methods=[])]},
+            "egress": {"gateway": "squid", "rules": [_rule("a.example.com")]},
             "current-project-setup": {"egress": [_rule("b.example.com")]},
         }
-        rules, source = gateway.rules_from(UserConfig(suc))
-        self.assertEqual((source, [r.host for r in rules]), ("accepted", ["a.example.com"]))
-        suc["egress"] = None
-        rules, source = gateway.rules_from(UserConfig(suc))
-        self.assertEqual((source, [r.host for r in rules]), ("project", ["b.example.com"]))
+        rules = gateway.rules_from(UserConfig(suc))
+        self.assertEqual([r.host for r in rules], ["a.example.com"])
         # Ports default by protocol.
         self.assertEqual(rules[0].port, 443)
-        self.assertEqual(gateway.rules_from(UserConfig({})), ([], "project"))
+        suc["egress"] = None
+        self.assertEqual(gateway.rules_from(UserConfig(suc)), [])
+        self.assertEqual(gateway.rules_from(UserConfig({})), [])
 
     def test_bad_rules(self) -> None:
         """Anything the generator wouldn't let through is refused, not passed on."""

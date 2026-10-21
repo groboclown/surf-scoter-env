@@ -65,9 +65,9 @@ def pattern(host: str) -> str:
     return "^" + re.escape(host) + "$"
 
 
-def translate(rules: list[gateway.Rule], source: str) -> tuple[gateway.Report, str]:
+def translate(rules: list[gateway.Rule]) -> tuple[gateway.Report, str]:
     """The Squid gateway's report, and its host list (for `dstdom_regex -i`)."""
-    report = gateway.Report(SQUID, source)
+    report = gateway.Report(SQUID)
     for rule in rules:
         reason = refusal(rule)
         if reason is None:
@@ -76,8 +76,7 @@ def translate(rules: list[gateway.Rule], source: str) -> tuple[gateway.Report, s
             report.refused.append((rule, reason))
     lines = [
         "# The hosts the dev container may reach, on TCP 443: one pattern per line,",
-        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from the egress rules"
-        + (" (unreviewed, from the project file)." if source == "project" else "."),
+        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from your accepted egress rules.",
     ]
     lines.extend(sorted({pattern(rule.host) for rule in report.enforced}))
     return report, "\n".join(lines) + "\n"
@@ -100,11 +99,11 @@ def main(argv: Sequence[str]) -> int:
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        rules, source = gateway.rules_from(UserConfig(suc))
+        rules = gateway.rules_from(UserConfig(suc))
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
         return 2
-    report, text = translate(rules, source)
+    report, text = translate(rules)
     print(json.dumps(report.to_json()))
     if report.refused:
         return 1
@@ -114,7 +113,7 @@ def main(argv: Sequence[str]) -> int:
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as out:
         out.write(text)
-    os.chmod(temp, 0o644)  # nosec: B103  # The gateway's user reads it; nothing secret.
+    os.chmod(temp, 0o644)
     os.replace(temp, argv[2])
     return 0
 
