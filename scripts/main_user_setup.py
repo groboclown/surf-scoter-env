@@ -37,6 +37,7 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
     interactive = bool(args.interactive)
     setup_ok = check_setup(config)
     report_host_command_checks(config)
+    report_guarded_settings(config)
     gen_key_pair(config, interactive)
     ensure_ssh_config(config, interactive)
     ensure_ssh_known_hosts(config, interactive)
@@ -84,6 +85,24 @@ def report_host_command_checks(config: UserConfig) -> None:
         f"Your setup has {count} host command checks.  "
         "Some of them are relaxed, replaced or removed; check these are still what you want:"
     )
+    for line in report:
+        print(f"  * {line}")
+
+
+def report_guarded_settings(config: UserConfig) -> None:
+    """Report the guarded settings the user's setup changes, and its other checks' overrides.
+
+    Like the host command checks, these don't fail the setup; they're shown
+    so a weakened protection is a choice, not something copied in unawares.
+    """
+    report = [
+        *setup_check.simple_check_overrides(config),
+        *(str(change) for change in setup_check.guarded_changes(config)),
+    ]
+    if not report:
+        print("Good.  Your setup changes none of the guarded settings.")
+        return
+    print("Your setup changes these guarded settings; check each is what you want:")
     for line in report:
         print(f"  * {line}")
 

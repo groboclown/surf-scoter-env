@@ -639,6 +639,56 @@ verification:
             - trycloudflare.com
             - duckdns.org
 
+        # The settings that keep the tools' protections in place: `scoter
+        # user-setup` and the review report each one your setup file changes,
+        # with the default beside it, so following instructions that weaken one
+        # can't go unnoticed.  Each is `section:kind:key`, with `*` for every key
+        # of a kind.  Your setup can add to these lists, but taking an entry out
+        # changes nothing: the distribution's are always used too.
+        guarded:
+            # How the distribution's scripts run: `-E` keeps a project's
+            # PYTHONPATH out (it can set it as you enter its directory).
+            - python:runs:script
+            - python:runs:sub-command
+            - scoter:runs:find-acceptance
+            # `--no-local` keeps the workspace from sharing your repository's
+            # objects (FILE-2); finding the root and branch reads files, not Git.
+            - git-vcs:runs:local-clone
+            - git-vcs:runs:find-root
+            - git-vcs:runs:current-branch
+            # Adding a directory here is what weakens it: a project location
+            # lets a project build from files outside its project files directory.
+            - scoter:path-lists:dev-containers-search
+            # Where acceptances and state are kept, and where the run's files go.
+            - verification:paths:store
+            - scoter:paths:state-dir
+            - workspace:paths:*
+            # The network: the gateway, its configuration, and the containers.
+            - dev-env:values:network-gateway-name
+            - dev-env:runs:network-gateway-write-config
+            - dev-env:paths:docker-compose
+            - dev-env:paths:firewall-router
+            - dev-env:paths:network-gateway
+            - dev-env:values:mem-limit
+            - dev-env:values:cpus
+            - dev-env:values:pids-limit
+            # How the tools reach the container.
+            - ssh:runs:proxy-command
+            - docker:runs:broker
+            # The checks the review makes (`host-commands` replaced or removed
+            # are reported with the overrides, from the generator's notices).
+            - verification:project-files:*
+            - verification:egress-hosts:*
+        # Deny-lists, where adding entries only strengthens: a change is reported
+        # only when it leaves out one of the default's entries.
+        guarded-removals:
+            - git-vcs:value-lists:drop-env
+            - verification:value-lists:egress-refused-wildcards
+            - verification:path-lists:public-suffix-lists
+            - verification:path-lists:verified-containers
+            - verification:value-lists:guarded
+            - verification:value-lists:guarded-removals
+
     values:
         # How long an acceptance of a project's settings lasts, in days.
         expiry-days: 30

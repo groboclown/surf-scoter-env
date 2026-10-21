@@ -1442,6 +1442,15 @@ From step 19: a setup can weaken the tools' protections outside the `host-comman
 
 Suggested: a `verification: value-lists: guarded` list of `section:kind:key` names in the defaults, and `user-setup` (and the review's setup notes, step 18) reporting each that a user's setup file changes, with the default beside it.  Lists that only add (more `secret-file-patterns`) needn't be reported.  This is what makes it obvious when a user follows instructions that remove restrictions.
 
+### Completed
+
+* **The guards**, in the defaults' `verification` section: `value-lists: guarded` (any change reported: how the distribution's scripts run, the workspace's clone and the VCS's root and branch scripts, `dev-containers-search`, where the store, the state and the workspace are, the gateway and its configuration, the compose file and network containers, the container limits, `ssh: runs: proxy-command`, `docker: runs: broker`, and every `project-files` and `egress-hosts` check) and `value-lists: guarded-removals` (deny-lists, reported only for a default entry left out: `drop-env`, `egress-refused-wildcards`, `public-suffix-lists`, `verified-containers`, and the two guard lists).  Entries are `section:kind:key`, `*` for every key of a kind.
+* **The report** ([`setup_check.py`](../../scripts/surf_scoter_lib/setup_check.py)): `guarded_changes` compares each user setup file's settings, as written (the universal file's `setup.files`), with the distribution's, for each guarded key the user's file sets: a change, a removal (`null`), or, for `guarded-removals`, the default's entries left out.  A `*` guard covers the keys the distribution sets, so a user's own check (an addition) isn't reported, but `simple_check_overrides` lists every `project-files` and `egress-hosts` override in effect.  The guards used are the distribution's and the user's additions: a user file can't take one out, and one that tries is reported ("they still apply").  `setup_report` puts them with `host_command_report`.
+* **Where it shows**: `scoter user-setup` (after the host command checks; it doesn't fail the setup), and the review's setup notes, which `--skip-setup-review` leaves out (worded now for all of it: "How your setup changes the defaults' protections").
+* This also does what the simple checks' future task left: their replacements, removals and overrides are reported.
+
+**Tests:** in `test_setup_check.py`: unchanged and default values not reported; changes to a run and a list; a default check replaced and removed, and a user's own not; a deny-list that adds and one that leaves an entry out; a guard list emptied (its guards still used, and the attempt reported); a user's own guard; no user file.  In `test_review.py` and `integration-tests/01-verify-and-revoke`: the review's wording.  By hand, on the real defaults with a user setup that drops `-E`, `--no-local`, `GIT_*` and the guard list, and adds an override: each is reported, the override once.
+
 ## 21. Put a bow on it
 
 - Allow a timed exemption for working on a project.
@@ -1497,7 +1506,7 @@ Done (after step 19): `project-files` and `egress-hosts` are check kinds of thei
 
 So egress `$override`s (step 13) now mean something: an egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check, and uncommenting it with that override accepts it (`apply_overrides`, as for commands); the override is recorded in `accepted.json`.
 
-Still to do: `scoter user-setup` reports the host command checks a setup removes, replaces or overrides, but not these; step 20's guarded settings report could take them on.
+~~Still to do: `scoter user-setup` reports the host command checks a setup removes, replaces or overrides, but not these.~~  Done in step 20: `verification:project-files:*` and `verification:egress-hosts:*` are guarded, and their overrides are listed.
 
 **Tests:** in `simple_checks.rs`: parsing, and each problem (an empty `reason`, a bad pattern or host, the other kind's field, a bad `overrides` name, `${...}`).  In `universal.rs`: the checks in the universal file, replaced and removed by a higher priority file, an override that names nothing, or an override; a reference to one.  In `test_checks.py`: egress hosts exactly and by wildcard, the actions' severities, every check that counts shown, an override for one host, and an override that does nothing; project files by pattern and action; an egress refusal set aside by the review's `$override`.  In `test_review.py`: a refused egress rule commented out with its `$override`.  In `test_main_verify.py`, with the generator: an egress rule the user's setup refuses, accepted with its `$override`, recorded in `accepted.json`.
 

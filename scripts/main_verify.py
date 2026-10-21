@@ -78,7 +78,7 @@ def run_verify(
     context = review.Context(
         report=report, now=now, files=taken, branch=branch, accepted_note=accepted_note(config),
         previous=find_previous(config, branch),
-        setup_notes=setup_check.host_command_report(config) if setup_review else None,
+        setup_notes=setup_check.setup_report(config) if setup_review else None,
     )
     text = review.build(config, context)
     if output is not None:

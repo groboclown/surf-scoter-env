@@ -154,10 +154,10 @@ class BuildTest(unittest.TestCase):
         def build(notes: list[str] | None) -> list[str]:
             return review.build(config, review.Context(report=report, now=NOW, setup_notes=notes)).splitlines()
         lines = build(["`x:y` overrides `verification:shells` for `sh`, with `warn`"])
-        self.assertIn("#scoter: Your setup's host command checks (as `scoter user-setup` shows them):", lines)
+        self.assertIn("#scoter: How your setup changes the defaults' protections (as `scoter user-setup` shows):", lines)
         self.assertIn("#scoter:   `x:y` overrides `verification:shells` for `sh`, with `warn`", lines)
-        self.assertIn("#scoter: Your setup's host command checks: none removed, replaced or overridden.", build([]))
-        self.assertFalse(any("host command checks" in line for line in build(None)))
+        self.assertIn("#scoter: Your setup changes none of the defaults' protections.", build([]))
+        self.assertFalse(any("protections" in line for line in build(None)))
 
     def test_refused_egress_rule(self) -> None:
         """An egress rule an `egress-hosts` check refuses is commented out, with its `$override`."""

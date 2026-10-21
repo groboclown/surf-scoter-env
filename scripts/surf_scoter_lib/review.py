@@ -125,8 +125,8 @@ class Context:
     # The earlier acceptance to compare with (step 17), with what the user
     # accepted filled in; None for a full review.
     previous: previous_acceptance.Previous | None = None
-    # What the user should know about their setup's host command checks
-    # (`setup_check.host_command_report`); None to leave it out.
+    # How the user's setup changes the defaults' protections
+    # (`setup_check.setup_report`); None to leave it out.
     setup_notes: Sequence[str] | None = None
 
 
@@ -292,10 +292,10 @@ def _header(out: Writer, config: UserConfig, context: Context) -> None:
     if context.setup_notes is not None:
         out.note()
         if context.setup_notes:
-            out.note("Your setup's host command checks (as `scoter user-setup` shows them):")
+            out.note("How your setup changes the defaults' protections (as `scoter user-setup` shows):")
             out.notes(f"  {note}" for note in context.setup_notes)
         else:
-            out.note("Your setup's host command checks: none removed, replaced or overridden.")
+            out.note("Your setup changes none of the defaults' protections.")
     out.note()
     counts = {s: sum(1 for f in findings if f.severity == s) for s in checks.Severity}
     out.note(

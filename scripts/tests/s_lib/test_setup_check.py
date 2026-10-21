@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from ...surf_scoter_lib import jdata, setup_check, user_config
 
@@ -193,6 +194,95 @@ class ProgramFindingsTest(unittest.TestCase):
         self.assertEqual(self.findings(config), [
             ("refuse", "t.programs.git", "A shim picks the real program."),
         ])
+
+
+class GuardedChangesTest(unittest.TestCase):
+    """Test reporting the guarded settings a user's setup changes."""
+
+    DIST: ClassVar[jdata.DictJsonData] = {
+        "python": {"runs": {"script": ["${exec}", "-E", "-s"]}},
+        "git-vcs": {"value-lists": {"drop-env": ["GIT_*"]}, "runs": {"local-clone": "${exec} clone --no-local"}},
+        "verification": {
+            "value-lists": {
+                "guarded": ["python:runs:script", "git-vcs:runs:local-clone", "verification:egress-hosts:*"],
+                "guarded-removals": ["git-vcs:value-lists:drop-env", "verification:value-lists:guarded"],
+            },
+            "egress-hosts": {"code-hosts": {"action": "warn", "reason": "r", "hosts": ["github.com"]}},
+        },
+    }
+
+    def changes(self, user: jdata.DictJsonData) -> list[str]:
+        config = user_config.UserConfig({"setup": {"files": [
+            {"file": "/u/setup.yaml", "source": "user", "sections": user},
+            {"file": "/d/setup.yaml", "source": "distribution", "sections": self.DIST},
+        ]}})
+        return [str(c) for c in setup_check.guarded_changes(config)]
+
+    def test_unchanged(self) -> None:
+        """Nothing set, or set to the default, isn't reported."""
+        self.assertEqual(self.changes({}), [])
+        self.assertEqual(self.changes({"python": {"runs": {"script": ["${exec}", "-E", "-s"]}}}), [])
+
+    def test_changed(self) -> None:
+        self.assertEqual(self.changes({
+            "python": {"runs": {"script": ["${exec}", "-s"]}},
+            "git-vcs": {"runs": {"local-clone": "${exec} clone"}},
+        }), [
+            '/u/setup.yaml sets `python: runs: script` to ["${exec}", "-s"]; the default is ["${exec}", "-E", "-s"]',
+            '/u/setup.yaml sets `git-vcs: runs: local-clone` to "${exec} clone"; the default is "${exec} clone --no-local"',
+        ])
+
+    def test_checks_replaced_removed_and_added(self) -> None:
+        """Every key of a `*` guard: a check replaced or removed is reported; a new one isn't."""
+        self.assertEqual(self.changes({"verification": {"egress-hosts": {
+            "code-hosts": None,
+            "mine": {"action": "warn", "reason": "r", "hosts": ["x.example.com"]},
+        }}}), [
+            ('/u/setup.yaml removes `verification: egress-hosts: code-hosts`; the default is '
+             '{"action": "warn", "reason": "r", "hosts": ["github.com"]}'),
+        ])
+        self.assertEqual(self.changes({"verification": {"egress-hosts": {
+            "code-hosts": {"action": "allow", "reason": "mine", "hosts": ["github.com"]},
+        }}}), [
+            ('/u/setup.yaml sets `verification: egress-hosts: code-hosts` to '
+             '{"action": "allow", "reason": "mine", "hosts": ["github.com"]}; the default is '
+             '{"action": "warn", "reason": "r", "hosts": ["github.com"]}'),
+        ])
+
+    def test_removals_only(self) -> None:
+        """A deny-list that only adds isn't reported; one that leaves an entry out is."""
+        self.assertEqual(self.changes({"git-vcs": {"value-lists": {"drop-env": ["GIT_*", "PAGER"]}}}), [])
+        self.assertEqual(
+            self.changes({"git-vcs": {"value-lists": {"drop-env": ["GIT_DIR"]}}}),
+            ["/u/setup.yaml leaves out of `git-vcs: value-lists: drop-env` the default's `GIT_*`"],
+        )
+
+    def test_guards_cant_be_taken_out(self) -> None:
+        """A setup that empties the guard list still has the distribution's guards, and says so."""
+        found = self.changes({
+            "verification": {"value-lists": {"guarded": []}},
+            "python": {"runs": {"script": ["${exec}"]}},
+        })
+        self.assertIn(
+            "/u/setup.yaml tries to take 3 guard(s) out of `verification: value-lists: guarded`; "
+            "they still apply, as the distribution's are always used",
+            found,
+        )
+        self.assertTrue(any("sets `python: runs: script`" in line for line in found), found)
+
+    def test_user_guards_add(self) -> None:
+        """A user's own guard is checked too."""
+        self.DIST = {**self.DIST, "ssh": {"runs": {"proxy-command": "a"}}}  # type: ignore[misc]
+        self.assertEqual(self.changes({
+            "verification": {"value-lists": {"guarded": [*self.DIST["verification"]["value-lists"]["guarded"], "ssh:runs:proxy-command"]}},
+            "ssh": {"runs": {"proxy-command": "b"}},
+        }), ['/u/setup.yaml sets `ssh: runs: proxy-command` to "b"; the default is "a"'])
+
+    def test_no_user_file(self) -> None:
+        config = user_config.UserConfig({"setup": {"files": [
+            {"file": "/d/setup.yaml", "source": "distribution", "sections": self.DIST},
+        ]}})
+        self.assertEqual(setup_check.guarded_changes(config), [])
 
 
 class HostCommandReportTest(unittest.TestCase):

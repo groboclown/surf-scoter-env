@@ -203,6 +203,7 @@ The tools use these sections:
     * `egress-hosts`: checks on the hosts a project's egress rules reach, the same way.  The distribution's warn about hosts anyone can upload to (`code-hosts`, `paste-sites`, `object-storage`, `user-content`, `webhooks`, `file-sharing`): a rule that reaches one lets the container send data out, whatever the other rules say.
     * `path-lists: public-suffix-lists`: [Public Suffix List](https://publicsuffix.org/) files: a project's egress rule can't allow every subdomain (`*.DOMAIN`) of a public suffix, where anyone can have a name.  None by default.  To use the published list, download it (`curl -o ~/.config/surf-scoter.d/public_suffix_list.dat https://publicsuffix.org/list/public_suffix_list.dat`), name the file here, and refresh it now and then.  Its plain, wildcard (`*.ck`) and exception (`!www.ck`) rules are all used, its private section (shared hosting) too; entries outside ASCII are skipped, as egress hosts are written in their `xn--` form.  A file named here that can't be read is an error.  The refusal applies to the project file's rules, to those typed in a review, and to accepted settings at each run, so a refreshed list can refuse a wildcard accepted before.
     * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
+    * `value-lists: guarded` and `guarded-removals`: the settings that keep the tools' protections in place; see [Guarded settings](#guarded-settings).
     * `values: expiry-days`: how long an acceptance lasts, in days.  The default is 30.
     * `values: keep`: how many expired acceptances to keep for each project when you ask for a cleanup; nothing removes them on its own.  The default is 10.
     * `values: max-file-size` and `max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
@@ -405,6 +406,24 @@ verification:
 They merge across your setup files key by key, as the other checks do: add a check with a name of your own, set one again to replace it, or set it to `null` to remove it.  Prefer `overrides` to replacing or removing one, for the same reason.
 
 An egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check: uncommenting it with its `$override` accepts it for that project only.  A refused file has no such override: change the file, choose your own container (`use: {name}`), or change the check.
+
+## Guarded Settings
+
+Some settings keep the tools' protections in place: `-E` on the Python scripts (so a project's `PYTHONPATH` stays out), `--no-local` on the workspace's clone, Git's `drop-env`, the network gateway and its configuration, where the store and the workspace are, the review's checks.  The defaults mark them, in `verification: value-lists: guarded`, as `section:kind:key` (`*` for every key of a kind), and `scoter user-setup` and the review list each one your setup file changes, with the default beside it:
+
+```
+Your setup changes these guarded settings; check each is what you want:
+  * ~/.config/surf-scoter.d/setup.yaml sets `python: runs: script` to ["${exec}", "-s"]; the default is ["${exec}", "-E", "-s"]
+  * ~/.config/surf-scoter.d/setup.yaml leaves out of `git-vcs: value-lists: drop-env` the default's `GIT_*`
+```
+
+So a change copied in from instructions you didn't look at closely doesn't go unnoticed.  Neither fails the setup: they're your choices to make.
+
+* `guarded` settings are reported for any change, and so is a check of the distribution's that your setup replaces or removes (`verification:egress-hosts:*`); a check of your own isn't, as adding one can only add to what's checked, except that each override is listed too.
+* `guarded-removals` are deny-lists, where adding entries only strengthens (`drop-env`, `egress-refused-wildcards`): they're reported only when your setup leaves out one of the default's entries.
+* Your setup can add guards of its own to either list.  It can't take the distribution's out: they're always used, and a setup that tries is reported too.
+
+`scoter verify --skip-setup-review` leaves this, and the host command checks' report, out of the review.
 
 ## The Verified Store
 

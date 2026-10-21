@@ -24,9 +24,10 @@ it_expect "${IT_SANDBOX}/review.yaml" '  - command: "ls"'
 it_expect "${IT_SANDBOX}/review.yaml" '  # - command: "sh"'
 it_expect "${IT_SANDBOX}/review.yaml" '    # $override: ["verification:shells"]'
 # What the setup changes about the host command checks (nothing, here), unless left out.
-it_expect "${IT_SANDBOX}/review.yaml" "#scoter: Your setup's host command checks: none removed, replaced or overridden."
+# The sandbox's own setup only points `docker` at a wrapper, which isn't guarded.
+it_expect "${IT_SANDBOX}/review.yaml" "#scoter: Your setup changes none of the defaults' protections."
 scoter verify --skip-setup-review --output "${IT_SANDBOX}/skipped.yaml" 2> /dev/null
-it_expect_not "${IT_SANDBOX}/skipped.yaml" "host command checks"
+it_expect_not "${IT_SANDBOX}/skipped.yaml" "protections"
 
 it_say "accepting it"
 it_accept
