@@ -1,0 +1,21 @@
+# How Surf Scoter runs this container; see docs/project-dockerfile.md.
+
+# The user the container runs as, and that sshd accepts.
+user: ubuntu
+mounts:
+    # Where the project workspace is mounted.
+    workspace: /workspace
+    # Where the read-only setup directory is mounted.
+    setup: /opt/surf-scoter-setup
+# The broker that scoter-host connects to.
+broker-bin: /usr/local/bin/scoter-container
+
+# The port sshd listens on (see sshd_config).  May be null when
+# sshd-port-env is set, for a port the container picks as it starts.
+sshd-port: null
+sshd-port-env: SCOTER_SSHD_PORT
+
+# Optional: the images this one builds on; see the docs.
+# parents:
+#     - dir: ../base-env
+#       tag: my-base:latest

@@ -65,6 +65,5 @@ class FindTest(unittest.TestCase):
             (jdata.find, self.DATA, ("a", "b", "c")),
             (jdata.find, self.DATA, ("list", "v")),
         ):
-            with self.subTest(str(path)):
-                with self.assertRaises(TypeError):
-                    call(data, *path)
+            with self.subTest(str(path)), self.assertRaises(TypeError):
+                call(data, *path)

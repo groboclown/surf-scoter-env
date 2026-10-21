@@ -702,7 +702,7 @@ def main(argv: Sequence[str]) -> int:
             # (a container of the user's, say) would change what it shows.
             # `revoke` works on the store itself, and the lookup could carry
             # an acceptance forward just before it's revoked.
-            with_acceptance=args.cmd not in ("verify", "revoke"),
+            with_acceptance=args.cmd not in ("verify", "revoke", "kill"),
         )
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)

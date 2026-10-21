@@ -51,7 +51,8 @@ if ! ln "${here}/defaults/setup.yaml" . ; then
     link_fail=1
 fi
 if ! ln "${here}/scoter.py" scoter ; then
-    ln "${here}/scoter.py" scoter
+    cp "${here}/scoter.py" scoter
+    chmod 0755 scoter
     echo "scoter.py : link failed."
     link_fail=1
 fi

@@ -88,6 +88,17 @@ def report_host_command_checks(config: UserConfig) -> None:
         print(f"  * {line}")
 
 
+def ensure_private_dir(directory: Path) -> None:
+    """Make `directory` (such as `~/.ssh`) if it isn't there, readable only by you, as ssh wants.
+
+    One that's there is left as it is.
+    """
+    if not directory.exists():
+        directory.mkdir(mode=0o700, parents=True)
+        if not fileutil.is_windows():
+            os.chmod(directory, 0o700)
+
+
 def gen_key_pair(config: UserConfig, interactive: bool) -> None:
     # Step 2: generate the key pair.
     key_file = config.require_path("ssh", "key-file")
@@ -124,6 +135,7 @@ def gen_key_pair(config: UserConfig, interactive: bool) -> None:
         )
         if answer and answer[0] == "y":
             print("Generating the key pair.")
+            ensure_private_dir(key_file.parent)
             config.run_command("ssh", "mk-key", capture_stdout=False)
         else:
             print(
@@ -170,9 +182,10 @@ def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
             f"You'll need this to run Surf Scoter.  "
             f"Do you want me to create a blank one? [Yn]",
             interactive,
-            "n",
+            "y",
         )
         if answer and answer[0] == "y":
+            ensure_private_dir(ssh_config_file.parent)
             fileutil.touch(ssh_config_file, 0o600)
             print(f"Created an empty ssh config file ({ssh_config_file})")
 
@@ -201,7 +214,8 @@ def ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
             interactive,
             "y",
         )
-        if answer and answer == "y":
+        if answer and answer[0] == "y":
+            ensure_private_dir(known_hosts_file.parent)
             fileutil.touch(known_hosts_file, fileutil.MODE_USER_RW)
     else:
         # Set the permissions without asking.

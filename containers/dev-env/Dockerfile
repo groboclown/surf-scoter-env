@@ -46,7 +46,11 @@ RUN set -x \
  && chown -R ubuntu:ubuntu \
         /home/ubuntu/.ssh \
         /home/ubuntu/.config \
-        /home/ubuntu/.config/sshd
+        /home/ubuntu/.config/sshd \
+ # The host commands' links to the bridge client, made at start-up by the
+ # container's user (see entrypoint.sh), ahead of everything else on the PATH.
+ && install -d -o ubuntu -g ubuntu -m 0755 /usr/local/scoter-bridge
+ENV PATH=/usr/local/scoter-bridge:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY --chown=ubuntu:ubuntu \
     sshd_config /home/ubuntu/.config/sshd/sshd_config.template

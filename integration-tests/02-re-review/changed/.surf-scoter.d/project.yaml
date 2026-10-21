@@ -1,0 +1,10 @@
+# The sample project, changed after it was accepted: a new egress rule, and
+# the `ls` command taking an option.
+container:
+  dev-container-path: ./env
+egress:
+  - {host: registry.npmjs.org, protocol: tls}
+  - {host: pypi.org, protocol: tls}
+commands:
+  - {command: ls, args: ["-la", {any: {}}]}
+  - {command: sh, args: ["-c", {any: {}}]}

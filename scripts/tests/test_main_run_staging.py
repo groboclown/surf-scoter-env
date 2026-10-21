@@ -115,6 +115,15 @@ class PrepareTest(DistTest):
         )
         self.assertEqual(os.stat(plan.dev_container / "Dockerfile").st_mode & 0o777, 0o644)
 
+    def test_port_chosen_by_the_run(self) -> None:
+        """The run chooses a port the files leave unset before staging: that's no change."""
+        suc = self.project_suc(self.accept())
+        self.assertIsNone(suc["dev-container"]["sshd-port"])
+        config = UserConfig(suc)
+        config.set_dev_container_sshd_port("20001")
+        plan, _ = self.prepare(config.raw())
+        self.assertIsNotNone(plan)
+
     def test_changed_before_the_run_read_them(self) -> None:
         """The run read files that aren't the accepted ones: it stops, and says to run again."""
         accepted = self.accept()

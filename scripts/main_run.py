@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: run"""
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -25,7 +26,7 @@ from surf_scoter_lib import (
     setup_check,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib.err import ConfigErr, VerifiedStoreErr
+from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, VerifiedStoreErr
 from surf_scoter_lib.ssh_config import SshConfig
 from surf_scoter_lib.verified import staging
 
@@ -59,40 +60,36 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         return 1
     vcs_section = config.get_vcs_section()
 
-    # Prepare the active environment set for writing.
-    # Note that this requires explicit "close" mechanics when successfully used.
-    active_envs = ActiveEnvironmentSet.open(
-        config.require_path("dev-env", "running-env-config"),
-        config.require_path("dev-env", "running-env-config-lock"),
-    )
-    # Set once reserved: the environment's directory is named after it.
-    host = ""
-    try:
-        # -- Discovery
+    # -- Discovery, and the reservation of a host name, in one locked step:
+    # the port depends on the other environments, and they must see this one's.
+    with _active_envs(config) as active_envs:
         # Configure the sshd port.  It might be dynamic.
         _configure_sshd_port(config, active_envs)
 
         # Setup the SSH config file for running.
         host_prefix = _setup_ssh_config(config)
         if not host_prefix:
-            active_envs.close()
             return 1
 
         # Discover the host suffix to use.
-        host_suffix = active_envs.reserve_environ(host_prefix)
-        host = host_prefix + host_suffix
-
+        host_suffix = active_envs.reserve_environ(
+            host_prefix,
+            port=str(config.dev_container_sshd_port()),
+            user=config.dev_container_str("user"),
+            project_dir=str(config.require_active_location("project-dir")),
+        )
+    host = host_prefix + host_suffix
+    try:
         # -- Stage the accepted copy of the project's files to build from.
         plan = _stage_accepted(config, host)
         if plan is None:
-            active_envs.close()
+            _release(config, host)
             return 1
 
         # -- Build the containers
         image_tags = _build_containers(config, host, plan) # (dev-env, firewall, gateway)
         if not image_tags:
-            _remove_environment_dir(config, host)
-            active_envs.close()
+            _release(config, host)
             return 1
 
         # Remember to mark the work directories as ignored.
@@ -168,42 +165,33 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             (SUC_COPY_DIR, host, SUC_COPY_FILE),
             config.dumps().encode("utf-8"),
         )
+        # -- Record this environment, in place of its reservation.
+        with _active_envs(config) as active_envs:
+            active_envs.update_environ(EnvironmentDesc(
+                host_prefix=host_prefix,
+                host_suffix=host_suffix,
+
+                # See _write_docker_compose_env_file
+                dev_env_name=host,
+                firewall_router_name=f"{host}-fr",
+                network_gateway_name=f"{host}-ng",
+
+                project_dir=str(config.require_active_location("project-dir")),
+                resources_dir=str(resources_dir),
+                workspace_dir=str(workspace_dir),
+                setup_dir=str(setup_dir),
+                compose_file=str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
+                compose_env_file=str(resources_dir / defaults.COMPOSE_ENV_FILENAME),
+                dev_env_ssh_port=str(config.dev_container_sshd_port()),
+                dev_env_ssh_user=config.dev_container_str("user"),
+                created_at=datetime.datetime.now().isoformat(),
+                suc=json.loads(config.dumps()),  # expensive deep copy
+                pid=os.getpid(),
+            ))
     except:
         print("Aborting execution.", file=sys.stderr)
-        _remove_environment_dir(config, host)
-        # Close without saving.
-        active_envs.close()
+        _release(config, host)
         raise
-
-    # -- Record this environment
-    # If the save fails, then something grabbed the lock
-    # from under us.
-    if not active_envs.save(close=False):
-        raise ConfigErr(
-            "Lost our lock on the active environments.  "
-            "Please wait longer before launching a second one."
-        )
-    active_envs.update_environ(EnvironmentDesc(
-        host_prefix=host_prefix,
-        host_suffix=host_suffix,
-
-        # See _write_docker_compose_env_file
-        dev_env_name=host,
-        firewall_router_name=f"{host}-fr",
-        network_gateway_name=f"{host}-ng",
-        
-        project_dir=str(config.require_active_location("project-dir")),
-        resources_dir=str(resources_dir),
-        workspace_dir=str(workspace_dir),
-        setup_dir=str(setup_dir),
-        compose_file=str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
-        compose_env_file=str(resources_dir / defaults.COMPOSE_ENV_FILENAME),
-        dev_env_ssh_port=str(config.dev_container_sshd_port()),
-        dev_env_ssh_user=config.dev_container_str("user"),
-        created_at=datetime.datetime.now().isoformat(),
-        suc=json.loads(config.dumps()),  # expensive deep copy
-    ))
-    active_envs.save(close=True)
 
     # -- start the containers
     # Start the docker-compose.yaml (daemon mode).
@@ -218,11 +206,12 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         capture_stderr=False,
     )
 
+    failed = False
     try:
         # Tell the user the setup for the container (host name).
         print("==========================================")
         print(f"dev-container running as {host}")
-        print(f"Connect to the container using `ssh ${host}`")
+        print(f"Connect to the container using `ssh {host}`")
         print("Waiting for it to start...")
         if not _wait_for_container(config, host, timeout_sec=defaults.CONTAINER_START_TIME_SEC):
             print("Container didn't start in time.")
@@ -230,13 +219,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             print("Container started.")
             print("Running the host-bridge process.")
             print("Press 'ctrl-c' to stop and tear down the environment.")
-            # Start scoter-host
-            if args.bin_dir:
-                scoter_host = fileutil.require_exe(Path(args.bin_dir) / defaults.SCOTER_HOST_EXEC)
-            else:
-                scoter_host = fileutil.require_exe(
-                    Path(args.distribution_dir) / defaults.DISTRIBUTION_BIN_DIR / defaults.SCOTER_HOST_EXEC
-                )
+            # Start scoter-host, from the distribution's bin directory (which
+            # `scoter` sets, `--bin-dir` included).
+            scoter_host = fileutil.require_exe(config.get_dist_bin_dir() / defaults.SCOTER_HOST_EXEC)
             print([scoter_host, "--universal", str(universal_config_file), host])
             res = subprocess.run(  # nosec: B603  # We checked the input above.
                 [scoter_host, "--universal", str(universal_config_file), host],
@@ -248,6 +233,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
     except KeyboardInterrupt:
         print("User requested termination.")
+    except Exception as err:  # noqa: BLE001  # The containers are up: tear them down, whatever went wrong.
+        print(f"Stopping the environment: {err}", file=sys.stderr)
+        failed = True
 
     # -- Tear it all down.
 
@@ -262,12 +250,8 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     )
 
     # Remove from active mode.
-    active_envs = ActiveEnvironmentSet.open(
-        config.require_path("dev-env", "running-env-config"),
-        config.require_path("dev-env", "running-env-config-lock"),
-    )
-    active_envs.rm_environ_by_host(host)
-    active_envs.save(close=True)
+    with _active_envs(config) as active_envs:
+        active_envs.rm_environ_by_host(host)
 
     # scoter-host's copy of the configuration.
     fileutil.rm(universal_config_file.parent)
@@ -278,7 +262,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     #fileutil.rm(resources_dir)
     # Keep the 'workspace' directory, though.
 
-    return 0
+    return 1 if failed else 0
 
 
 def _setup_programs_ok(config: UserConfig) -> bool:
@@ -299,6 +283,21 @@ def _setup_programs_ok(config: UserConfig) -> bool:
     for finding in refused:
         print(f"  * {finding.key}: {finding.message}", file=sys.stderr)
     return False
+
+
+def _active_envs(config: UserConfig) -> contextlib.AbstractContextManager[ActiveEnvironmentSet]:
+    """The active environments, to change under their lock."""
+    return ActiveEnvironmentSet.locked(
+        config.require_path("dev-env", "running-env-config"),
+        config.require_path("dev-env", "running-env-config-lock"),
+    )
+
+
+def _release(config: UserConfig, host: str) -> None:
+    """Give up a run that didn't start: its reservation, and its directory."""
+    _remove_environment_dir(config, host)
+    with contextlib.suppress(ActiveEnvErr), _active_envs(config) as active_envs:
+        active_envs.rm_environ_by_host(host)
 
 
 def _environment_dir(config: UserConfig, host: str) -> Path:
@@ -617,7 +616,9 @@ def _setup_ssh_config(config: UserConfig) -> str | None:
         return None
 
     user = config.dev_container_str("user")
-    port = config.dev_container_str("sshd-port")  # force a value here.
+    port = config.dev_container_sshd_port()
+    if port is None:
+        raise ConfigErr("the dev container's sshd port wasn't chosen")
     key_file = config.require_path("ssh", "key-file")
     proxy = config.require_run("ssh", "proxy-command", template={"port": port})
     host_prefix = (

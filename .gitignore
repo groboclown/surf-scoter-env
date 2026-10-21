@@ -35,7 +35,6 @@ rustc-ice-*.txt
 
 # Python local files.
 .venv/
-env/
 venv/
 __pycache__/
 __pypackages__/

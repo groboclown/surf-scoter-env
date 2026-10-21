@@ -149,6 +149,10 @@ def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> 
         {"dir": str(Path(os.path.realpath(d))), "tag": tag}
         for tag, d in config.dev_container_parent_builds()
     ]
+    if staged_dev.get("sshd-port") is None:
+        # The files leave the port to the run, which chose it before staging.
+        mapped.pop("sshd-port", None)
+        run_dev = {k: v for k, v in run_dev.items() if k != "sshd-port"}
     if (
         live(dev_path) != os.path.realpath(config.require_active_location("dev-container-path"))
         or mapped != {**run_dev, "parent-builds": run_parents}

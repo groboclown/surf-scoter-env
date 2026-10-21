@@ -83,8 +83,19 @@ class UserConfig:
         return Path(loc) if loc else None
 
     def require_value(self, section: str, key: str) -> str:
-        """Load a value (as a string) that might exist."""
-        return self.__req_str("resolved", section, "values", key)
+        """A section's `values` entry, which must be set, as text.
+
+        The generator keeps a number as a number (`cpus: 4`), so it's given
+        back as its text.
+        """
+        val = self.__find(jdata.find, "resolved", section, "values", key)
+        if isinstance(val, str):
+            return val
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return str(val)
+        if val is None:
+            raise ConfigErr(f"The setup's `{section}` `values: {key}` isn't set.")
+        raise ConfigErr(f"The setup's `{section}` `values: {key}` must be text or a number, not {val!r}.")
 
     def active_location(self, name: str) -> Path | None:
         """Read an active location path; None when it isn't set.
@@ -174,8 +185,16 @@ class UserConfig:
         return self.__opt_str("dev-container", "sshd-port-env")
 
     def dev_container_sshd_port(self) -> str | None:
-        """Get the sshd-port from the dev-container."""
-        return self.__opt_str("dev-container", "sshd-port")
+        """The dev container's `sshd-port`, as text; None when it's null (chosen at run time).
+
+        `dev-env.yaml` gives it as a number, and the run sets it as one.
+        """
+        val = self.__find(jdata.find, "dev-container", "sshd-port")
+        if val is None:
+            return None
+        if isinstance(val, bool) or not isinstance(val, (int, str)):
+            raise ConfigErr(f"bad universal configuration file: dev-container / sshd-port: {val!r} isn't a port")
+        return str(val)
 
     def set_dev_container_sshd_port(self, value: str) -> None:
         """Set the ssh-port in the dev-container, if it's unset."""

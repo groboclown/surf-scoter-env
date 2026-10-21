@@ -82,3 +82,26 @@ class DropEnvTest(unittest.TestCase):
                 os.environ["GIT_DIR"] = old
         self.assertEqual(dropped.strip(), b"-")
         self.assertEqual(kept.strip(), b"/elsewhere/.git")
+
+
+class RequireValueTest(unittest.TestCase):
+    """A section's values, as text."""
+
+    def test_text_and_numbers(self) -> None:
+        config = user_config.UserConfig({"resolved": {"dev-env": {"values": {
+            "image": "x", "cpus": 4, "ratio": 0.5, "flag": True, "unset": None,
+        }}}})
+        self.assertEqual(config.require_value("dev-env", "image"), "x")
+        self.assertEqual(config.require_value("dev-env", "cpus"), "4")
+        self.assertEqual(config.require_value("dev-env", "ratio"), "0.5")
+        for name in ("flag", "unset", "missing"):
+            with self.assertRaises(user_config.ConfigErr, msg=name):
+                config.require_value("dev-env", name)
+
+    def test_sshd_port(self) -> None:
+        """Null until the run chooses it; a number or text after."""
+        config = user_config.UserConfig({"dev-container": {"sshd-port": None}})
+        self.assertIsNone(config.dev_container_sshd_port())
+        config.set_dev_container_sshd_port("20001")
+        self.assertEqual(config.dev_container_sshd_port(), "20001")
+        self.assertEqual(user_config.UserConfig({"dev-container": {"sshd-port": "22"}}).dev_container_sshd_port(), "22")
