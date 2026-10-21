@@ -623,8 +623,9 @@ scoter:
         project-file-name: project.yaml
         # How long an accepted project's settings stay accepted, in days.
         verified-expiry-days: 30
-        # How many expired acceptances to keep for each project (they let a
-        # review show what changed since); older ones are removed.
+        # How many expired acceptances to keep for each project when you ask
+        # for a cleanup.  Nothing removes them on its own: the newest is what
+        # the next review compares with.
         verified-keep: 10
         # The largest project file, and the most for all of a project's files,
         # copied into `verified-dir` with each acceptance, in bytes.

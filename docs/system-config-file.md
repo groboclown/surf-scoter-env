@@ -208,7 +208,7 @@ The tools use these sections:
     * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
     * `path-lists: dev-containers-verified`: the `dev-containers-search` directories whose containers are reviewed like a project's own.  The others (such as the distribution's `containers`) are trusted as part of your installation.  Empty by default; add `${scoter:distribution-dir}/containers` to review the distribution's containers too.
     * `values: verified-expiry-days`: how long an accepted project's settings stay accepted, in days.  The default is 30.
-    * `values: verified-keep`: how many expired acceptances to keep for each project; older ones are removed.  The default is 10.
+    * `values: verified-keep`: how many expired acceptances to keep for each project when you ask for a cleanup; nothing removes them on its own.  The default is 10.
     * `values: verified-max-file-size` and `verified-max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the verified store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.
@@ -345,7 +345,7 @@ For `ksh`, this check's `warn` takes the place of `host-bridge: shells`' `refuse
 
 The copies take disk space.  Each file is kept once, however many acceptances share it, so each new acceptance costs a copy of the files that changed since the last one; but container directories can hold large files copied into the image.  To keep it bounded:
 
-* Each acceptance expires after `verified-expiry-days`.  Expired acceptances are kept for a while, so a review can show what changed since; past `verified-keep` of them, the oldest are removed, with the files nothing else uses.
+* Each acceptance expires after `verified-expiry-days`.  Expired acceptances are kept, so a review can show what changed since; nothing removes them on its own.  `scoter revoke` removes them (`scoter list-accepted` lists them), with the files nothing else uses.
 * `verified-max-file-size` and `verified-max-snapshot-size` limit what one acceptance can copy.
 
 Everything in it must belong to you, with no access for anyone else (directories `0700`, files `0600`), and contain no symlinks; the tools refuse to read it otherwise.  On Windows, which has no file modes, that's left to your user profile's permissions.

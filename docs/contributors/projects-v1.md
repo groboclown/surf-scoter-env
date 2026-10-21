@@ -1263,6 +1263,69 @@ Add in the capability for the main_verify.py script to perform a diff if the dir
 
 Use the three stored versions (step 5) to show what the project changed separately from what the user changed, and show only those differences in the verification file.
 
+### Draft: the three versions
+
+A re-review compares, item by item:
+
+1. **What the project suggested last time**: the earlier acceptance's `suggestion.json` (`project`, `dev-container`), and its snapshot's files (manifest and blobs).
+2. **What the user accepted**: the earlier acceptance's `review.yaml`, as the user left it, in the project file's shape (`env` split, `$comment` and `$override` on their items).  `accepted.json` isn't enough: its commands carry the whole merged environment plan, and no notes.
+3. **What the project suggests now**: the SUC's `current-project-setup`, `current-project-resolved` and `dev-container`, and the current snapshot.
+
+Python has no YAML parser, so (2) comes through the generator: `gen-scoter-uc --previous-review FILE` parses the stored `review.yaml` with step 13's rules, but without the checks against the run (its `expires-at` has usually passed; it's the user's own file, from the store), and writes the SUC's `previous-review`: its data as written, in the project file's shape (`egress`, `env`, `commands`, `dev-container`, with each `$comment` and `$override`).  Nothing is accepted from it: it only seeds the new review.
+
+### Draft: which acceptance is "last time"
+
+The project's newest acceptance on the current branch (`Acceptance.branch`), or, without one, its newest of any branch, expired ones included: an expiry is the commonest reason to re-review, and the diff is most useful then.  A blanket acceptance has no snapshot, so it's skipped.  The header names it: "Compared with your acceptance 2026...-ab12 (branch main, expired 2026-10-01)."
+
+### Draft: matching items
+
+Egress rules match by `host`, `protocol` and `port`.  A top-level `env` entry matches by variable name, in each of its lists.  Commands match by `command` name when the name appears once on each side; otherwise only an identical entry matches, and the rest count as removed and added.  (Commands with several allowed forms are the case where "changed" can't be told from "removed one, added another", and reading them as removed and added is the safe reading.)
+
+### Draft: what each item becomes
+
+| Project last time → now | The user had | The new review's data | Marked |
+|---|---|---|---|
+| unchanged | kept it as suggested | as before | one line: "unchanged since you accepted it" |
+| unchanged | edited it | the user's version, with its `$override` and `$comment` | "your change, kept" |
+| unchanged | removed it | left out, the suggestion written commented out | "you removed this before" |
+| changed | (anything) | the project's new version | "the project changed this", with what changed, and the user's earlier version commented out beside it; its `$override` is dropped (step 12: an override covers what the user saw), its `$comment` kept, "on the earlier version" |
+| added | — | the project's new version, with its findings | "new: the project added this" |
+| removed | (anything) | left out, the user's version written commented out | "the project removed this" |
+| — | added it | the user's version | "added by you" |
+
+Findings are worked out afresh for every item, and every refusal is shown in full whether the item changed or not, since a setup change can refuse what was accepted before.  Unchanged items keep their data but drop their other `#scoter:` detail to the one line, so the file shows only what changed; the summary at the top counts only the changes and the refusals.
+
+### Draft: the files
+
+Each container file in both snapshots that differs is shown as a unified diff (`difflib`, from the stored blob to the current file), cleaned as every comment is, for text files under a size limit; others show their old and new sizes and hashes.  A new file is listed as now (Dockerfiles in full); a removed one says so; an unchanged one is one line.
+
+### Draft: the setup
+
+The acceptance's setup values (step 5) are compared with the current ones, and each that changed is listed in the header ("`host-bridge:shells` changed since you accepted it"), since a setup change alone also asks for a review.
+
+### Design decisions
+
+* Unchanged items stay in the file as data, collapsed to one line each.
+* An item the project changed after the user edited it shows the project's setting, with the user's edit commented out beside it.
+* The base includes expired acceptances.  So expiring doesn't remove an acceptance: saving no longer prunes (step 5's `verified-keep`); cleaning up is step 20's, which may also clean up projects whose directory is gone.
+* Carrying forward on meaning stays automatic, with its notice: asking would bother the user about noise.
+
+Completed:
+
+* **The base** ([`verified/previous.py`](../../scripts/surf_scoter_lib/verified/previous.py)): the project's newest acceptance on the current branch, or else its newest, expired ones included, with a snapshot and a stored suggestion.  Its files are read from the blobs, and its setup values compared with the current ones (`setup_changes`, listed in the header).
+* **What the user accepted:** `gen-scoter-uc --previous-review FILE` parses the stored `review.yaml` with step 13's rules, without the checks against the run, and gives the SUC's `previous-review`: `file`, and `data` as written (`Review::as_written`).  If it can't be read, the review is a full one, and says why.
+* **What the project suggested:** each acceptance now stores the suggestion as the review wrote it (`review.suggested`) in `suggestion.json`'s `review`, so the comparison is between like and like (resolved programs and `env`).
+* **Comparing** ([`review.py`](../../scripts/surf_scoter_lib/review.py)): `compare` matches items (egress by host, protocol and port; commands by name when it's on each side once, else only identical ones), and `show` writes each as the design's table says.
+  * Unchanged items keep the user's data (with `$comment` and `$override`) on one line.  If the setup now refuses one, the refusal is shown in full; an override covering it keeps it, and otherwise it's commented out.
+  * An item that changed shows the project's setting and the differences, with the user's earlier edit commented out beside it; its `$override` is dropped and its `$comment` kept, marked.
+  * New items get their full findings; removed ones are offered back commented out; the user's own additions are kept, marked.  A refused item the user hadn't taken is shown as the project's, refused, not as "removed by you".
+  * The top-level `env` is one item, compared the same way.  The file's own `$comment` is carried, and the dev container's `use` and `images` choices too.
+  * Container files: unchanged ones are one line; changed text files show a unified diff (up to 200 lines, for files up to 256 KB); new and removed ones are marked.
+  * The header names the base, and the summary counts what changed since.
+* **No more pruning on save:** `save_environment` only writes; `prune_environment` keeps the old pruning for step 20's cleanup.  `verified-keep` is for that cleanup.
+
+**Tests:** in [`test_main_verify_diff.py`](../../scripts/tests/test_main_verify_diff.py), with the generator and acceptances made through the prompt: a first review is full; a re-review after the user's edits (a note, a narrower argument, an override) and the project's changes (a new rule, a changed command, a changed Dockerfile) shows each as it should, and can be used as it stands; nothing changed keeps the user's edits; a removed item is offered back with its note; the base prefers the branch and takes an expired acceptance; the suggestion is stored.  In [`test_review.py`](../../scripts/tests/s_lib/test_review.py): `compare` for each kind and the command matching, `differences`, `setup_changes`.  In `universal.rs`: `--previous-review` reads an expired review for another directory, keeping its notes, and still refuses a broken one.  By hand: accepted a scratch project, changed it, and `scoter verify --output` showed the unchanged rule on one line, the new rule, the changed `ls` and the Dockerfile's diff.
+
 ## 18. Wrap up previous steps
 
 Things left dangling because of dependency ordering.  These may be tackled earlier, but this tracks unfinished work.  Some of these may end up as future tasks.
@@ -1280,7 +1343,7 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - The notices only show in `scoter user-setup`.  Decide whether the review (step 14) shows them too.
 - Step 5:
   - `active_env.py`'s lock checks and then writes, which two runs can interleave, and a crashed run leaves it held.  Move it to `fileutil.exclusive_lock`.
-  - Step 17 decides when a match on meaning carries an acceptance forward (`EnvironmentRecord.carry_forward`), and how the user is told.
+  - ~~Step 17 decides when a match on meaning carries an acceptance forward (`EnvironmentRecord.carry_forward`), and how the user is told.~~  Step 17 kept it automatic, with its one-line notice.
   - On Windows, the store's owner and mode checks are skipped; the design's "under the user's profile" check isn't written yet.
   - Case-insensitive file systems: the environment id doesn't fold the path's case.
   - Any change to the setup values asks for a new review.  Some don't affect a project's security; telling them apart is for step 19.
@@ -1302,7 +1365,12 @@ Things left dangling because of dependency ordering.  These may be tackled earli
 - Step 13:
   - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
 - Step 14:
-  - The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet.  Step 15 now stores `review.yaml`; the rest needs the matching of items (step 17).
+  - ~~The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet.~~  Done in step 17.
+- Step 17:
+  - Acceptances made before step 17 have no `review` in their `suggestion.json`, so they're passed over as a base (a full review).
+  - The top-level `env` is compared as one item, not per variable, as the draft had it; a change to any variable shows the block's differences.
+  - A `$comment` the user put on an item that's gone from both the project and their acceptance is lost; one on an item the project removed is kept with the item, commented out.
+  - The comparison finds what changed in the project and the user's choices, but not why a resolved value changed: a `${...}` that resolves differently on the host shows as "changed since", as a project change does.
 - Step 16:
   - The message without an acceptance doesn't say why (never accepted, expired, the files or the setup changed).
   - Containers in `dev-containers-verified`, and the user's own (`use: {name}`), build from their live directories: the lookup checked the verified ones' manifests a moment earlier, which leaves a short window.

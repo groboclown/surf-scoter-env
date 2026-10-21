@@ -139,14 +139,14 @@ class RecordsTest(TempDirTest):
         with verified.locked():
             taken.store(verified)
             env = records.EnvironmentRecord("e", "/p", [old])
-            records.save_environment(verified, env, keep=10)
+            records.save_environment(verified, env)
         loaded = records.load_environment(verified, "/p", "e")
         self.assertEqual(loaded, env)
         with self.assertRaisesRegex(err.VerifiedStoreErr, "is for /p"):
             records.load_environment(verified, "/q", "e")
         self.assertEqual(verified.blob_size(), 5)
         with verified.locked():
-            removed = records.save_environment(verified, env, keep=0)
+            removed = records.prune_environment(verified, env, keep=0)
         self.assertEqual(removed, [old])
         self.assertEqual(verified.blob_size(), 0)
 

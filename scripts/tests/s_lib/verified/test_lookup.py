@@ -66,7 +66,7 @@ class LookupTest(TempDirTest):
                     env_id, records.ACCEPTANCES_DIR, acceptance.id, lookup.ACCEPTED_FILE,
                     data=json.dumps({"commands": []}).encode(),
                 )
-            records.save_environment(self.verified, record, keep=10)
+            records.save_environment(self.verified, record)
         return acceptance
 
     def test_nothing_accepted(self) -> None:

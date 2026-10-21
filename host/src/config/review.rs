@@ -95,6 +95,9 @@ pub struct Review {
     pub container_use: ContainerUse,
     /// Each image the build starts from, and what to build from instead.
     pub images: BTreeMap<String, String>,
+    /// The file's data as the user left it, `$comment`s and `$override`s
+    /// included: what a later review starts from (step 17).
+    pub as_written: Json,
 }
 
 /// Read the review file at `path`.
@@ -131,6 +134,15 @@ pub fn parse(text: &str, path: &Path) -> Result<Review, Vec<ConfigError>> {
             )]);
         }
     }
+    let as_written = match serde_json::to_value(Value::Mapping(map.clone())) {
+        Ok(json) => json,
+        Err(e) => {
+            return Err(vec![error(
+                "",
+                format!("isn't data a review can hold: {e}"),
+            )]);
+        }
+    };
     // The user said no: nothing else matters.
     match map.get("result") {
         None | Some(Value::Null) => {}
@@ -148,6 +160,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Review, Vec<ConfigError>> {
                 egress_overrides: BTreeMap::new(),
                 container_use: ContainerUse::Project,
                 images: BTreeMap::new(),
+                as_written,
             });
         }
         Some(_) => problems.push((
@@ -267,6 +280,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Review, Vec<ConfigError>> {
                 egress_overrides,
                 container_use,
                 images,
+                as_written,
             })
         }
         _ => Err(errors_of(problems)),

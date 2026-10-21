@@ -9,7 +9,9 @@ An acceptance keeps, in the verified store:
 * `accepted.json`: the accepted settings the generator gave from the review
   (the SUC's `review: accepted`), which later runs give back to it;
 * `review.yaml`: the review file as the user left it;
-* `suggestion.json`: the project file and dev container it was reviewed from;
+* `suggestion.json`: the project file and dev container it was reviewed from,
+  and the suggestion as the review wrote it (`review`), which the next
+  review compares with (step 17);
 
 and, in the environment's record, the snapshot of the project's files (its
 contents as blobs) and the setup values it was reviewed under.
@@ -26,7 +28,6 @@ from . import lookup, records, snapshot, store
 
 REVIEW_FILE = "review.yaml"
 SUGGESTION_FILE = "suggestion.json"
-DEFAULT_KEEP = 10
 
 
 def store_acceptance(
@@ -36,12 +37,16 @@ def store_acceptance(
     accepted: jdata.DictJsonData,
     branch: str | None,
     now: datetime.datetime,
+    *,
+    suggested: jdata.DictJsonData | None = None,
 ) -> records.Acceptance:
     """Record the user's acceptance of `accepted`, for the project's files in `taken`.
 
     `config` is the universal configuration file the review was made from;
     `taken` the snapshot of the project's files taken before the review was
-    written, so the acceptance is for the files the user saw.
+    written, so the acceptance is for the files the user saw.  `suggested`
+    is the suggestion as the review wrote it (`review.suggested`), which the
+    next review compares with (step 17).
     """
     project = config.active_location("project-dir")
     verified = config.optional_path("scoter", "verified-dir")
@@ -64,8 +69,8 @@ def store_acceptance(
     suggestion: jdata.DictJsonData = {
         "project": config.project_setup(),
         "dev-container": config.dev_container(),
+        "review": suggested,
     }
-    keep = config.optional_int_value("scoter", "verified-keep") or DEFAULT_KEEP
     verified_store = store.VerifiedStore.open(verified, create=True)
     env_id = store.environment_id(Path(project_dir))
     with verified_store.locked():
@@ -78,7 +83,7 @@ def store_acceptance(
         verified_store.write_bytes(*where, REVIEW_FILE, data=review_text)
         verified_store.write_bytes(*where, SUGGESTION_FILE, data=_json(suggestion))
         record.add(acceptance)
-        records.save_environment(verified_store, record, keep)
+        records.save_environment(verified_store, record)
     return acceptance
 
 

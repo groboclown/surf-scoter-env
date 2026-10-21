@@ -239,7 +239,7 @@ class RevokeTest(unittest.TestCase):
         exempt = acceptance.accepted_at + datetime.timedelta(days=1)
         record.acceptances[0] = dataclasses.replace(acceptance, exempt_until=exempt)
         with verified_store.locked():
-            records.save_environment(verified_store, record, keep=10)
+            records.save_environment(verified_store, record)
         shutil.rmtree(self.project)
         out = self.run_list()[1]
         self.assertIn(f"{self.project}  (the directory is gone)", out)

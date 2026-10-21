@@ -29,6 +29,7 @@ from surf_scoter_lib import (
 )
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import accept, lookup, snapshot
+from surf_scoter_lib.verified import previous as previous_acceptance
 
 # The generator refuses a review file larger than this, too.
 MAX_REVIEW_SIZE = 2 * 1024 * 1024
@@ -65,6 +66,7 @@ def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | N
     report = checks.check_project(config)
     context = review.Context(
         report=report, now=now, files=taken, branch=branch, accepted_note=accepted_note(config),
+        previous=find_previous(config, branch),
     )
     text = review.build(config, context)
     if output is not None:
@@ -73,7 +75,7 @@ def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | N
         print(summary(report), file=sys.stderr)
         return 0
     assert taken is not None  # nosec: B101  # narrowing for the type checker
-    return Prompt(config, taken, branch).run(text)
+    return Prompt(config, taken, branch, suggested=review.suggested(config, report)).run(text)
 
 
 def project_dir(config: UserConfig) -> Path:
@@ -121,6 +123,9 @@ class Prompt:
     config: UserConfig
     taken: snapshot.Snapshot
     branch: str | None
+    # The project's suggestion as the review wrote it, stored for the next
+    # review to compare with.
+    suggested: jdata.DictJsonData | None = None
     ask: Callable[[str], str] = input
     # Runs the editor on the review file: (file, the directory to start in).
     edit: Callable[[Path, Path], None] | None = None
@@ -172,6 +177,7 @@ class Prompt:
             try:
                 acceptance = accept.store_acceptance(
                     self.config, self.taken, data, checked.accepted, self.branch, self.now(),
+                    suggested=self.suggested,
                 )
             except (OSError, SurfScoterErr, KeyError, TypeError, ValueError) as err:
                 print(f"Couldn't store your acceptance: {review.clean(str(err))}", file=sys.stderr)
@@ -336,6 +342,42 @@ def current_branch(config: UserConfig) -> str | None:
         return None
     branch = res.stdout.decode("utf-8", errors="replace").strip()
     return branch if res.returncode == 0 and branch else None
+
+
+def find_previous(config: UserConfig, branch: str | None) -> previous_acceptance.Previous | None:
+    """The earlier acceptance to compare with, with what the user accepted; None for a full review.
+
+    The user's `review.yaml` is read by the generator (`--previous-review`).
+    If anything about it can't be read, the review is a full one.
+    """
+    try:
+        found = previous_acceptance.find(config, branch)
+    except (OSError, ValueError, SurfScoterErr) as err:
+        print(f"Your earlier acceptances couldn't be read ({review.clean(str(err))}); "
+              "this is a full review.", file=sys.stderr)
+        return None
+    if found is None:
+        return None
+    args = ["--project-dir", str(project_dir(config))]
+    vcs_root = config.active_location("vcs-root")
+    if vcs_root is not None:
+        args.extend(("--vcs-root", str(vcs_root)))
+    args.extend(("--previous-review", str(found.review_file)))
+    directory = Path(tempfile.mkdtemp(prefix="scoter-previous-"))
+    try:
+        suc, problems = generator.run(config, args, directory)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    data = jdata.find_dict(suc, "previous-review", "data") if suc else None
+    if data is None:
+        print(
+            f"Your earlier review ({found.acceptance.id}) couldn't be read "
+            f"({review.clean('; '.join(problems))}); this is a full review.",
+            file=sys.stderr,
+        )
+        return None
+    found.accepted = data
+    return found
 
 
 def accepted_note(config: UserConfig) -> str | None:

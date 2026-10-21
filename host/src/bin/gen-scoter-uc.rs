@@ -7,6 +7,7 @@
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
 //!                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
+//!                      [--previous-review REVIEW.yaml]
 //!                      [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
@@ -44,6 +45,7 @@ const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] \
                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml] \
+                     [--previous-review REVIEW.yaml] \
                      [--output FILE]";
 
 fn main() {
@@ -81,6 +83,9 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             );
             println!(
                 "--review gives the user's review file for the project; the file's `review` holds what it says, and the accepted settings it gives."
+            );
+            println!(
+                "--previous-review gives an earlier acceptance's review file, which a new review starts from; the file's `previous-review` holds its data as written.  It isn't checked against the run, and nothing is accepted from it."
             );
             println!("--output gives the file to write; otherwise, the JSON goes to stdout.");
             return EXIT_OK;
@@ -146,6 +151,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut universal: Option<OsString> = None;
     let mut accepted_settings: Option<OsString> = None;
     let mut review: Option<OsString> = None;
+    let mut previous_review: Option<OsString> = None;
     let mut no_setup_search = false;
     let mut output: Option<OsString> = None;
     let mut args = args.into_iter();
@@ -176,6 +182,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             "--universal" => &mut universal,
             "--accepted-settings" => &mut accepted_settings,
             "--review" => &mut review,
+            "--previous-review" => &mut previous_review,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -202,6 +209,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             no_setup_search,
             accepted_settings: accepted_settings.map(PathBuf::from),
             review: review.map(PathBuf::from),
+            previous_review: previous_review.map(PathBuf::from),
         },
         output: output.map(PathBuf::from),
     }))
@@ -246,6 +254,8 @@ mod tests {
             "--universal=first.json",
             "--no-setup-search",
             "--accepted-settings=/v/accepted.json",
+            "--previous-review",
+            "/v/review.yaml",
             "--output=out.json",
         ]));
         assert_eq!(
@@ -261,6 +271,7 @@ mod tests {
                     no_setup_search: true,
                     accepted_settings: Some(PathBuf::from("/v/accepted.json")),
                     review: None,
+                    previous_review: Some(PathBuf::from("/v/review.yaml")),
                 },
                 output: Some(PathBuf::from("out.json")),
             })),

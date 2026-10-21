@@ -67,6 +67,9 @@ pub struct Universal {
     /// (`accept` or `reject`), and the accepted settings it gives (`null`
     /// when rejected), which the checks judge before anything is stored.
     pub review: Option<Json>,
+    /// An earlier acceptance's review file, when given: its `file`, and its
+    /// `data` as the user left it, which a new review starts from.
+    pub previous_review: Option<Json>,
     /// The dev container's `dev-env.yaml`.
     pub dev_container: Option<Json>,
     /// The system setup as read.
@@ -247,6 +250,12 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                 "file": review.file.to_string_lossy(),
                 "result": if review.rejected { "reject" } else { "accept" },
                 "accepted": (!review.rejected).then(|| review.accepted(vcs, gateway.as_deref())),
+            })
+        }),
+        previous_review: config.previous_review.as_ref().map(|review| {
+            serde_json::json!({
+                "file": review.file.to_string_lossy(),
+                "data": review.as_written,
             })
         }),
         dev_container,
@@ -1465,6 +1474,61 @@ mod tests {
                 "expires-at: must be in the future",
                 "dev-container.use: there's no container 'nope' in your `dev-containers-search` directories outside the project",
             ]
+        );
+    }
+
+    #[test]
+    fn previous_review_as_written() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+        );
+        // Expired, and for a directory that isn't this run's: neither matters here.
+        let previous = dir.write(
+            "previous.yaml",
+            concat!(
+                "review: \"surf-scoter-review-1\"\n",
+                "project-dir: \"/elsewhere\"\n",
+                "expires-at: \"2000-01-01T00:00:00Z\"\n",
+                "$comment: \"for the release\"\n",
+                "egress:\n  - {host: \"github.com\", protocol: \"tls\", $comment: \"read only\"}\n",
+                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"host-bridge:shells\"]}\n",
+            ),
+        );
+        let load_with = |file: &Path| {
+            let options = LoadOptions {
+                project_dir: Some(dir.path().join("proj")),
+                previous_review: Some(file.to_path_buf()),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_all_with_env(&options, env)
+        };
+        let universal = build(&load_with(&previous).unwrap()).unwrap();
+        let section = universal.previous_review.unwrap();
+        assert_eq!(section["file"], previous.display().to_string());
+        let data = &section["data"];
+        assert_eq!(data["$comment"], "for the release");
+        assert_eq!(data["egress"][0]["$comment"], "read only");
+        assert_eq!(data["commands"][0]["$override"][0], "host-bridge:shells");
+        // Nothing is accepted from it.
+        assert!(universal.review.is_none());
+        assert!(universal.host_brokered.is_empty());
+        // It's still parsed as a review is.
+        let broken = dir.write("broken.yaml", "review: \"surf-scoter-review-1\"\nproject-dir: \"/p\"\nexpires-at: \"2000-01-01T00:00:00Z\"\nmystery: 1\n");
+        assert_eq!(
+            error_texts(load_with(&broken).unwrap_err()),
+            ["mystery: unknown key"]
         );
     }
 

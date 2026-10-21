@@ -168,6 +168,9 @@ pub struct LoadOptions {
     pub accepted_settings: Option<PathBuf>,
     /// The user's review file for the project (`--review`).
     pub review: Option<PathBuf>,
+    /// The review file of an earlier acceptance (`--previous-review`), for a
+    /// new review to start from: read, but not checked against the run.
+    pub previous_review: Option<PathBuf>,
 }
 
 /// What `load_all` uses from a universal configuration file: the setup, and
@@ -240,6 +243,8 @@ pub struct FullConfig {
     pub accepted: Option<AcceptedSettings>,
     /// The user's review file for the project, when given.
     pub review: Option<Review>,
+    /// An earlier acceptance's review file, when given.
+    pub previous_review: Option<Review>,
 }
 
 /// Read the whole configuration, using the process environment to find the
@@ -381,6 +386,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             dev_container,
             accepted,
             review: None,
+            previous_review: None,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -548,6 +554,13 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
+    // An earlier acceptance's review: it only seeds a new review, and has
+    // usually expired, so it isn't checked against the run.
+    let previous_review = options.previous_review.as_deref().and_then(|file| {
+        review::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()
+    });
     // The user's own container, when the accepted settings name one, in
     // place of the project's.
     let mut dev_container = dev_container;
@@ -570,6 +583,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             dev_container,
             accepted,
             review,
+            previous_review,
         }),
         _ => Err(ConfigErrors(errors)),
     }

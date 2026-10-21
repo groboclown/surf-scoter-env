@@ -322,15 +322,25 @@ def load_environment(store: VerifiedStore, project_dir: str, env_id: str) -> Env
     return record
 
 
-def save_environment(store: VerifiedStore, record: EnvironmentRecord, keep: int) -> list[Acceptance]:
-    """Write the environment's record, after pruning it; the acceptances pruned.
+def save_environment(store: VerifiedStore, record: EnvironmentRecord) -> None:
+    """Write the environment's record, and list it in the index.
 
-    The store must be locked.  Pruned acceptances' files go, and so do the
-    blobs no environment refers to any more.
+    The store must be locked.  Nothing is pruned: an expired acceptance is
+    still what the next review compares with (step 17), so removing them is
+    for the user to ask for (`prune_environment`).
     """
-    removed = record.prune(keep, now_utc())
     store.register(record.project_dir, record.id)
     store.write_json(record.id, ENVIRONMENT_FILE, data=record.to_json())
+
+
+def prune_environment(store: VerifiedStore, record: EnvironmentRecord, keep: int) -> list[Acceptance]:
+    """Remove the environment's expired acceptances beyond the newest `keep`; those removed.
+
+    The store must be locked.  The record is written, the pruned
+    acceptances' files go, and so do the blobs nothing refers to any more.
+    """
+    removed = record.prune(keep, now_utc())
+    save_environment(store, record)
     for acceptance in removed:
         store.remove(record.id, ACCEPTANCES_DIR, acceptance.id)
     if removed:

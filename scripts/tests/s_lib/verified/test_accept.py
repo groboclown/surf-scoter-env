@@ -36,7 +36,6 @@ class StoreAcceptanceTest(TempDirTest):
                     "values": {
                         "project-files-dir": ".surf-scoter.d",
                         "project-file-name": "project.yaml",
-                        "verified-keep": 2,
                     },
                 },
             },

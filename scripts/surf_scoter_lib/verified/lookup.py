@@ -141,7 +141,6 @@ def _carry_forward(
     config: UserConfig,
 ) -> records.Acceptance:
     """Record a new acceptance for `current`, from a match on meaning."""
-    keep = config.optional_int_value("scoter", "verified-keep") or 10
     with verified_store.locked():
         # Again, under the lock: another run may have changed it.
         record = records.load_environment(verified_store, project_dir, env_id)
@@ -156,5 +155,5 @@ def _carry_forward(
                 verified_store.write_bytes(
                     env_id, records.ACCEPTANCES_DIR, carried.id, name, data=data,
                 )
-        records.save_environment(verified_store, record, keep)
+        records.save_environment(verified_store, record)
     return carried

@@ -192,3 +192,55 @@ class BranchTest(unittest.TestCase):
         (checkout / ".git").write_text("gitdir: ../real-git\n", encoding="utf-8")
         self.assertEqual(vcs_branch.current_branch(checkout), "main")
         self.assertIsNone(vcs_branch.current_branch(self.tmp / "nothing"))
+
+
+class CompareTest(unittest.TestCase):
+    """Test comparing items across the three versions (step 17)."""
+
+    def kinds(self, section: str, old: list, mine: list, new: list) -> list[tuple[str, int | None]]:
+        return [(c.kind, c.index) for c in review.compare(section, old, mine, new)]
+
+    def test_fresh(self) -> None:
+        """Without an earlier acceptance, every item is fresh."""
+        self.assertEqual(self.kinds("egress", None, None, [{"host": "a"}]), [("fresh", 0)])  # type: ignore[arg-type]
+
+    def test_each_kind(self) -> None:
+        a, b, c = ({"host": h, "protocol": "tls", "port": 443} for h in "abc")
+        b_methods = {**b, "methods": ["GET"]}
+        mine_a = {**a, "$comment": "kept"}
+        mine_x = {"host": "x", "protocol": "tls", "port": 443}
+        # `c` was in the suggestion, but the user had dropped it, and so has the project: nothing to show.
+        self.assertEqual(
+            self.kinds("egress", [a, b, c], [mine_a, b, mine_x], [a, b_methods, {"host": "d", "protocol": "tls", "port": 443}]),
+            [("unchanged", 0), ("changed", 1), ("added", 2), ("yours", None)],
+        )
+        self.assertEqual(self.kinds("egress", [a], [], [a]), [("removed-by-you", 0)])
+        self.assertEqual(self.kinds("egress", [a], [a], []), [("removed", None)])
+
+    def test_commands_by_name(self) -> None:
+        """A command on each side once matches by name; with several forms, only identical ones match."""
+        ls = {"command": "ls", "program": "/bin/ls", "args": []}
+        ls_l = {**ls, "args": ["-l"]}
+        mine_ls = {**ls, "args": ["-a"]}
+        self.assertEqual(self.kinds("commands", [ls], [mine_ls], [ls]), [("edited", 0)])
+        self.assertEqual(self.kinds("commands", [ls], [ls], [ls_l]), [("changed", 0)])
+        # Two forms of `ls` now: the new one can't be told from a change, so it's added.
+        self.assertEqual(
+            self.kinds("commands", [ls], [ls], [ls, ls_l]), [("unchanged", 0), ("added", 1)],
+        )
+
+    def test_differences(self) -> None:
+        self.assertEqual(
+            review.differences({"args": [], "program": "/a", "$comment": "x"}, {"args": ["-l"], "program": "/a"}),
+            ['  args: [] -> ["-l"]'],
+        )
+
+
+class SetupChangesTest(unittest.TestCase):
+    """Test listing the setup values that changed."""
+
+    def test_changes(self) -> None:
+        from ...surf_scoter_lib.verified import previous
+        before = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 2}, "vcs": "git-vcs"}
+        now = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 3, "c": 4}, "vcs": None}
+        self.assertEqual(previous.setup_changes(before, now), ["checks: b", "checks: c", "vcs"])
