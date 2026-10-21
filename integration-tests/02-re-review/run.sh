@@ -41,6 +41,8 @@ it_expect "${IT_SANDBOX}/run.log" "Run \`scoter verify\` to review them"
 
 it_say "accepting the re-review as it stands"
 it_accept
-[ "$( scoter list-accepted -q | wc -l )" -eq 2 ] || it_fail "expected two acceptances"
+# In place of the first: one acceptance per branch.
+[ "$( scoter list-accepted -q )" != "${id}" ] || it_fail "the re-review wasn't stored"
+[ "$( scoter list-accepted -q | wc -l )" -eq 1 ] || it_fail "expected one acceptance"
 
 it_pass

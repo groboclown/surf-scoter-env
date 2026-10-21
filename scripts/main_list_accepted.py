@@ -40,6 +40,8 @@ def run_list(config: UserConfig, *, quiet: bool) -> int:
         print(f"{review.clean(env.project_dir)}{gone}")
         for acceptance in acceptances:
             print("  " + review.clean(revoke.describe(acceptance, now)))
+        if record is not None and record.exemption is not None:
+            print("  " + review.clean(revoke.describe_exemption(record.exemption, now)))
     if not quiet:
         if not count:
             print("You haven't accepted any project's settings.")

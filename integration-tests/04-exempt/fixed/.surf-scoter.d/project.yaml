@@ -1,0 +1,9 @@
+# The changed sample project, without the shell the setup refuses: its
+# suggestion can be accepted as it stands.
+container:
+  dev-container-path: ./env
+egress:
+  - {host: registry.npmjs.org, protocol: tls}
+  - {host: pypi.org, protocol: tls}
+commands:
+  - {command: ls, args: ["-la", {any: {}}]}

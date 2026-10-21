@@ -17,9 +17,10 @@ Some best practices to consider while you code and doc.
 ## Constants and Names
 
 - Avoid magic numbers and strings by extracting recurring or meaningful values into descriptive constants (const) or enums. Keep self-explanatory, one-off values inline to avoid clutter. If a value comes from a spec (e.g. HTTP 200 OK), use a constant regardless.
-- Where reasonable, include the unit name in the variable or constant - `TIMEOUT_SECONDS` over `TIMEOUT`.
+- Where reasonable, include the unit name in the variable or constant - `TIMEOUT_SECONDS` over `TIMEOUT`.  Terms like "size" can cause confusion.  If the value permits setting the unit (e.g. `30 mb` or `7 days`), then use a unit-less name.
 - Keep function names short. Less than 30 characters.
     - Do not start a test function name with the article (such as `func a_value_must_be_empty()` or `fn an_animal_moves()` or `def test_the_humidor_is_full()`).  Such extra characters do not aid in reader comprehension.
+    - Tests can have longer names if the function-under-test has a long name, but it also should indicate the need to shorten the function-under-test's name.
 - Use enums instead of booleans for function parameters.
 
 
@@ -34,15 +35,15 @@ Some best practices to consider while you code and doc.
 
 ## Rust
 
-- Always use {}, even on a one-line "if" statement.
-- Annotate references where elision over-constrains.  Unless absolutely required, structures holding references can allow them to come from multiple lifecycle contexts.  This means prefer `struct Name<'a, 'b>{ left: &'a Value, right: &'b Value }` to `struct Name { left: &Value, right: &Value }`.  This can also happen in some call signatures.  However, the terseness rule wins over this.
+- Always use `{}`, even on a one-line "if" statement.
+- Annotate references where elision over-constrains.  Unless absolutely required, structures holding references can allow them to come from multiple lifecycle contexts.  This means prefer `struct Name<'a, 'b>{ left: &'a Value, right: &'b Value }` to `struct Name { left: &Value, right: &Value }`.  This can also happen in some call signatures.  However, terseness wins over this.
 
 
 ## Python
 
 - Use type hints everywhere.
 - Anywhere you write-off ruff or bandit notices, add a comment why you did it.
-
+- Python data-driven unit tests use 'subTest' to distinguish which ones fail, and to keep running when any one fails.
 
 ## Shell Scripts
 

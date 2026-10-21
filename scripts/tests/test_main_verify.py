@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Test the main_verify script: the review prompt, and storing an acceptance."""
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -17,9 +18,9 @@ SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import main_verify
 from surf_scoter_lib.user_config import UserConfig
-from surf_scoter_lib.verified import lookup, records, store
+from surf_scoter_lib.verified import exempt, lookup, records, store
 
-from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, DistTest
+from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, PROJECT_FILE, DistTest
 
 POSIX = sys.platform != "win32"
 
@@ -367,3 +368,71 @@ class PromptTest(DistTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_GENERATOR, NEEDS_GENERATOR)
+class WithExemptionTest(DistTest):
+    """Test `scoter verify --with-exemption`: the suggestion accepted as it stands, under an exemption."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Without the shell, which the checks refuse.
+        self.write_project(PROJECT_FILE.replace('  - {command: sh, args: ["-c", {any: {}}]}\n', ""))
+
+    def write_project(self, text: str) -> None:
+        (self.files / "project.yaml").write_text(text, encoding="utf-8")
+
+    def record(self) -> records.EnvironmentRecord:
+        found = records.load_environment(
+            store.VerifiedStore.open(self.verified), str(self.project), store.environment_id(self.project),
+        )
+        assert found is not None  # nosec: B101  # narrowing for the type checker
+        return found
+
+    def accept_with_exemption(self) -> int:
+        with quiet():
+            return main_verify.accept_with_exemption(UserConfig(self.project_suc()))
+
+    def start(self) -> records.Exemption:
+        """Accept the project through the prompt, then start an exemption."""
+        config = UserConfig(self.project_suc())
+        taken = lookup.project_snapshot(config, self.project)
+        prompt = main_verify.Prompt(config, taken, None, ask=answers("u"))
+        text = main_verify.review.build(config, main_verify.review.Context(
+            report=main_verify.checks.check_project(config), now=prompt.now(), files=taken,
+        ))
+        with quiet():
+            self.assertEqual(prompt.run(text), 0)
+        return exempt.start(config, records.now_utc())
+
+    def test_without_an_exemption(self) -> None:
+        """No exemption: nothing's accepted."""
+        self.assertEqual(self.accept_with_exemption(), 1)
+        self.assertFalse(self.verified.exists())
+
+    def test_accepted_and_carried(self) -> None:
+        """The changed suggestion is accepted, as `exempted`, and the exemption moves to it."""
+        exemption = self.start()
+        self.write_project(PROJECT_FILE.replace("registry.npmjs.org", "pypi.org").replace(
+            '  - {command: sh, args: ["-c", {any: {}}]}\n', "",
+        ))
+        self.assertEqual(self.accept_with_exemption(), 0)
+        record = self.record()
+        # In place of the reviewed one: one per branch.
+        [newest] = record.acceptances
+        self.assertEqual(newest.kind, records.Kind.EXEMPTED)
+        self.assertEqual(record.exemption, dataclasses.replace(exemption, acceptance=newest.id))
+        found = lookup.find(UserConfig(self.project_suc()))
+        self.assertEqual((found.match, found.acceptance), (records.MatchKind.EXACT, newest.id))
+        assert found.accepted_settings is not None  # nosec: B101  # narrowing for the type checker
+        accepted = json.loads(found.accepted_settings.read_text(encoding="utf-8"))
+        self.assertEqual(accepted["egress"][0]["host"], "pypi.org")
+
+    def test_refused(self) -> None:
+        """What the checks refuse needs a review: nothing's accepted, and the exemption stays."""
+        exemption = self.start()
+        self.write_project(PROJECT_FILE)
+        self.assertEqual(self.accept_with_exemption(), 1)
+        record = self.record()
+        self.assertEqual([a.kind for a in record.acceptances], [records.Kind.REVIEWED])
+        self.assertEqual(record.exemption, exemption)

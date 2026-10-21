@@ -71,18 +71,17 @@ class StoreAcceptanceTest(TempDirTest):
         for name in (accept.REVIEW_FILE, lookup.ACCEPTED_FILE, accept.SUGGESTION_FILE):
             self.assertEqual(os.stat(where / name).st_mode & 0o777, 0o600)
 
-    def test_newest_first(self) -> None:
-        """Each acceptance goes first, before the earlier ones for the project."""
+    def test_replaces_the_branchs(self) -> None:
+        """Each acceptance replaces the branch's earlier one, and its files go."""
         config = UserConfig(self.suc())
-        later = records.now_utc() + datetime.timedelta(days=1)
-        old = [self.store(config, later) for _ in range(2)]
+        old = self.store(config, records.now_utc() + datetime.timedelta(days=1))
         newest = self.store(config, records.now_utc() + datetime.timedelta(days=3))
-        record = records.load_environment(
-            store.VerifiedStore.open(self.verified), str(self.project), store.environment_id(self.project),
-        )
+        verified_store = store.VerifiedStore.open(self.verified)
+        env_id = store.environment_id(self.project)
+        record = records.load_environment(verified_store, str(self.project), env_id)
         assert record is not None  # nosec: B101  # narrowing for the type checker
-        self.assertEqual(record.acceptances[0].id, newest.id)
-        self.assertEqual({a.id for a in record.acceptances[1:]}, {a.id for a in old})
+        self.assertEqual([a.id for a in record.acceptances], [newest.id])
+        self.assertFalse((self.verified / env_id / records.ACCEPTANCES_DIR / old.id).exists())
 
     def test_no_store_named(self) -> None:
         """Without `verification: paths: store`, nothing can be stored."""

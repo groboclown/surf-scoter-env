@@ -2,6 +2,7 @@
 """Test the verified records module."""
 import datetime
 import unittest
+from dataclasses import replace
 
 from ....surf_scoter_lib import err
 from ....surf_scoter_lib.user_config import UserConfig
@@ -22,7 +23,7 @@ class RecordsTest(TempDirTest):
     SETUP = records.SetupRecord({"a": 1})
 
     def acceptance(
-        self, manifest: snapshot.Manifest | None, *, days: int = 30, age: int = 0,
+        self, manifest: snapshot.Manifest, *, days: int = 30, age: int = 0,
         kind: records.Kind = records.Kind.REVIEWED,
     ) -> records.Acceptance:
         accepted = self.NOW - datetime.timedelta(days=age)
@@ -47,20 +48,16 @@ class RecordsTest(TempDirTest):
         return acceptances[0]
 
     def test_validity(self) -> None:
-        """Valid, expired, exempt, and invalid windows."""
+        """Valid, expired, and invalid windows."""
         acceptance = self.acceptance(_manifest("0"))
         self.assertEqual(acceptance.validity(self.NOW), records.Validity.VALID)
         later = self.NOW + datetime.timedelta(days=31)
         self.assertEqual(acceptance.validity(later), records.Validity.EXPIRED)
         earlier = self.NOW - datetime.timedelta(seconds=1)
         self.assertEqual(acceptance.validity(earlier), records.Validity.INVALID)
-        exempt = records.Acceptance(**{
-            **acceptance.__dict__, "exempt_until": self.NOW + datetime.timedelta(days=1),
-        })
-        self.assertEqual(exempt.validity(self.NOW), records.Validity.EXEMPT)
 
     def test_find(self) -> None:
-        """Exact, then on meaning, then blanket; only usable ones, under the same setup."""
+        """Exact, then on meaning, then an exemption's; only usable ones, under the same setup."""
         old = _manifest("0")
         now = _manifest("1")
         env = records.EnvironmentRecord("e", "/p", [])
@@ -75,9 +72,20 @@ class RecordsTest(TempDirTest):
         self.assertEqual((found.kind, found.acceptance), (records.MatchKind.EXACT, exact))
         other = snapshot.Manifest({"g": snapshot.FileEntry("2" * 64, 1, False)})
         self.assertIsNone(env.find(other, self.SETUP, self.NOW))
-        env.add(self.acceptance(None, kind=records.Kind.BLANKET))
-        found = self.found(env.find(other, self.SETUP, self.NOW))
-        self.assertEqual(found.kind, records.MatchKind.BLANKET)
+        until = self.NOW + datetime.timedelta(hours=1)
+        env.exemption = records.Exemption(exact.id, until, "main", self.NOW)
+        found = self.found(env.find(other, self.SETUP, self.NOW, "main"))
+        self.assertEqual((found.kind, found.acceptance), (records.MatchKind.EXEMPT, exact))
+        # Only on its branch, until its end, and under the same setup.
+        self.assertIsNone(env.find(other, self.SETUP, self.NOW, "dev"))
+        self.assertIsNone(env.find(other, self.SETUP, until, "main"))
+        self.assertIsNone(env.find(other, records.SetupRecord({"a": 2}), self.NOW, "main"))
+        # Without a branch (no VCS, or one without branches), any run.
+        env.exemption = records.Exemption(exact.id, until, None, self.NOW)
+        self.assertIsNotNone(env.find(other, self.SETUP, self.NOW, "dev"))
+        # Not if its acceptance is gone.
+        env.exemption = records.Exemption("gone", until, None, self.NOW)
+        self.assertIsNone(env.find(other, self.SETUP, self.NOW))
         # Expired ones don't count.
         later = self.NOW + datetime.timedelta(days=40)
         self.assertIsNone(env.find(now, self.SETUP, later))
@@ -89,36 +97,56 @@ class RecordsTest(TempDirTest):
         env.add(earlier)
         current = _manifest("1")
         found = self.found(env.find(current, self.SETUP, self.NOW))
-        carried = env.carry_forward(found, current, self.NOW, "main")
+        carried, replaced = env.carry_forward(found, current, self.NOW, None)
+        self.assertEqual(replaced, [earlier])
         self.assertEqual(carried.kind, records.Kind.CARRIED)
         self.assertEqual(carried.from_id, earlier.id)
         self.assertEqual(carried.expires_at, earlier.expires_at)
         self.assertEqual(carried.suggestion, current)
-        self.assertEqual(env.acceptances[0], carried)
+        self.assertEqual(env.acceptances, [carried])
         exact = self.found(env.find(current, self.SETUP, self.NOW))
         with self.assertRaises(ValueError):
             env.carry_forward(exact, current, self.NOW, None)
 
+    def test_one_per_branch(self) -> None:
+        """A new acceptance replaces its branch's, expired or not, and takes its exemption; others stay."""
+        env = records.EnvironmentRecord("e", "/p", [])
+        expired = replace(self.acceptance(_manifest("0"), age=100), branch="main")
+        other = replace(self.acceptance(_manifest("1"), age=100), branch="dev")
+        none = self.acceptance(_manifest("2"))
+        for acceptance in (expired, other, none):
+            self.assertEqual(env.add(acceptance), [])
+        env.exemption = records.Exemption(expired.id, self.NOW, "main", self.NOW)
+        newer = replace(self.acceptance(_manifest("3")), branch="main")
+        self.assertEqual(env.add(newer), [expired])
+        self.assertEqual(env.acceptances, [newer, none, other])
+        self.assertEqual(env.exemption, records.Exemption(newer.id, self.NOW, "main", self.NOW))
+        latest = self.acceptance(_manifest("4"))
+        self.assertEqual(env.add(latest), [none])
+        self.assertEqual(env.acceptances, [latest, newer, other])
+
     def test_prune(self) -> None:
         """Expired acceptances beyond the newest `keep` go; usable ones stay."""
         env = records.EnvironmentRecord("e", "/p", [])
-        for age in (100, 90, 80, 0):
-            env.add(self.acceptance(_manifest(str(age % 10)), age=age))
+        for i, age in enumerate((100, 90, 80, 0)):
+            env.add(replace(self.acceptance(_manifest(str(age % 10)), age=age), branch=f"b{i}"))
         removed = env.prune(2, self.NOW)
         self.assertEqual(len(removed), 1)
         self.assertEqual(removed[0].accepted_at, self.NOW - datetime.timedelta(days=100))
         self.assertEqual(len(env.acceptances), 3)
 
     def test_json(self) -> None:
-        """Records survive JSON; a blanket acceptance has no suggestion, others must."""
+        """Records, and their exemption, survive JSON; an acceptance must have its suggestion."""
+        accepted = self.acceptance(_manifest("0"))
         env = records.EnvironmentRecord("e", "/p", [
-            self.acceptance(_manifest("0")),
-            self.acceptance(None, kind=records.Kind.BLANKET),
+            accepted, self.acceptance(_manifest("1"), kind=records.Kind.EXEMPTED),
         ])
         self.assertEqual(records.EnvironmentRecord.from_json(env.to_json()), env)
+        env.exemption = records.Exemption(accepted.id, self.NOW, None, self.NOW)
+        self.assertEqual(records.EnvironmentRecord.from_json(env.to_json()), env)
         data = env.to_json()
-        self.first_acceptance(data)["suggestion"] = None
-        with self.assertRaisesRegex(ValueError, "only a blanket"):
+        del self.first_acceptance(data)["suggestion"]
+        with self.assertRaisesRegex(KeyError, "suggestion"):
             records.EnvironmentRecord.from_json(data)
         bad = env.to_json()
         self.first_acceptance(bad)["setup"] = {"id": "sha256:x", "values": {"a": 1}}

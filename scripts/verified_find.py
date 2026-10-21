@@ -4,7 +4,7 @@
 Usage: verified_find.py UNIVERSAL.json
 
 The setup's `verified: runs: find-acceptance` runs this for `scoter`.  It
-prints JSON: the match (`exact`, `meaning`, `blanket` or null), the
+prints JSON: the match (`exact`, `meaning`, `exempt` or null), the
 acceptance's id, its `accepted.json` (for `gen-scoter-uc
 --accepted-settings`), and any notice for the user; see
 `surf_scoter_lib.verified.lookup`.

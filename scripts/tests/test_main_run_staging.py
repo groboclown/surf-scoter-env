@@ -7,6 +7,7 @@ import sys
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 # The scripts import the library as their own directory's, as they do when
 # they run.
@@ -15,7 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 import main_verify
 from surf_scoter_lib import checks, generator, review
 from surf_scoter_lib.user_config import UserConfig
-from surf_scoter_lib.verified import lookup, staging
+from surf_scoter_lib.verified import exempt, lookup, staging
 
 from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, DistTest
 from .test_main_verify import answers, quiet
@@ -149,6 +150,68 @@ class PrepareTest(DistTest):
         self.assertEqual(tag, "proj-base")
         self.assertTrue(parent.is_relative_to(build))
         self.assertEqual((parent / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
+    def exempt(self, accepted: Path) -> UserConfig:
+        """Start an exemption, change the live files, and adopt the accepted settings; the run's config."""
+        now = datetime.datetime.now(datetime.UTC)
+        exempt.start(UserConfig(self.project_suc()), now)
+        (self.files / "env" / "Dockerfile").write_text("FROM ubuntu:noble\n", encoding="utf-8")
+        (self.files / "env" / "extra.sh").write_text("echo hi\n", encoding="utf-8")
+        (self.files / "env" / "dev-env.yaml").write_text(
+            self.dev_env_yaml.replace("user: ubuntu", "user: root"), encoding="utf-8",
+        )
+        config = UserConfig(self.project_suc(accepted))
+        self.assertEqual(config.dev_container_str("user"), "root")
+        work = self.tmp / "state" / "adopt"
+        work.mkdir(parents=True, mode=0o700)
+        self.assertTrue(staging.adopt_accepted(config, work, generator.run, now))
+        return config
+
+    def test_exempt(self) -> None:
+        """Under an exemption: the container files as they are, the settings as accepted."""
+        config = self.exempt(self.accept())
+        # The run's settings are the accepted `dev-env.yaml`'s, before it reads any.
+        self.assertEqual(config.dev_container_str("user"), "ubuntu")
+        self.assertEqual(
+            config.require_active_location("dev-container-path"), self.files / "env",
+        )
+        plan, build = self.prepare(config.raw())
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(plan.dev_container.is_relative_to(build))
+        self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM ubuntu:noble\n")
+        self.assertEqual((plan.dev_container / "extra.sh").read_text(), "echo hi\n")
+        self.assertEqual(
+            (plan.dev_container / "dev-env.yaml").read_text(encoding="utf-8"), self.dev_env_yaml,
+        )
+
+    def test_not_exempt(self) -> None:
+        """Without an exemption, adopting changes nothing."""
+        suc = self.project_suc(self.accept())
+        work = self.tmp / "state" / "adopt"
+        work.mkdir(parents=True, mode=0o700)
+        now = datetime.datetime.now(datetime.UTC)
+        config = UserConfig(suc)
+        self.assertFalse(staging.adopt_accepted(config, work, generator.run, now))
+        self.assertEqual(config.raw(), suc)
+
+    @unittest.skipUnless(hasattr(os, "link"), "hard links")
+    def test_exempt_refused(self) -> None:
+        """Under an exemption, the setup's checks still refuse container files: a hard link here."""
+        config = self.exempt(self.accept())
+        os.link(self.files / "env" / "extra.sh", self.files / "env" / "linked.sh")
+        with self.assertRaisesRegex(staging.StagingErr, "has other hard links") as caught:
+            self.prepare(config.raw())
+        self.assertFalse(caught.exception.reverify)
+
+    def test_exempt_checks_refuse(self) -> None:
+        """Under an exemption, a refusal from the setup's `project-files` checks stops the run."""
+        config = self.exempt(self.accept())
+        refused = checks.Finding(checks.Severity.REFUSE, "env/extra.sh", "a secret")
+        with (
+            mock.patch.object(checks, "check_project_files", return_value=[refused]),
+            self.assertRaisesRegex(staging.StagingErr, "checks refuse them:\n  env/extra.sh: a secret"),
+        ):
+            self.prepare(config.raw())
 
     def test_expired(self) -> None:
         """An acceptance that has expired since: a new review."""

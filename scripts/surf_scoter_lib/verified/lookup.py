@@ -31,7 +31,7 @@ class Lookup:
 
     match: records.MatchKind | None = None
     acceptance: str | None = None
-    # The acceptance's `accepted.json`; None for a blanket acceptance, or no match.
+    # The acceptance's `accepted.json`; None without a match.
     accepted_settings: Path | None = None
     notice: str | None = None
 
@@ -62,21 +62,75 @@ def find(config: UserConfig) -> Lookup:
     setup = records.SetupRecord(records.setup_values(
         config, vcs_section(config), verified_containers(config),
     ))
-    found = record.find(current.manifest, setup, records.now_utc())
+    found = record.find(current.manifest, setup, records.now_utc(), project_branch(config))
     if found is None:
         return Lookup()
     acceptance = found.acceptance
     notice = None
+    if found.kind == records.MatchKind.EXEMPT:
+        assert record.exemption is not None  # nosec: B101  # an exempt match has one
+        notice = exempt_notice(config, record.exemption, acceptance.suggestion, current.manifest)
     if found.kind == records.MatchKind.MEANING:
         acceptance = _carry_forward(verified_store, project_dir, env_id, found, current, config)
         notice = (
             "The project's files changed only in comments or layout since you accepted them; "
             "the acceptance carries on, with the same settings and expiry."
         )
-    accepted = None
-    if acceptance.kind != records.Kind.BLANKET:
-        accepted = verified_store.root / env_id / records.ACCEPTANCES_DIR / acceptance.id / ACCEPTED_FILE
+    accepted = verified_store.root / env_id / records.ACCEPTANCES_DIR / acceptance.id / ACCEPTED_FILE
     return Lookup(found.kind, acceptance.id, accepted, notice)
+
+
+def project_branch(config: UserConfig) -> str | None:
+    """The project's branch, as the generator gives it (`scoter:project-branch`); None without one."""
+    branch = config.raw("active-config-locations", "project-branch")
+    return branch if isinstance(branch, str) and branch else None
+
+
+def is_settings_file(config: UserConfig, rel: str) -> bool:
+    """Whether a snapshot's file is one whose accepted version an exemption keeps:
+    the project file or a `dev-env.yaml` (settings, not a container's files)."""
+    return (
+        rel == config.optional_value("scoter", "project-file-name")
+        or rel.rsplit("/", 1)[-1] == snapshot.DEV_ENV_FILE
+    )
+
+
+def settings_files(config: UserConfig, manifest: snapshot.Manifest) -> list[str]:
+    """The files in a snapshot whose accepted version an exemption keeps."""
+    return sorted(rel for rel in manifest.files if is_settings_file(config, rel))
+
+
+def ignored_changes(
+    config: UserConfig, accepted: snapshot.Manifest, current: snapshot.Manifest,
+) -> list[str]:
+    """The settings files an exemption keeps that differ now from their accepted version."""
+    names = set(settings_files(config, accepted)) | set(settings_files(config, current))
+
+    def sha(manifest: snapshot.Manifest, rel: str) -> str | None:
+        entry = manifest.files.get(rel)
+        return None if entry is None else entry.sha256
+
+    return sorted(rel for rel in names if sha(accepted, rel) != sha(current, rel))
+
+
+def exempt_notice(
+    config: UserConfig, exemption: records.Exemption,
+    accepted: snapshot.Manifest, current: snapshot.Manifest,
+) -> str:
+    """What a run under an exemption does with the project's files, in a line."""
+    on = f" on {exemption.branch}" if exemption.branch else ""
+    ignored = ignored_changes(config, accepted, current)
+    text = (
+        f"Exempt{on} until {exemption.until.isoformat()}: the run uses your container files "
+        "as they are"
+    )
+    if ignored:
+        text += (
+            "; it ignores your changes to " + ", ".join(ignored)
+            + " until you run `scoter verify --with-exemption`"
+        )
+    return text + "."
+
 
 
 def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) -> str:
@@ -97,7 +151,7 @@ def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) ->
     record = records.load_environment(
         verified_store, project_dir, store.project_id(config, project_dir),
     )
-    accepted = [a for a in record.acceptances if a.suggestion is not None] if record else []
+    accepted = list(record.acceptances) if record else []
     if not accepted:
         return never
     now = now or records.now_utc()
@@ -107,7 +161,7 @@ def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) ->
     ))
     same_files = [
         a for a in accepted
-        if a.suggestion is not None and a.suggestion.meaning_id == current.manifest.meaning_id
+        if a.suggestion.meaning_id == current.manifest.meaning_id
     ]
     same_setup = [a for a in same_files if a.setup.id == setup.id]
     if same_setup:
@@ -122,7 +176,6 @@ def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) ->
             + (": " + ", ".join(changes) if changes else "") + "."
         )
     newest = accepted[0]
-    assert newest.suggestion is not None  # nosec: B101  # chosen for having one
     changed = newest.suggestion.changed(current.manifest)
     return (
         f"The project's files changed since you last accepted them ({newest.id})"
@@ -209,7 +262,7 @@ def _carry_forward(
         if record is None:
             raise VerifiedStoreErr(f"{verified_store.root / env_id}: went away")
         manifest = current.store(verified_store)
-        carried = record.carry_forward(found, manifest, records.now_utc(), found.acceptance.branch)
+        carried, replaced = record.carry_forward(found, manifest, records.now_utc(), found.acceptance.branch)
         source = (env_id, records.ACCEPTANCES_DIR, found.acceptance.id)
         for name in verified_store.list_dir(*source):
             data = verified_store.read_bytes(*source, name, max_size=store.MAX_JSON_SIZE)
@@ -218,4 +271,6 @@ def _carry_forward(
                     env_id, records.ACCEPTANCES_DIR, carried.id, name, data=data,
                 )
         records.save_environment(verified_store, record)
+        # After the copy: the acceptance carried from is among those replaced.
+        records.remove_replaced(verified_store, record, replaced)
     return carried

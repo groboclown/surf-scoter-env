@@ -1457,6 +1457,57 @@ Allow a timed exemption for working on a project.
 
 It covers blanket acceptances too (moved from step 18).  The kind exists in the records and the lookup (step 5), for a private project nobody else contributes to, but no command creates one, and `scoter.py` treats a match as none (steps 8 and 11).  Step 16 also changed what one would have to mean: the run builds only from a stored, accepted copy, and a blanket acceptance has none.  One way, drafted in step 18: "accept as suggested" on each run, recorded by a `scoter verify` option: each run takes a fresh snapshot and, if the checks refuse nothing, stores an acceptance of the suggestion as it stands (as using the review unedited would), and builds from that; refusals, setup changes and a gateway change still stop it.  A timed exemption ("don't ask me again for a week") covers much of the same need with less trust handed out.
 
+### Draft: what an exemption is
+
+The [configuration weaknesses](../security/configuration-weaknesses.md#authorization-for-a-project) design: "for a time period disable the checksum analysis.  This can be useful when the user actively works on making a running environment."  That's someone editing their project's Dockerfile, running it, editing again: each edit is a change to the files, and asks for a review.
+
+So an exemption is a window, on one project, in which a run with changed files doesn't stop for a review.  It never builds from the live files (step 16): instead each run carries the user's last acceptance forward over the changed files, as a match on meaning does (step 5).  The new acceptance keeps the last one's accepted settings (`accepted.json`: the host commands, egress rules and container choices) and its expiry; only the files it's for are the current ones.  It's marked as made by the exemption, so the next review compares with the last acceptance the user reviewed, not one the exemption made.
+
+### Draft: what it covers
+
+1. **Container files only** (proposed).  Within the window, a change to the project's container directories (Dockerfiles, files they copy) is carried forward.  A change to the project file, or to a `dev-env.yaml` (its mounts and user are DEV-2), still asks for a review: those change what the accepted settings mean, and a pulled change to them is where another contributor's commands come in.
+2. **Everything**: within the window, any change is carried forward, the project file's too.  But the accepted settings stay as they were (the host commands and egress rules aren't the project's new ones), so a changed project file would build with the old settings, which is confusing rather than unsafe.
+
+Either way, the review's checks still run on the carried copy: a refusal (a symlink in a container directory, say) stops the run as it would a review.
+
+### Draft: the command
+
+`scoter exempt [--for DURATION | --end]`, in the project:
+
+* Starts (or extends) the window from the project's newest usable acceptance; `--for` defaults to a day (`1d`, `8h`, `30m`), up to the setup's `verification: values: max-exempt-days` (default 7).  It can't outlast that acceptance's expiry.
+* `--end` closes it now.  Revoking the acceptance (`scoter revoke`) closes it too.
+* Without an acceptance there's nothing to exempt from: it says to run `scoter verify` first.
+
+The window is recorded in the environment's record (`environment.json`), with the acceptance it carries from; each run in it says so ("exempt until 15:30: carried your acceptance forward over env/Dockerfile").  `scoter list-accepted` shows it.
+
+### Draft: blanket acceptances
+
+The exemption covers their use case for a while, with an end.  Proposed: remove the `blanket` kind from the records and the lookup, rather than leave a kind nothing creates; a permanent exemption is a future task, if it's wanted.
+
+### Design decisions
+
+* **Container files are used as they are.**  Within the window, each run copies the project's container files off as they are now (read as a snapshot is: no links, no special files), and builds from that copy; the review's file checks run on them.
+* **The project file and the `dev-env.yaml` files keep their accepted versions.**  Their changes are ignored, and each run says which it's ignoring, until `scoter verify --with-exemption` picks them up.
+* **`scoter verify --with-exemption`** accepts the project's suggestion as it stands, without the prompt (so automation can use it), only while an exemption holds for the branch, and only if the checks refuse nothing.  The exemption then carries from the new acceptance.  So the blanket acceptance's use case, mostly automation, is two steps: `scoter exempt`, then `scoter verify --with-exemption`.  The `blanket` kind goes.
+* **One branch.**  An exemption holds for the branch it was started on, when the VCS gives one.
+* **`scoter exempt`**, for `verification: values: exempt-days` (1) unless `--for` says, at most `max-exempt-days` (7), set in the defaults.
+
+### Completed
+
+* **The record** ([`records.py`](../../scripts/surf_scoter_lib/verified/records.py)): the environment's record (`environment.json`) has an `exemption`: the acceptance it uses, its end (`until`), its branch (none without a VCS branch) and when it started.  `find` tries an exact match, then one on meaning, then the acceptance of an exemption that holds for the run's branch (`scoter:project-branch`), which must be usable and under the same setup: a setup change still needs a review.  The `blanket` kind, the per-acceptance `exempt_until` and `Validity.EXEMPT` are gone; every acceptance has its suggestion.  A new kind, `exempted`, is an acceptance `verify --with-exemption` made.
+* **One acceptance per branch** (after review): `EnvironmentRecord.add` replaces the branch's others (expired or not; `branch` None is one "branch"), and an exemption using a replaced one moves to the new one; `records.remove_replaced` removes their files and the blobs nothing uses, once the record is saved.  So a review, a carry-forward (which now replaces the acceptance it came from) and `verify --with-exemption` each leave the branch one acceptance, which the next review compares with, whatever its kind.  Expired acceptances on other branches stay.  Revoke's "carried ones go too" is gone, as nothing is left to follow.  `scoter exempt` starts from the branch's acceptance, else the project's newest.
+* **`scoter exempt [--for LENGTH | --end]`** ([`main_exempt.py`](../../scripts/main_exempt.py), with [`verified/exempt.py`](../../scripts/surf_scoter_lib/verified/exempt.py)): starts (or moves the end of) the exemption from the newest usable acceptance, for `--for` (`1d`, `8h`, `30m`, `1d12h`) or `exempt-days`, at most `max-exempt-days`, and never past the acceptance's expiry; `--end` ends it.  `scoter` loads it without the accepted settings, as `verify` and `revoke`.  Revoking the exemption's acceptance ends it; `list-accepted` shows it under its project ("exempt until T (holds)  branch B  from ID").
+* **The lookup** ([`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py)): an exempt match gives the acceptance's `accepted.json` and a notice, which `scoter` prints for every command that loads the accepted settings: "Exempt on main until T: the run uses your container files as they are; it ignores your changes to env/dev-env.yaml, project.yaml until you run `scoter verify --with-exemption`."  The settings files are the project file and the `dev-env.yaml` files (`is_settings_file`).
+* **The run** ([`staging.py`](../../scripts/surf_scoter_lib/verified/staging.py), [`main_run.py`](../../scripts/main_run.py)): when the run's acceptance is its exemption's, `adopt_accepted` first restores the accepted copy, runs the generator on it, and puts its `current-project-setup` and `dev-container` (with the parents' paths as the live project's) in the run's configuration, before the run reads the port, the user or the mounts: the live `dev-env.yaml` can't change them.  `stage` then lays the live files of the containers those settings name (read as a snapshot is: no links, no special files) over the accepted project file and `dev-env.yaml` files, and `prepare` runs the `project-files` checks on the live files (for what a copy can't show) and on the copy; a refusal stops the run.  `build_plan`'s comparison holds as before, since the run's view is now the copy's.  With `dev-container: use: {name}`, only the project file is adopted.  `snapshot.write_files` is `restore` with the contents from a function.
+* **`scoter verify --with-exemption`** ([`main_verify.py`](../../scripts/main_verify.py)): needs an exemption that holds for the branch; builds the review as `scoter verify --output` would, without the earlier acceptance's edits, and accepts it unseen only if the suggestion's checks refuse nothing and the review's checks pass.  `accept.store_acceptance(exemption=...)` stores it as `exempted` and moves the exemption to it (same end and branch) under the store's lock, or stores nothing if the exemption changed meanwhile.  It can't be given with `--output`.
+* **Defaults**: `verification: values: exempt-days: 1` and `max-exempt-days: 7`; `max-exempt-days` is guarded (`exempt-days` is bounded by it).
+
+**Tests:** [`test_records.py`](../../scripts/tests/s_lib/verified/test_records.py): the exempt match (its branch, its end, the same setup, any branch for an exemption without one, a missing acceptance) and the record's JSON.  [`test_lookup.py`](../../scripts/tests/s_lib/verified/test_lookup.py): the exempt match and its notice, with the ignored `dev-env.yaml`, and another branch.  [`test_main_exempt.py`](../../scripts/tests/test_main_exempt.py): `parse_duration`; nothing to exempt from; the newest acceptance, the branch, the setup's lengths, the acceptance's expiry and the maximum; the branch's acceptance first; `--for` and `--end`.  One per branch: `test_records.py` (replacing expired and usable ones, the exemption moving, other branches kept), `test_accept.py` (the replaced files gone), `test_main_revoke.py` (a carry-forward replacing its original), and `integration-tests/02-re-review` and `04-exempt` (one acceptance after the second).  [`test_main_run_staging.py`](../../scripts/tests/test_main_run_staging.py): adopting the accepted settings, and staging the live Dockerfile and a new file with the accepted `dev-env.yaml`; no exemption; a hard link and a check's refusal stopping the run.  [`test_main_verify.py`](../../scripts/tests/test_main_verify.py): `--with-exemption` without an exemption, accepted and the exemption moved, and refused.  [`test_main_revoke.py`](../../scripts/tests/test_main_revoke.py): the listing, and revoking the exemption's acceptance (but not another) ending it.  [`integration-tests/04-exempt`](../../integration-tests/04-exempt/run.sh): all of it, with a stand-in container tool.
+
+**Carried over:**
+
+* An `exempted` acceptance accepts the suggestion as it stands: the user's edits to an earlier review (a removed egress rule, say) aren't kept.  Keeping them, as the re-review does (step 17), would need the earlier review's edits applied without a prompt.
+
 ~~Allow a user to revoke a project's acceptance.~~  Done, after step 16: `scoter revoke` ([`main_revoke.py`](../../scripts/main_revoke.py), with [`verified/revoke.py`](../../scripts/surf_scoter_lib/verified/revoke.py)).
 
 Without arguments, it lists the project's acceptances: id, kind, branch, fingerprint (the snapshot id, first 12 characters), expiry and validity.
@@ -1477,7 +1528,7 @@ Run inside a project, it still needs a project file the generator can read; outs
 
 Done: `scoter list-accepted` ([`main_list_accepted.py`](../../scripts/main_list_accepted.py)).
 
-Every project in the store's index, by directory (noting one whose directory is gone), and under each its acceptances: id, kind, branch, fingerprint, expiry, validity, exemption, and what it was carried from.  Then how many, and how much the blobs take.
+Every project in the store's index, by directory (noting one whose directory is gone), and under each its acceptances: id, kind, branch, fingerprint, expiry, validity, and what it was carried from, then its exemption, if it has one (step 21).  Then how many, and how much the blobs take.
 
 `-q` shows only the acceptance ids, one per line, which `scoter revoke` takes: `scoter revoke $(scoter list-accepted -q)` revokes every acceptance, and empties the store.
 
@@ -1487,22 +1538,20 @@ It needs no project: `scoter` loads only the setup for it, as for `help`.
 
 ## 23. Add a user cache cleanup program
 
-The `kill` and `verify` allow for cleaning up parts of the system, but the user should also have a method to sweep up all the caches.
+The `kill` and `revoke` allow for cleaning up parts of the system, but the user should also have a method to sweep up all the caches.  If these sub-commands already cover the bases, then ignore this step.
 
-## 24. Clean up the code to remove references to steps from this document.
+## 24. Clean up the code to follow good coding practices.
 
-## 25. Clean up the code to follow good coding practices.
+Follow the new [code style](code-style.md).
 
 Reuse existing helper functions that make clear what's happening, even if it's just a one-liner.
 
-- example: Python `sys.platform == "win32"` vs. `fileutils.is_windows()`.
+- example: Python `sys.platform == "win32"` vs. `fileutils.is_windows()` (this follows from the "lower level mechanics" abstraction rule).
 - example: use the `jdata` library for handling JSON-like lookups with type safety.
 
-Eliminate magic numbers and strings (except where it makes sense).  Static string keys are generally okay.
+Clean up the code to remove references to steps from this document.
 
-Python data-driven tests use 'subTest' to distinguish which ones fail, and to keep running when any one fails.
-
-## 26. Clean up this file.
+## 25. Clean up this file.
 
 Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
 

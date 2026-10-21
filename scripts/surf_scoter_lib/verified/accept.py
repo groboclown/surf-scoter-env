@@ -22,6 +22,7 @@ contents as blobs) and the setup values it was reviewed under.
 import datetime
 import json
 import os
+from dataclasses import replace
 
 from .. import jdata
 from ..err import VerifiedStoreErr
@@ -45,6 +46,7 @@ def store_acceptance(
     now: datetime.datetime,
     *,
     suggested: jdata.DictJsonData | None = None,
+    exemption: records.Exemption | None = None,
 ) -> records.Acceptance:
     """Record the user's acceptance of `accepted`, for the project's files in `taken`.
 
@@ -52,7 +54,13 @@ def store_acceptance(
     `taken` the snapshot of the project's files taken before the review was
     written, so the acceptance is for the files the user saw.  `suggested`
     is the suggestion as the review wrote it (`review.suggested`), which the
-    next review compares with (step 17).
+    next review compares with (step 17).  It replaces the branch's earlier
+    acceptance (`records.EnvironmentRecord.add`).
+
+    With `exemption`, the acceptance is made under it (`scoter verify
+    --with-exemption`, step 21), without the user seeing the review, and
+    the exemption moves to it; if the environment's exemption isn't that
+    one any more, nothing is stored.
     """
     project = config.active_location("project-dir")
     verified = config.optional_path("verification", "store")
@@ -64,7 +72,7 @@ def store_acceptance(
     containers = lookup.verified_container_snapshots(config)
     acceptance = records.Acceptance(
         id=records.new_acceptance_id(now),
-        kind=records.Kind.REVIEWED,
+        kind=records.Kind.REVIEWED if exemption is None else records.Kind.EXEMPTED,
         accepted_at=now,
         expires_at=records.parse_time(jdata.req_str(accepted, "expires-at")),
         setup=records.SetupRecord(records.setup_values(
@@ -84,6 +92,8 @@ def store_acceptance(
         record = records.load_environment(verified_store, project_dir, env_id)
         if record is None:
             record = records.EnvironmentRecord(env_id, project_dir, [])
+        if exemption is not None and record.exemption != exemption:
+            raise VerifiedStoreErr("your exemption changed while the settings were checked")
         taken.store(verified_store)
         where = (env_id, records.ACCEPTANCES_DIR, acceptance.id)
         verified_store.write_bytes(*where, lookup.ACCEPTED_FILE, data=_json(accepted))
@@ -95,8 +105,12 @@ def store_acceptance(
             "$schema": CONTAINERS_SCHEMA,
             "containers": {d: c.manifest.to_json() for d, c in sorted(containers.items())},
         })
-        record.add(acceptance)
+        replaced = record.add(acceptance)
+        if exemption is not None:
+            # Even from another branch's acceptance: it's this branch's now.
+            record.exemption = replace(exemption, acceptance=acceptance.id)
         records.save_environment(verified_store, record)
+        records.remove_replaced(verified_store, record, replaced)
     return acceptance
 
 

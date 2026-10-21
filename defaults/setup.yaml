@@ -679,6 +679,8 @@ verification:
             # are reported with the overrides, from the generator's notices).
             - verification:project-files:*
             - verification:egress-hosts:*
+            # How long the container files can go without a review.
+            - verification:values:max-exempt-days
         # Deny-lists, where adding entries only strengthens: a change is reported
         # only when it leaves out one of the default's entries.
         guarded-removals:
@@ -700,6 +702,13 @@ verification:
         # kept in the `store` with each acceptance, in bytes.
         max-file-size: 16777216
         max-snapshot-size: 268435456
+        # How long `scoter exempt` lasts when it isn't given `--for`, and the
+        # longest it can be given, in days.  An exemption never outlasts the
+        # acceptance it's started from.  While it holds, runs on its branch
+        # use the container files as they are, and keep the project file and
+        # the `dev-env.yaml` files as accepted.
+        exempt-days: 1
+        max-exempt-days: 7
 
 
 # The tools' own settings.  The configuration loader adds the locations it

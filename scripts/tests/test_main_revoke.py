@@ -1,7 +1,6 @@
 #SPDX:MIT
 """Test the main_revoke and main_list_accepted scripts, and the revoke library they use."""
 import contextlib
-import dataclasses
 import datetime
 import io
 import os
@@ -24,9 +23,8 @@ from surf_scoter_lib.verified import accept, lookup, records, revoke, store
 POSIX = sys.platform != "win32"
 
 
-@unittest.skipUnless(POSIX, "owner and mode checks")
-class RevokeTest(unittest.TestCase):
-    """Revoking acceptances by branch, fingerprint, or all of them."""
+class StoreTest(unittest.TestCase):
+    """Projects, a verified store, and acceptances of the projects stored in it."""
 
     def setUp(self) -> None:
         directory = tempfile.mkdtemp()
@@ -43,12 +41,15 @@ class RevokeTest(unittest.TestCase):
         (files / "project.yaml").write_text("container: {dev-container-path: env}\n", encoding="utf-8")
         return project
 
-    def config(self, project: Path | None = None, *, outside: bool = False) -> UserConfig:
-        """The universal file for `project` (by default, `self.project`); `outside` any project."""
+    def config(
+        self, project: Path | None = None, *, outside: bool = False, branch: str | None = None,
+    ) -> UserConfig:
+        """The universal file for `project` (by default, `self.project`), on `branch`; `outside` any project."""
         project = project or self.project
         locations: jdata.DictJsonData = {} if outside else {
             "project-dir": str(project),
             "dev-container-path": str(project / ".surf-scoter.d" / "env"),
+            "project-branch": branch,
         }
         suc: jdata.DictJsonData = {
             "active-config-locations": locations,
@@ -81,6 +82,12 @@ class RevokeTest(unittest.TestCase):
             config, lookup.project_snapshot(config, project), b"review: x\n",
             {"expires-at": expires, "commands": []}, branch, now,
         )
+
+
+
+@unittest.skipUnless(POSIX, "owner and mode checks")
+class RevokeTest(StoreTest):
+    """Revoking acceptances by branch, fingerprint, or all of them."""
 
     def run_revoke(
         self, *names: str, everything: bool = False, outside: bool = False,
@@ -140,7 +147,7 @@ class RevokeTest(unittest.TestCase):
     def test_by_fingerprint(self) -> None:
         """A whole fingerprint, with or without `sha256:`, or its first 12 characters or more."""
         first = self.accept("FROM scratch\n", "main")
-        second = self.accept("FROM debian\n", "main")
+        second = self.accept("FROM debian\n", "dev")
         third = self.accept("FROM alpine\n", None)
         assert first.suggestion and second.suggestion and third.suggestion  # nosec: B101
         whole = first.suggestion.id
@@ -152,18 +159,18 @@ class RevokeTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("No acceptance has the id, or is for the branch or fingerprint", err)
 
-    def test_carried_forward_goes_too(self) -> None:
-        """An acceptance carried forward from a revoked one holds its settings: it goes with it."""
+    def test_carried_forward_replaces(self) -> None:
+        """An acceptance carried forward takes the place of the one it came from, and its files."""
         original = self.accept("FROM scratch\n", "main")
         (self.project / ".surf-scoter.d" / "env" / "Dockerfile").write_text(
             "# A comment.\nFROM scratch\n", encoding="utf-8",
         )
         found = lookup.find(self.config())
         self.assertEqual(found.match, records.MatchKind.MEANING)
-        unrelated = self.accept("FROM alpine\n", "other")
-        assert original.suggestion is not None  # nosec: B101
-        self.assertEqual(self.run_revoke(original.suggestion.id)[0], 0)
-        self.assertEqual(self.remaining(), [unrelated.id])
+        self.assertEqual(self.remaining(), [found.acceptance])
+        self.assertFalse(self.acceptance_dir(original).exists())
+        self.assertEqual(self.run_revoke("main")[0], 0)
+        self.assertEqual(store.VerifiedStore.open(self.verified).index(), {})
 
     def test_unmatched_revokes_nothing(self) -> None:
         """A name that chooses nothing (a typo, say): nothing is revoked, and the list is shown."""
@@ -242,13 +249,37 @@ class RevokeTest(unittest.TestCase):
         record = env.record()
         assert record is not None  # nosec: B101  # narrowing for the type checker
         exempt = acceptance.accepted_at + datetime.timedelta(days=1)
-        record.acceptances[0] = dataclasses.replace(acceptance, exempt_until=exempt)
+        record.exemption = records.Exemption(acceptance.id, exempt, "main", acceptance.accepted_at)
         with verified_store.locked():
             records.save_environment(verified_store, record)
         shutil.rmtree(self.project)
         out = self.run_list()[1]
         self.assertIn(f"{self.project}  (the directory is gone)", out)
-        self.assertIn(f"exempt until {exempt.isoformat()}", out)
+        self.assertIn(f"exempt until {exempt.isoformat()} (holds)  branch main  from {acceptance.id}", out)
+
+    def test_revoking_ends_the_exemption(self) -> None:
+        """Revoking the acceptance an exemption uses ends the exemption; revoking another doesn't."""
+        first = self.accept("FROM scratch\n", "dev")
+        second = self.accept("FROM alpine\n", "main")
+        self.accept("FROM debian\n", None)
+        verified_store = store.VerifiedStore.open(self.verified)
+
+        def record() -> records.EnvironmentRecord:
+            env = revoke.environment(self.config(), verified_store)
+            assert env is not None  # nosec: B101  # narrowing for the type checker
+            found = env.record()
+            assert found is not None  # nosec: B101  # narrowing for the type checker
+            return found
+
+        exempting = record()
+        until = records.now_utc() + datetime.timedelta(hours=1)
+        exempting.exemption = records.Exemption(second.id, until, "main", records.now_utc())
+        with verified_store.locked():
+            records.save_environment(verified_store, exempting)
+        self.assertEqual(self.run_revoke(first.id)[0], 0)
+        self.assertIsNotNone(record().exemption)
+        self.assertEqual(self.run_revoke(second.id)[0], 0)
+        self.assertIsNone(record().exemption)
 
     def test_clean_out_everything(self) -> None:
         """`scoter revoke $(scoter list-accepted -q)`, from anywhere: nothing's left."""

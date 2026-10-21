@@ -16,7 +16,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -399,7 +399,8 @@ def container_dirs(dev_container_path: Path | None, parent_dirs: Sequence[Path])
 
 
 def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: SnapshotLimits) -> None:
-    """Write the manifest's files into `dest`: an empty directory only the user can use.
+    """Write the manifest's files, from their blobs in `store`, into `dest`: an
+    empty directory only the user can use.
 
     Each blob is checked against its hash and size as it's read, and each
     path before it's written; nothing is written outside `dest`.  Below
@@ -407,6 +408,13 @@ def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: Snapsh
     executable, and 0755), since a build's `COPY` keeps them in the image;
     `dest` itself keeps everyone else out.
     """
+    write_files(manifest, dest, limits, lambda _, entry: store.get_blob(entry.sha256, entry.size))
+
+
+def write_files(
+    manifest: Manifest, dest: Path, limits: SnapshotLimits, read: Callable[[str, FileEntry], bytes],
+) -> None:
+    """`restore`, with each file's contents from `read(path, entry)`, checked against its size."""
     st = os.lstat(dest)
     if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
         raise SnapshotErr(f"{dest}: not a directory")
@@ -417,9 +425,9 @@ def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: Snapsh
         check_relative(rel)
         if entry.size > limits.max_file_size:
             raise SnapshotErr(f"{rel}: larger than the {limits.max_file_size} bytes allowed")
-        data = store.get_blob(entry.sha256, entry.size)
+        data = read(rel, entry)
         if len(data) != entry.size:
-            raise SnapshotErr(f"{rel}: its blob isn't the size the manifest says")
+            raise SnapshotErr(f"{rel}: its contents aren't the size the manifest says")
         target = dest
         for part in rel.split("/")[:-1]:
             target = target / part

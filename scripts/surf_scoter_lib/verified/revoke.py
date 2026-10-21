@@ -14,8 +14,8 @@ Acceptances are chosen:
   the fingerprint (the snapshot id) of the files they were accepted for, as
   the review file shows it.
 
-An acceptance carried forward from a chosen one (step 5: the same files,
-but for comments) holds the same settings, so it goes with it.
+A project keeps one acceptance per branch: one carried forward (step 5:
+the same files, but for comments) took the place of the one it came from.
 """
 import datetime
 import os
@@ -79,30 +79,33 @@ def environments(verified_store: store.VerifiedStore) -> list[Environment]:
     ]
 
 
-def fingerprint(acceptance: records.Acceptance) -> str | None:
-    """The acceptance's fingerprint: its snapshot's id; None for a blanket acceptance."""
-    return None if acceptance.suggestion is None else acceptance.suggestion.id
+def fingerprint(acceptance: records.Acceptance) -> str:
+    """The acceptance's fingerprint: its snapshot's id."""
+    return acceptance.suggestion.id
 
 
 def describe(acceptance: records.Acceptance, now: datetime.datetime) -> str:
-    """One line for the acceptance: its id, kind, branch, fingerprint, expiry and exemption."""
-    found = fingerprint(acceptance)
-    short = found.removeprefix(FINGERPRINT_PREFIX)[:MIN_FINGERPRINT] if found else "-"
-    exempt = (
-        f"  exempt until {acceptance.exempt_until.isoformat()}" if acceptance.exempt_until else ""
-    )
+    """One line for the acceptance: its id, kind, branch, fingerprint and expiry."""
+    short = fingerprint(acceptance).removeprefix(FINGERPRINT_PREFIX)[:MIN_FINGERPRINT]
     carried = f"  carried from {acceptance.from_id}" if acceptance.from_id else ""
     return (
         f"{acceptance.id}  {acceptance.kind:<8}  branch {acceptance.branch or '-'}  "
         f"fingerprint {short}  expires {acceptance.expires_at.isoformat()} "
-        f"({acceptance.validity(now)}){exempt}{carried}"
+        f"({acceptance.validity(now)}){carried}"
+    )
+
+
+def describe_exemption(exemption: records.Exemption, now: datetime.datetime) -> str:
+    """One line for an environment's exemption: its end, branch and acceptance."""
+    state = "holds" if now < exemption.until else "ended"
+    return (
+        f"exempt until {exemption.until.isoformat()} ({state})  branch {exemption.branch or '-'}  "
+        f"from {exemption.acceptance}"
     )
 
 
 def _matches_fingerprint(name: str, acceptance: records.Acceptance) -> bool:
     found = fingerprint(acceptance)
-    if found is None:
-        return False
     digest = name.removeprefix(FINGERPRINT_PREFIX).lower()
     return (
         len(digest) >= MIN_FINGERPRINT
@@ -111,26 +114,12 @@ def _matches_fingerprint(name: str, acceptance: records.Acceptance) -> bool:
     )
 
 
-def with_carried(record: records.EnvironmentRecord, ids: Iterable[str]) -> list[records.Acceptance]:
-    """The acceptances `ids`, with those carried forward from them, in the record's order."""
-    chosen = set(ids)
-    added = True
-    while added:
-        added = False
-        for acceptance in record.acceptances:
-            if acceptance.id not in chosen and acceptance.from_id in chosen:
-                chosen.add(acceptance.id)
-                added = True
-    return [a for a in record.acceptances if a.id in chosen]
-
-
 def select(
     record: records.EnvironmentRecord, names: Iterable[str], *, everything: bool = False,
 ) -> Selection:
     """The acceptances `names` choose: each an id, a branch, or a fingerprint (or the start of one).
 
-    With `everything`, all of them.  Acceptances carried forward from a
-    chosen one are chosen too.
+    With `everything`, all of them.
     """
     if everything:
         return Selection(list(record.acceptances))
@@ -144,14 +133,14 @@ def select(
         if not found:
             selection.unmatched.append(name)
         chosen.update(found)
-    selection.chosen = with_carried(record, chosen)
+    selection.chosen = [a for a in record.acceptances if a.id in chosen]
     return selection
 
 
 def find_ids(
     verified_store: store.VerifiedStore, ids: Iterable[str],
 ) -> dict[Environment, list[records.Acceptance]]:
-    """The acceptances with these ids, in any project, by environment (with those carried from them)."""
+    """The acceptances with these ids, in any project, by environment ."""
     wanted = {i for i in ids if ACCEPTANCE_ID.fullmatch(i)}
     found: dict[Environment, list[records.Acceptance]] = {}
     if not wanted:
@@ -160,9 +149,9 @@ def find_ids(
         record = env.record()
         if record is None:
             continue
-        matched = [a.id for a in record.acceptances if a.id in wanted]
+        matched = [a for a in record.acceptances if a.id in wanted]
         if matched:
-            found[env] = with_carried(record, matched)
+            found[env] = matched
     return found
 
 
@@ -181,6 +170,9 @@ def revoke(env: Environment, ids: Iterable[str]) -> list[records.Acceptance]:
         if not removed:
             return []
         record.acceptances = [a for a in record.acceptances if a.id not in wanted]
+        if record.exemption is not None and record.exemption.acceptance in wanted:
+            # Revoking the acceptance an exemption uses ends it.
+            record.exemption = None
         if record.acceptances:
             # Written before the files go, so the record never names a missing acceptance.
             env.store.write_json(env.env_id, records.ENVIRONMENT_FILE, data=record.to_json())

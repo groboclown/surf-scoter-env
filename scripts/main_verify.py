@@ -29,7 +29,7 @@ from surf_scoter_lib import (
     setup_check,
 )
 from surf_scoter_lib.err import SurfScoterErr
-from surf_scoter_lib.verified import accept, lookup, snapshot
+from surf_scoter_lib.verified import accept, exempt, lookup, snapshot
 from surf_scoter_lib.verified import previous as previous_acceptance
 
 # The generator refuses a review file larger than this, too.
@@ -44,15 +44,21 @@ def run_verify(
     *,
     interactive: bool | None = None,
     setup_review: bool = True,
+    with_exemption: bool = False,
 ) -> int:
     """Write the review file to `output`; or, without one, ask about it at the terminal.
 
     With `setup_review`, the review lists what the user should know about
-    their setup's host command checks, as `scoter user-setup` does.
+    their setup's host command checks, as `scoter user-setup` does.  With
+    `with_exemption`, the project's suggestion is accepted as it stands,
+    without asking, under the exemption that holds for the branch (see
+    `accept_with_exemption`).
     """
     if config.project_setup() is None:
         print("No project here: run this in a project, or give --project-dir.", file=sys.stderr)
         return 1
+    if with_exemption:
+        return accept_with_exemption(config)
     if output is None:
         if interactive is None:
             interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -88,6 +94,71 @@ def run_verify(
         return 0
     assert taken is not None  # nosec: B101  # narrowing for the type checker
     return Prompt(config, taken, branch, suggested=review.suggested(config, report)).run(text)
+
+
+def accept_with_exemption(config: UserConfig, now: datetime.datetime | None = None) -> int:
+    """Accept the project's suggestion as it stands, under its exemption, without a prompt.
+
+    Only while an exemption (`scoter exempt`) holds for the branch, and only
+    when the checks refuse nothing: the user doesn't see the review, so
+    nothing they'd have to fix can be in it.  The new acceptance (kind
+    `exempted`) has the review's usual expiry; the exemption moves to it,
+    with the same end, so the run picks up the project file and
+    `dev-env.yaml` changes it ignored.
+    """
+    now = now or datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+    try:
+        exemption = exempt.current(config, now)
+    except (OSError, ValueError, SurfScoterErr) as err:
+        print(f"Couldn't read your exemption: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    if exemption is None:
+        print(
+            "No exemption holds for this project here: start one with `scoter exempt`, "
+            "or review the settings with `scoter verify`.",
+            file=sys.stderr,
+        )
+        return 1
+    branch = current_branch(config)
+    try:
+        taken = lookup.project_snapshot(config, Path(os.path.realpath(project_dir(config))))
+    except (OSError, SurfScoterErr) as err:
+        print(f"Couldn't read the project's files: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    report = checks.check_project(config)
+    text = review.build(config, review.Context(report=report, now=now, files=taken, branch=branch))
+    prompt = Prompt(config, taken, branch, suggested=review.suggested(config, report))
+    directory = Path(tempfile.mkdtemp(prefix="scoter-review-"))
+    try:
+        data = text.encode("ascii")
+        checked = prompt.check(data, directory, directory / REVIEW_FILE_NAME)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    # The review leaves out what the checks refuse; the suggestion must have nothing refused.
+    if report.refused or not checked.usable:
+        prompt.show(checked if not report.refused else Checked(report=report))
+        print(
+            "The project's settings can't be accepted without a review; nothing was accepted.  "
+            "Run `scoter verify` to review them.",
+            file=sys.stderr,
+        )
+        return 1
+    assert checked.accepted is not None  # nosec: B101  # narrowing for the type checker
+    try:
+        acceptance = accept.store_acceptance(
+            config, taken, data, checked.accepted, branch, now,
+            suggested=prompt.suggested, exemption=exemption,
+        )
+    except (OSError, SurfScoterErr, KeyError, TypeError, ValueError) as err:
+        print(f"Couldn't store your acceptance: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    print(summary(checked.report), file=sys.stderr)
+    print(
+        f"Accepted the project's settings as they stand ({acceptance.id}), under your exemption "
+        f"until {exemption.until.isoformat()}.",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def project_dir(config: UserConfig) -> Path:
@@ -476,9 +547,22 @@ def main(argv: Sequence[str]) -> int:
             "(the checks it removes or replaces, and its overrides), which `scoter user-setup` shows."
         ),
     )
+    parser.add_argument(
+        "--with-exemption",
+        action="store_true",
+        dest="with_exemption",
+        help=(
+            "Under the exemption that holds for this branch (`scoter exempt`), accept the project's "
+            "settings as they stand, without asking, when the checks refuse nothing.  Runs then "
+            "pick up your changes to the project file and the `dev-env.yaml` files."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.with_exemption and args.output:
+        parser.error("--with-exemption accepts the settings; it can't be given with --output")
     return run_verify(
         config, Path(args.output) if args.output else None, setup_review=args.setup_review,
+        with_exemption=args.with_exemption,
     )
 
 

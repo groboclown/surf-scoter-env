@@ -54,6 +54,10 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Nor with a setup program a project, or another user, could supply.
     if not _setup_programs_ok(config):
         return 1
+    # Under an exemption, the project file and `dev-env.yaml` files count as
+    # accepted, not as they are now: before anything reads them.
+    if not _adopt_accepted(config):
+        return 1
     vcs_section = config.get_vcs_section()
 
     # -- Discovery, and the reservation of a host name, in one locked step:
@@ -313,6 +317,29 @@ def _environment_dir(config: UserConfig, host: str) -> Path:
 def _remove_environment_dir(config: UserConfig, host: str | None) -> None:
     if host:
         fileutil.rm(_environment_dir(config, host))
+
+
+def _adopt_accepted(config: UserConfig) -> bool:
+    """Under an exemption, give the run the accepted project file's and `dev-env.yaml`s' settings.
+
+    False, having said why, if they can't be read.
+    """
+    state_dir = config.require_path("scoter", "state-dir")
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="exempt-", dir=state_dir))
+    try:
+        staging.adopt_accepted(config, directory, generator.run, datetime.datetime.now(datetime.UTC))
+    except staging.StagingErr as err:
+        print(err, file=sys.stderr)
+        if err.reverify:
+            print("Run `scoter verify` to review the project's settings, then run again.", file=sys.stderr)
+        return False
+    except (OSError, VerifiedStoreErr) as err:
+        print(f"Couldn't read the accepted copy of the project's files: {err}", file=sys.stderr)
+        return False
+    finally:
+        fileutil.rm(directory)
+    return True
 
 
 def _stage_accepted(config: UserConfig, host: str) -> staging.BuildPlan | None:

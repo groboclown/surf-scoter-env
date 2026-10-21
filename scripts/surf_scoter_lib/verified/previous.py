@@ -46,9 +46,8 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
     """The project's newest acceptance on `branch`, or else its newest; None without one.
 
     Expired acceptances count: an expiry is the commonest reason to review
-    again.  A blanket acceptance has no snapshot, and one made before
-    reviews stored their suggestion has nothing to compare with; both are
-    passed over.
+    again.  One made before reviews stored their suggestion has nothing to compare
+    with, so it's passed over.
     """
     project = config.active_location("project-dir")
     verified = config.optional_path("verification", "store")
@@ -60,7 +59,7 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
     record = records.load_environment(verified_store, project_dir, env_id)
     if record is None:
         return None
-    candidates = [a for a in record.acceptances if a.suggestion is not None]
+    candidates = list(record.acceptances)
     on_branch = [a for a in candidates if branch is not None and a.branch == branch]
     for acceptance in on_branch or candidates:
         where = (env_id, records.ACCEPTANCES_DIR, acceptance.id)
@@ -70,7 +69,6 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
         if suggested is None:
             continue
         manifest = acceptance.suggestion
-        assert manifest is not None  # nosec: B101  # chosen for having one
         return Previous(
             acceptance=acceptance,
             suggested=suggested,

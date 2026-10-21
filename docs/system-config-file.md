@@ -207,6 +207,7 @@ The tools use these sections:
     * `values: expiry-days`: how long an acceptance lasts, in days.  The default is 30.
     * `values: keep`: how many expired acceptances to keep for each project when you ask for a cleanup; nothing removes them on its own.  The default is 10.
     * `values: max-file-size` and `max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
+    * `values: exempt-days` and `max-exempt-days`: how long `scoter exempt` lasts without `--for`, and the longest it can be given, in days.  The defaults are 1 and 7.  `max-exempt-days` is guarded (see "Guarded Settings").  See "Exemptions".
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
     * `paths: home`: your SSH directory, normally `~/.ssh`.
@@ -431,12 +432,24 @@ So a change copied in from instructions you didn't look at closely doesn't go un
 
 The copies take disk space.  Each file is kept once, however many acceptances share it, so each new acceptance costs a copy of the files that changed since the last one; but container directories can hold large files copied into the image.  To keep it bounded:
 
+* A project keeps one acceptance per branch (one in all without a VCS branch): a new acceptance, from a review, from a change only to comments, or from `verify --with-exemption`, replaces the branch's last one, and its files go.
 * Each acceptance expires after `verification: values: expiry-days`.  Expired acceptances are kept, so a review can show what changed since; nothing removes them on its own.  `scoter revoke` removes them (`scoter list-accepted` lists them), with the files nothing else uses.
 * `verification: values: max-file-size` and `max-snapshot-size` limit what one acceptance can copy.
 
 Everything in it must belong to you, with no access for anyone else (directories `0700`, files `0600`), and contain no symlinks; the tools refuse to read it otherwise.  On Windows, which has no file modes, that's left to your user profile's permissions.
 
 Each `scoter` run with a project looks for the acceptance that matches the project's files, as they are now, and the setup values it was accepted under.  A change that only touches comments or blank lines (in a Dockerfile, a JSON file, or the YAML files the tools read) carries the acceptance forward, with its settings and its expiry; any other change needs a new review.
+
+### Exemptions
+
+While you work on a project's container, a review for every change to a Dockerfile gets in the way.  `scoter exempt` starts an exemption on the project, from your newest usable acceptance, for `exempt-days` (or `--for 8h`, `2d`, `1d12h`: at most `max-exempt-days`, and never past the acceptance's expiry).  While it holds, runs on the branch it was started on (any run, for a project without a VCS branch):
+
+* use the container files as they are, copied off when the run starts, once the setup's `project-files` checks (and the checks on links) pass on them;
+* keep the project file and the `dev-env.yaml` files as you accepted them, along with your accepted settings: the run says which of them you've changed, and ignores those changes.
+
+`scoter verify --with-exemption` picks those changes up: it accepts the project's settings as they stand, without showing you the review, when the checks refuse nothing, and moves the exemption to the new acceptance (shown as `exempted` by `scoter list-accepted`), with the same end, in place of the branch's earlier acceptance.  Anything the checks refuse needs `scoter verify`.
+
+`scoter exempt --end` ends the exemption; revoking its acceptance does too.  `scoter list-accepted` shows it, with its end, branch and acceptance.  For automation, start an exemption, then have it run `scoter verify --with-exemption` before each run.
 
 `scoter run` keeps `scoter-host`'s copy of the configuration in `${scoter:state-dir}/environments/HOST/suc.json`, private to you, and removes it when the environment stops.
 

@@ -58,17 +58,16 @@ class LookupTest(TempDirTest):
             accepted_at=now - datetime.timedelta(seconds=1),
             expires_at=now + datetime.timedelta(days=30),
             setup=setup,
-            suggestion=None if kind == records.Kind.BLANKET else taken.manifest,
+            suggestion=taken.manifest,
         )
         env_id = store.environment_id(self.project)
         with self.verified.locked():
             taken.store(self.verified)
             record = records.EnvironmentRecord(env_id, str(self.project), [acceptance])
-            if kind != records.Kind.BLANKET:
-                self.verified.write_bytes(
-                    env_id, records.ACCEPTANCES_DIR, acceptance.id, lookup.ACCEPTED_FILE,
-                    data=json.dumps({"commands": []}).encode(),
-                )
+            self.verified.write_bytes(
+                env_id, records.ACCEPTANCES_DIR, acceptance.id, lookup.ACCEPTED_FILE,
+                data=json.dumps({"commands": []}).encode(),
+            )
             records.save_environment(self.verified, record)
         return acceptance
 
@@ -117,13 +116,42 @@ class LookupTest(TempDirTest):
         self.write("proj/.surf-scoter.d/env/Dockerfile", "FROM ubuntu\n")
         self.assertEqual(lookup.find(UserConfig(self.suc())), lookup.Lookup())
 
-    def test_blanket(self) -> None:
-        """A blanket acceptance matches, without an `accepted.json`."""
-        self.accept(records.Kind.BLANKET)
+    def exempt(self, acceptance: records.Acceptance, branch: str | None) -> None:
+        """Start an exemption from `acceptance`, for an hour."""
+        env_id = store.environment_id(self.project)
+        with self.verified.locked():
+            record = records.load_environment(self.verified, str(self.project), env_id)
+            assert record is not None  # nosec: B101  # narrowing for the type checker
+            now = records.now_utc()
+            record.exemption = records.Exemption(
+                acceptance.id, now + datetime.timedelta(hours=1), branch, now,
+            )
+            records.save_environment(self.verified, record)
+
+    def test_exempt(self) -> None:
+        """Under an exemption for the branch, changed files match its acceptance, and say what's ignored."""
+        acceptance = self.accept()
+        self.exempt(acceptance, "main")
         self.write("proj/.surf-scoter.d/env/Dockerfile", "FROM ubuntu\n")
-        found = lookup.find(UserConfig(self.suc()))
-        self.assertEqual(found.match, records.MatchKind.BLANKET)
-        self.assertIsNone(found.accepted_settings)
+        suc = self.suc()
+        suc["active-config-locations"]["project-branch"] = "main"  # type: ignore[index]
+        found = lookup.find(UserConfig(suc))
+        self.assertEqual((found.match, found.acceptance), (records.MatchKind.EXEMPT, acceptance.id))
+        assert found.accepted_settings is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(found.accepted_settings.is_file())
+        assert found.notice is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(found.notice.startswith("Exempt on main until "))
+        self.assertNotIn("ignores", found.notice)
+        self.write("proj/.surf-scoter.d/env/dev-env.yaml", "user: you\n")
+        found = lookup.find(UserConfig(suc))
+        assert found.notice is not None  # nosec: B101  # narrowing for the type checker
+        self.assertIn(
+            "it ignores your changes to env/dev-env.yaml until you run `scoter verify --with-exemption`",
+            found.notice,
+        )
+        # Another branch isn't exempt.
+        suc["active-config-locations"]["project-branch"] = "dev"  # type: ignore[index]
+        self.assertEqual(lookup.find(UserConfig(suc)), lookup.Lookup())
 
     def test_verified_containers(self) -> None:
         """Containers in `verification: verified-containers` go into the setup values; others don't."""

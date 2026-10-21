@@ -304,6 +304,17 @@ class UserConfig:
         """The dev container's `dev-env.yaml`, merged with its parents; None without a project."""
         return self.__find(jdata.find_dict, "dev-container")
 
+    def use_accepted_files(self, project_setup: jdata.DictJsonData, dev_container: jdata.DictJsonData | None) -> None:
+        """Replace `current-project-setup`, and `dev-container` when given, with the accepted copy's.
+
+        Under an exemption (see `verified.staging.adopt_accepted`), the run
+        uses the project file and `dev-env.yaml` files as accepted, not as
+        they are now.
+        """
+        self._config[CURRENT_PROJECT_SETUP] = project_setup
+        if dev_container is not None:
+            self._config["dev-container"] = dev_container
+
     def has_dev_container(self) -> bool:
         """Whether the file has the dev container's `dev-env.yaml` (it does with a project)."""
         return self.dev_container() is not None

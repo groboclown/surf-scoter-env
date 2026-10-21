@@ -14,7 +14,7 @@ It prints each step, and ends with `PASS` or `FAIL`.
 
 * The debug build of the host tools: `cd host && cargo build`.
 * `python3`, `git`, and `script` (from util-linux, to give the review prompt a terminal).
-* For the tests that run containers (`03` on): the container tool, with `compose`, and the network.
+* For the test that runs containers (`03`): the container tool, with `compose`, and the network.
 
 ## The sandbox
 
@@ -35,6 +35,7 @@ The sandbox is removed when the test ends, unless it fails (it says where it is,
 * **`01-verify-and-revoke`**: the run refuses a project nobody accepted; the review refuses to ask without a terminal; the review file (a refused shell commented out, with its override); accepting it; `list-accepted`; a second review comparing with it; `scoter revoke $(scoter list-accepted -q)`.  No containers.
 * **`02-re-review`**: accepts a project, changes it (`changed/` over `project/`), and checks the next review: what's unchanged on one line, what's new and what changed in full, the Dockerfile's difference; the run refusing the changed files; accepting the re-review.  No containers.
 * **`03-run-and-kill`**: `scoter user-setup`, accepting a project that uses the distribution's `dev-env` container, then a real `scoter run`.  Once the environment is up, it checks that the gateway lets out the accepted host (`registry.npmjs.org`) and not another (`example.com`).  Then it kills the run as a crash would, leaving its containers running, and checks that `scoter kill` stops them and forgets the environment.
+* **`04-exempt`**: accepts 02's sample project, starts `scoter exempt`, and changes the Dockerfile, the project file and `dev-env.yaml`.  A run on the branch builds the changed Dockerfile with the accepted `dev-env.yaml`, and says which changes it ignores; another branch isn't exempt; `scoter verify --with-exemption` refuses the suggestion while the checks refuse its shell, then accepts it without, and the next run uses the new `dev-env.yaml`; `scoter exempt --end`.  No containers: the container tool is a stand-in that keeps what a build was given, and fails it.
 
 ## Adding a test
 
