@@ -447,7 +447,7 @@ fn parse_checked(
 /// the fields needs one, and a newline in a value could look like more
 /// lines on the review), and no `<<` keys: YAML merge keys, which the tools
 /// don't apply, so they'd only mislead.
-fn text_problems(value: &Value, key: &str, problems: &mut Vec<(String, String)>) {
+pub(crate) fn text_problems(value: &Value, key: &str, problems: &mut Vec<(String, String)>) {
     let control = |text: &str| text.chars().any(char::is_control);
     match value {
         Value::String(text) if control(text) => problems.push((
@@ -560,7 +560,7 @@ fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option
     None
 }
 
-fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
+pub(crate) fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
     if value.is_null() {
         return EnvRules::default();
     }

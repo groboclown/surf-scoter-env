@@ -11,7 +11,7 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
               [--dev-container-workspace-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
-              [--accepted-settings ACCEPTED.json]
+              [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
               [--unreviewed-project-commands] [--output FILE]
 ```
 
@@ -22,6 +22,7 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR]
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
 * `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`scoter: paths: verified-dir`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.
+* `--review`: the user's review file for the project (step 12 of [Projects in v1](projects-v1.md)).  It's read as the project file is, its `project-dir` must be this run's, its `expires-at` in the future, and a `dev-container: use: {name: ...}` one of the user's containers.  The file's `review` gets its `result`, and, unless it's `reject`, the accepted settings it gives, in `accepted.json`'s shape.  Nothing runs from a review: `host-brokered` doesn't change.
 * `--unreviewed-project-commands`: build `host-brokered` from the project file's `commands`, as they are.  Nobody has reviewed them, so `scoter` warns on every run that it passes this.  Without it, `host-brokered` is empty.  It's a stand-in until the user's accepted settings feed `host-brokered` (step 8 of [Projects in v1](projects-v1.md)), and goes then.
 * `--output`: the file to write; without it, the JSON goes to stdout.
 
@@ -266,6 +267,15 @@ The general layout:
     "egress": {
         "gateway": null,
         "rules": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}]
+    },
+
+    // The user's review file, when --review gives it: its `result` ('accept' or 'reject'),
+    // and the accepted settings it gives ('null' when rejected), for the checks to judge
+    // before anything is stored.  'null' without one.
+    "review": {
+        "file": "/tmp/surf-scoter-x1/review.yaml",
+        "result": "accept",
+        "accepted": {"$schema": "surf-scoter-accepted-settings-1", "...": "..."}
     },
 
     // The commands `scoter-host` runs: the accepted settings' `commands`.  Without accepted

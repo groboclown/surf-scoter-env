@@ -6,7 +6,7 @@
 //!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
-//!                      [--accepted-settings ACCEPTED.json]
+//!                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
 //!                      [--unreviewed-project-commands] [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
@@ -43,7 +43,8 @@ const EXIT_USAGE: i32 = 2;
 const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] \
                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
-                     [--accepted-settings ACCEPTED.json] [--unreviewed-project-commands] \
+                     [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml] \
+                     [--unreviewed-project-commands] \
                      [--output FILE]";
 
 fn main() {
@@ -78,6 +79,9 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             );
             println!(
                 "--accepted-settings gives the user's accepted settings for the project, from the verified store; host-brokered is built from them."
+            );
+            println!(
+                "--review gives the user's review file for the project; the file's `review` holds what it says, and the accepted settings it gives."
             );
             println!(
                 "--unreviewed-project-commands builds host-brokered from the project's commands, which nobody has reviewed; without it, host-brokered is empty."
@@ -147,6 +151,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
     let mut accepted_settings: Option<OsString> = None;
+    let mut review: Option<OsString> = None;
     let mut no_setup_search = false;
     let mut unreviewed_project_commands = false;
     let mut output: Option<OsString> = None;
@@ -184,6 +189,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
             "--accepted-settings" => &mut accepted_settings,
+            "--review" => &mut review,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -209,6 +215,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             universal: universal.map(PathBuf::from),
             no_setup_search,
             accepted_settings: accepted_settings.map(PathBuf::from),
+            review: review.map(PathBuf::from),
         },
         build: BuildOptions {
             unreviewed_project_commands,
@@ -272,6 +279,7 @@ mod tests {
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
                     accepted_settings: Some(PathBuf::from("/v/accepted.json")),
+                    review: None,
                 },
                 build: BuildOptions::UNREVIEWED,
                 output: Some(PathBuf::from("out.json")),

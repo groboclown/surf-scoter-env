@@ -5,7 +5,7 @@ Usage: gateway_squid.py UNIVERSAL.json OUTPUT
 
 The setup's `network-gateway: runs: write-config` runs this.  It reads the
 egress rules from the universal configuration file (see
-`surf_scoter_lib.gateway`), writes the gateway's host list to OUTPUT (which
+`surf_scoter_lib.gateway`), works out what Squid can enforce of them, writes the gateway's host list to OUTPUT (which
 the docker-compose file mounts into the gateway), and prints a JSON report
 of what it enforces and what it refuses.
 
@@ -14,6 +14,7 @@ dropped, or loosened.
 """
 import json
 import os
+import re
 import sys
 from collections.abc import Sequence
 
@@ -21,6 +22,69 @@ from surf_scoter_lib import UserConfig, gateway
 from surf_scoter_lib.err import SurfScoterErr
 
 MAX_UNIVERSAL_SIZE = 4 * 1024 * 1024
+
+# ---------------------------------------------------------------------
+# The translation
+
+
+SQUID = "squid"
+
+
+def refusal(rule: gateway.Rule) -> str | None:
+    """Why the Squid gateway can't enforce `rule`, if it can't.
+
+    It sees only `CONNECT host:port` for TLS (it doesn't look inside), and its
+    firewall lets only TCP 443 out (N2, N4).  So it enforces `tls` rules on
+    port 443, and nothing else yet.
+    """
+    if rule.protocol == "https":
+        return (
+            "`https` needs a gateway that looks inside TLS to check the request; "
+            "the Squid gateway only sees the host name (use `tls`, without `methods`)"
+        )
+    if rule.protocol == "http":
+        return (
+            "plain `http` needs port 80 through the gateway's firewall and Squid's HTTP "
+            "handling, which the Squid gateway doesn't have yet (use `tls` on 443 if the host has it)"
+        )
+    if rule.port != 443:
+        return f"the gateway's firewall only lets TCP port 443 out, not {rule.port}"
+    if rule.methods:
+        return "the gateway can't see the methods inside `tls`"
+    return None
+
+
+def pattern(host: str) -> str:
+    """The `dstdom_regex` line for a host rule.
+
+    `host` matches only that name; `*.example.com` matches its subdomains,
+    at any depth, but not `example.com` itself.
+    """
+    if host.startswith("*."):
+        return "^.+\\." + re.escape(host[2:]) + "$"
+    return "^" + re.escape(host) + "$"
+
+
+def translate(rules: list[gateway.Rule], source: str) -> tuple[gateway.Report, str]:
+    """The Squid gateway's report, and its host list (for `dstdom_regex -i`)."""
+    report = gateway.Report(SQUID, source)
+    for rule in rules:
+        reason = refusal(rule)
+        if reason is None:
+            report.enforced.append(rule)
+        else:
+            report.refused.append((rule, reason))
+    lines = [
+        "# The hosts the dev container may reach, on TCP 443: one pattern per line,",
+        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from the egress rules"
+        + (" (unreviewed, from the project file)." if source == "project" else "."),
+    ]
+    lines.extend(sorted({pattern(rule.host) for rule in report.enforced}))
+    return report, "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------
+# The command
 
 
 def main(argv: Sequence[str]) -> int:
@@ -40,7 +104,7 @@ def main(argv: Sequence[str]) -> int:
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
         return 2
-    report, text = gateway.squid(rules, source)
+    report, text = translate(rules, source)
     print(json.dumps(report.to_json()))
     if report.refused:
         return 1

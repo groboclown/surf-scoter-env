@@ -26,6 +26,7 @@ pub mod host_commands;
 pub mod pattern;
 pub mod project;
 pub mod read;
+pub mod review;
 pub mod system;
 
 use std::fmt;
@@ -37,12 +38,49 @@ use accepted::AcceptedSettings;
 use dev_env::DevContainer;
 use environment::{EnvPlan, EnvRules};
 use project::ProjectConfig;
+use review::{ContainerUse, Review};
 use system::{Env, LoadedFrom, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
 
 use crate::universal::ActiveConfigLocations;
 
 /// The `scoter` section's `path-lists` key searched for a `dev-container: NAME`.
 pub const DEV_CONTAINERS_SEARCH: &str = "dev-containers-search";
+
+/// The checks on a review against the run: it's for this project, it
+/// hasn't expired, and a container the user chose is one of theirs.
+fn review_problems(review: &Review, system: &SystemConfig) -> Vec<ConfigError> {
+    if review.rejected {
+        return Vec::new();
+    }
+    let error = |key: &str, message: String| ConfigError::new(Some(&review.file), key, message);
+    let mut errors = Vec::new();
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let project_dir = system.get_path(system::SCOTER_SECTION, system::PROJECT_DIR);
+    if project_dir.as_deref().map(canonical) != Some(canonical(&review.project_dir)) {
+        errors.push(error(
+            "project-dir",
+            "isn't this run's project; leave it as the review gave it".to_string(),
+        ));
+    }
+    if review.expires_at <= accepted::now() {
+        errors.push(error("expires-at", "must be in the future".to_string()));
+    }
+    if let ContainerUse::Name(name) = &review.container_use {
+        let search = system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH);
+        let found = search
+            .iter()
+            .any(|dir| dir.join(name).join(dev_env::DOCKERFILE).is_file());
+        if !found {
+            errors.push(error(
+                "dev-container.use",
+                format!(
+                    "there's no container '{name}' in your `dev-containers-search` directories"
+                ),
+            ));
+        }
+    }
+    errors
+}
 
 /// The `scoter` section's `value-lists` key listing the domains an egress
 /// wildcard (`*.`) can't be on.
@@ -79,6 +117,8 @@ pub struct LoadOptions {
     /// The user's accepted settings for the project (`--accepted-settings`):
     /// an `accepted.json` in the verified store.
     pub accepted_settings: Option<PathBuf>,
+    /// The user's review file for the project (`--review`).
+    pub review: Option<PathBuf>,
 }
 
 /// What `load_all` uses from a universal configuration file: the setup, and
@@ -149,6 +189,8 @@ pub struct FullConfig {
     pub dev_container: Option<DevContainer>,
     /// The user's accepted settings for the project, when given.
     pub accepted: Option<AcceptedSettings>,
+    /// The user's review file for the project, when given.
+    pub review: Option<Review>,
 }
 
 /// Read the whole configuration, using the process environment to find the
@@ -289,6 +331,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             project,
             dev_container,
             accepted,
+            review: None,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -443,12 +486,26 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
+    let review = options.review.as_deref().and_then(|file| {
+        let read = review::read(&absolute(file))
+            .map_err(|e| errors.extend(e))
+            .ok()?;
+        if let Some(system) = &system {
+            let problems = review_problems(&read, system);
+            if !problems.is_empty() {
+                errors.extend(problems);
+                return None;
+            }
+        }
+        Some(read)
+    });
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
             project,
             dev_container,
             accepted,
+            review,
         }),
         _ => Err(ConfigErrors(errors)),
     }

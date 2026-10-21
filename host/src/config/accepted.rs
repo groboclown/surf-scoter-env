@@ -27,6 +27,7 @@
 //! `scoter-host` checks, when it starts, that the store's file still says
 //! the same, and hasn't expired (`check_for_run`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as Json};
@@ -42,7 +43,7 @@ pub const SCHEMA: &str = "surf-scoter-accepted-settings-1";
 /// The setup section and `values` key naming the network gateway.
 pub const GATEWAY_SECTION: &str = "network-gateway";
 pub const GATEWAY_NAME: &str = "name";
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 9] = [
     "$schema",
     "project-dir",
     "expires-at",
@@ -50,6 +51,8 @@ const KEYS: [&str; 7] = [
     "gateway",
     "egress",
     "commands",
+    "dev-container",
+    "overrides",
 ];
 
 /// The accepted settings, checked.
@@ -68,6 +71,15 @@ pub struct AcceptedSettings {
     pub commands: Commands,
     /// Each of `commands` as written.
     pub raw_commands: Vec<Json>,
+    /// The dev container the user accepted: the project's (`None`), or one of
+    /// theirs, by name.
+    pub container_name: Option<String>,
+    /// Each image the build starts from, and what to build from instead.
+    pub images: BTreeMap<String, String>,
+    /// The setup checks the user overrode, by command index and by egress
+    /// rule index.
+    pub command_overrides: BTreeMap<usize, Vec<String>>,
+    pub egress_overrides: BTreeMap<usize, Vec<String>>,
 }
 
 /// Read the accepted settings from the store's `file`.
@@ -174,6 +186,9 @@ pub fn parse(contents: Json, file: &Path) -> Result<AcceptedSettings, Vec<Config
         }
         Err(found) => problems.extend(found),
     }
+    let (container_name, images) = dev_container(map.get("dev-container"), &mut problems);
+    let command_overrides = overrides(map, "commands", commands.len(), &mut problems);
+    let egress_overrides = overrides(map, "egress", egress.len(), &mut problems);
     errors.extend(
         problems
             .into_iter()
@@ -190,9 +205,105 @@ pub fn parse(contents: Json, file: &Path) -> Result<AcceptedSettings, Vec<Config
             egress,
             commands,
             raw_commands,
+            container_name,
+            images,
+            command_overrides,
+            egress_overrides,
         }),
         _ => Err(errors),
     }
+}
+
+/// `dev-container`: `use` (`"project"`, or `{"name": ...}`) and `images`.
+fn dev_container(
+    value: Option<&Json>,
+    problems: &mut Vec<(String, String)>,
+) -> (Option<String>, BTreeMap<String, String>) {
+    let mut images = BTreeMap::new();
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return (None, images);
+    };
+    let mut bad = |key: &str, message: &str| {
+        problems.push((child_key("dev-container", key), message.to_string()));
+    };
+    let name = match value.get("use") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(s)) if s == "project" => None,
+        Some(Json::Object(choice)) => match choice.get("name").and_then(Json::as_str) {
+            Some(name) if choice.len() == 1 && super::project::valid_name(name) => {
+                Some(name.to_string())
+            }
+            _ => {
+                bad(
+                    "use",
+                    "must be {\"name\": NAME}, with a single directory name",
+                );
+                None
+            }
+        },
+        Some(_) => {
+            bad("use", "must be \"project\", or {\"name\": NAME}");
+            None
+        }
+    };
+    match value.get("images") {
+        None | Some(Json::Null) => {}
+        Some(Json::Object(map)) => {
+            for (from, to) in map {
+                match to.as_str() {
+                    Some(to) if !to.is_empty() => {
+                        images.insert(from.clone(), to.to_string());
+                    }
+                    _ => bad(&format!("images.{from}"), "must be an image"),
+                }
+            }
+        }
+        Some(_) => bad("images", "must be a mapping"),
+    }
+    (name, images)
+}
+
+/// `overrides.LIST`: `[{"index": N, "checks": [...]}]`, each index in `0..len`.
+fn overrides(
+    map: &Map<String, Json>,
+    list: &str,
+    len: usize,
+    problems: &mut Vec<(String, String)>,
+) -> BTreeMap<usize, Vec<String>> {
+    let key = format!("overrides.{list}");
+    let mut found = BTreeMap::new();
+    let entries = match map.get("overrides").and_then(|o| o.get(list)) {
+        None | Some(Json::Null) => return found,
+        Some(Json::Array(entries)) => entries,
+        Some(_) => {
+            problems.push((key, "must be a list".to_string()));
+            return found;
+        }
+    };
+    for (i, entry) in entries.iter().enumerate() {
+        let index = entry
+            .get("index")
+            .and_then(Json::as_u64)
+            .and_then(|n| usize::try_from(n).ok());
+        let checks: Option<Vec<String>> = entry.get("checks").and_then(Json::as_array).map(|c| {
+            c.iter()
+                .filter_map(Json::as_str)
+                .map(str::to_string)
+                .collect()
+        });
+        match (index, checks) {
+            (Some(index), Some(checks)) if index < len && !checks.is_empty() => {
+                found.insert(index, checks);
+            }
+            _ => problems.push((
+                index_key(&key, i),
+                format!(
+                    "must be {{\"index\": N, \"checks\": [...]}}, for one of the {len} entries"
+                ),
+            )),
+        }
+    }
+    found
 }
 
 impl AcceptedSettings {

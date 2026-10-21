@@ -864,6 +864,8 @@ Nothing defines the accepted data yet: step 5 named the file (`accepted.json`), 
 * **`project-dir`** ties the settings to the environment they were accepted for.
 * **`expires-at`** is the acceptance's expiry, so `scoter-host` can check it at start without reading the store's records.  A carried-forward acceptance (step 5) copies the file, expiry included, as carrying forward never extends it.
 * **`gateway`** is step 9's; `null` until then.
+* **`dev-container`** (added by step 12): `use` (`"project"`, or `{"name": NAME}` for one of the user's containers) and `images` (each image the build starts from, and what to build from instead).
+* **`overrides`** (added by step 12): `{"commands": [{"index": N, "checks": [...]}], "egress": [...]}`, the setup checks the user set aside for each item.
 * **`vcs`** is the project's VCS name.  The VCS commands themselves come from the setup, and the acceptance's `setup` values (step 5) already record them, so a change asks for a new review.  That's the "expanded VCS settings": nothing more needs to be in the accepted data.
 
 ### Draft: the flow
@@ -919,13 +921,13 @@ This will also need a method to read those settings and report on what it can an
 Completed:
 
 * **The setup.**  [defaults/setup.yaml](../../defaults/setup.yaml) has a `network-gateway` section: `values: name` (`squid`), `values: config-mount` (where the gateway reads its file), and `runs: write-config`, given `{x:universal}` and `{x:output}`.  `dev-env: paths: allowed-domains` is gone, and so is `.surf-scoter/allowed-domains.txt` (this repository's list moved into its project file's `egress`, as exact hosts).
-* **The translation.**  [`gateway_squid.py`](../../scripts/gateway_squid.py), with [`gateway.py`](../../scripts/surf_scoter_lib/gateway.py): the rules come from the SUC's accepted `egress`, or, until step 15, the project file's (the file and `scoter run` say so).  Each is checked again (a host that isn't a host name, an unknown protocol or port, is refused outright).  The report (JSON on stdout) lists each rule enforced, and each refused with its reason; any refusal means nothing's written, exit 1.  For Squid, only `tls` on 443 is enforced: `https` needs a gateway that looks inside TLS, `http` needs port 80 through the firewall, and other ports need firewall changes (N4).
+* **The translation.**  [`gateway_squid.py`](../../scripts/gateway_squid.py) (the Squid translation), with [`gateway.py`](../../scripts/surf_scoter_lib/gateway.py) (reading the rules, and the report every gateway gives): the rules come from the SUC's accepted `egress`, or, until step 15, the project file's (the file and `scoter run` say so).  Each is checked again (a host that isn't a host name, an unknown protocol or port, is refused outright).  The report (JSON on stdout) lists each rule enforced, and each refused with its reason; any refusal means nothing's written, exit 1.  For Squid, only `tls` on 443 is enforced: `https` needs a gateway that looks inside TLS, `http` needs port 80 through the firewall, and other ports need firewall changes (N4).
 * **Squid** reads one file, `/user-space/egress-hosts.txt`, with `dstdom_regex -n -i`: `^host$` for a host, `^.+\.domain$` for `*.domain`.  Squid's `dstdomain` can't say "subdomains but not the domain itself", which a `*.` rule means, so the regular expressions keep it from being broader.  The image's default list allows nothing.  Private, loopback, link-local and metadata destinations are still refused after resolution (`blocked-destinations.txt`, and the firewall), whatever the list says.
 * **`scoter run`** runs `write-config` into `resources/gateway-config` (mode `0644`, as the gateway's own user reads it), shows any refusals and stops, and the docker-compose file mounts it with `GATEWAY_CONFIG_HOST` and `GATEWAY_CONFIG_CONTAINER`.  The setup directory no longer carries it, so the dev container doesn't see it.
 * **The gateway in acceptances.**  `setup_values` records the gateway's name and `write-config`, so a different gateway asks for a new review.  The generator refuses accepted settings whose `gateway` isn't the setup's.
 * **Docs:** [network](../security/network.md), [settings](../security/settings.md), [files](../security/files.md), the attack vector lists, the [project file](../project-configuration-file.md#egress), the [system configuration](../system-config-file.md), the README and the new project guide.
 
-**Tests:** in `test_gateway.py`: the rules' source (accepted, then the project's), rules refused outright, Squid's enforced and refused rules (`https` with `methods`, `http` with `methods`, port 22), the patterns (no broader than the rule), and the script (writes, refuses with nothing written, bad input).  In `universal.rs`: settings accepted for another gateway.  Checked by hand against the real Squid image: the configuration parses (with a list, and the empty default), the patterns allow and refuse the right hosts in a running Squid (`x.registry.npmjs.org`, `pkg.dev` and `evilpkg.dev` refused; `us.pkg.dev` and `a.b.pkg.dev` allowed), and a listed host that resolves to loopback (`localtest.me`) is refused.  A test that runs the containers would make those repeatable.
+**Tests:** in `test_gateway.py`: the rules' source (accepted, then the project's), and rules refused outright; in [`test_gateway_squid.py`](../../scripts/tests/test_gateway_squid.py): Squid's enforced and refused rules (`https` with `methods`, `http` with `methods`, port 22), the patterns (no broader than the rule), and the script (writes, refuses with nothing written, bad input).  In `universal.rs`: settings accepted for another gateway.  Checked by hand against the real Squid image: the configuration parses (with a list, and the empty default), the patterns allow and refuse the right hosts in a running Squid (`x.registry.npmjs.org`, `pkg.dev` and `evilpkg.dev` refused; `us.pkg.dev` and `a.b.pkg.dev` allowed), and a listed host that resolves to loopback (`localtest.me`) is refused.  A test that runs the containers would make those repeatable.
 
 ## 10. Update `scoter-host` to run accepted executables
 
@@ -989,6 +991,143 @@ Ideas:
 - Include the gateway the egress rules are accepted for.
 - Generated comments start with a fixed prefix (for example `#scoter:`), so they can be regenerated and kept apart from the user's own notes.  This means storing the user's version of this file, and not just keep the parsed data as JSON.
 
+### Design: data is what's accepted; everything else is a comment
+
+The file holds two kinds of content:
+
+* **YAML data**: only what becomes the accepted settings (`accepted.json`, step 8): the egress rules, the commands, their environment, the dev container choices (below), and `expires-at`.  It reads like the project file, with everything resolved: each program's absolute path, each `${section:key}` frozen to its value.
+* **Comments**: everything the user needs to judge it, but can't change here: the summary, each finding (step 11), how each program was found, the dev container's files, the setup it's reviewed under.  The parser (step 13) drops every comment, so editing one changes nothing, and the next review writes them afresh.
+
+Generated explanations start `#scoter:`.  What the user might want to switch on is generated as plain YAML commented out with `# `, so removing the `# ` makes it data: the `result: reject` line, and the refused items.
+
+The user keeps a note with `$comment:`, a key any mapping in the data can have (the file as a whole, a rule, a command).  It's data, so it's parsed, stored with the review, and carried into the next one; a plain `#` comment the user writes isn't kept, and the file's header says so.
+
+```yaml
+#scoter: Surf Scoter review: /home/user/mono/client
+#scoter:   project files  .surf-scoter.d (snapshot sha256:91b0...)
+#scoter:   branch         main
+#scoter:   gateway        squid
+#scoter:
+#scoter: Summary: 1 refused (commented out below), 2 warnings, 3 notes.
+#scoter:   refused  commands: sh -- a shell runs whatever command it's given (host-bridge:shells)
+#scoter:   warn     egress[1] github.com -- lets the container send data out
+#scoter:   warn     dev-env/Dockerfile -- `FROM debian:bookworm` has no digest
+#scoter:
+#scoter: To say no, remove the `# ` before `result: reject`.  To accept less, delete an
+#scoter: egress rule or a command, narrow a command's arguments, or shorten `expires-at`.
+#scoter: To keep a note with this review, add a `$comment:` to any entry; `#` comments
+#scoter: aren't kept.
+review: "surf-scoter-review-1"
+# result: reject
+project-dir: "/home/user/mono/client"
+expires-at: "2026-11-19T15:04:05+00:00"
+
+egress:
+  - {host: "registry.npmjs.org", protocol: "tls", port: 443}
+  #scoter: warn: `github.com` lets the container send data out (code hosts take uploads).
+  - host: "github.com"
+    protocol: "tls"
+    port: 443
+    $comment: "Needed for the release workflow; the token only has read access."
+
+env:
+  allow: ["LANG"]
+  set:
+    #scoter: from `${ssh:config-file}`
+    "AWS_CONFIG_FILE": "/home/user/.aws/config"
+    "HOME": "@HOME@"
+
+commands:
+  #scoter: note: no check in your setup covers `aws`.
+  #scoter: runs /usr/local/bin/aws (found on the PATH)
+  - command: "aws"
+    program: "/usr/local/bin/aws"
+    args: ["s3", "ls", {any: {prefix: "s3://my-bucket/"}}]
+  #scoter: refused: a shell runs whatever command it's given (host-bridge:shells).
+  #scoter: To accept it for this project anyway, uncomment it, keeping `$override`.
+  # - command: "sh"
+  #   program: "/usr/bin/sh"
+  #   args: ["-c", {any: {}}]
+  #   $override: ["host-bridge:shells"]
+
+dev-container:
+  #scoter: The project's container: .surf-scoter.d/dev-env
+  #scoter:   dev-env/Dockerfile  2310 bytes  sha256:aa07...
+  #scoter:     | FROM debian:bookworm
+  #scoter:     | RUN apt-get update && apt-get install -y build-essential
+  #scoter:   dev-env/dev-env.yaml  210 bytes
+  #scoter:   dev-env/bin/entry.sh  140 bytes  executable
+  #scoter:   parents: dev-env (the installation's, trusted)
+  use: "project"
+  images:
+    #scoter: warn: no digest; the tag can point at new content at any time.
+    "debian:bookworm": "debian:bookworm"
+```
+
+### Design: what each part does
+
+* **`review`** names the format, so a later version can tell an old file.
+* **`result`** is commented out: the file says yes (with the step 15 prompt's "use") unless the user uncomments `result: reject`.  `reject` is the only value; any other is an error, so a typo can't accept.  Rejecting stores nothing, as a "deny" doesn't.
+* **`project-dir`** is read-only: the parser refuses the file if it's changed.  It says which project this is, and the generator checks it again (step 8).
+* **`expires-at`** defaults to `verified-expiry-days` from now.  The user can shorten or lengthen it; it must be in the future.  `exempt-until` isn't here: exemptions are their own command (step 20).
+* **`egress`**, **`env`** and **`commands`** are the project file's, resolved, in its shape, `env` split as the project has it (a top-level `env`, and each command's own).  That keeps the next review's diff readable: what the user changed against what the project changed, item by item (step 17).  `${section:key}` is frozen, with its source in a comment; `@NAME@` stays as written (step 7).  The parser builds each command's whole environment plan, as `accepted.json` holds it.
+* **Refused items** are generated commented out, with their reasons, so the file can be accepted as it stands, minus what can't be.  The parser runs the checks again (step 13), so an item the user uncomments is refused again, unless it carries an `$override` (below).
+* **Findings** come before the item they're about, worst first.
+* **The branch and the gateway** are comments: they come from the project and the setup.
+
+### Design: editing
+
+The user may change any data, narrowing or widening: remove a rule or a command, narrow an argument (a literal for an `any`, a longer `prefix`), point a `program` at another executable, add a command or an egress rule the project didn't ask for (the user may have uses the project doesn't anticipate).  Everything typed gets the same checks as the suggestion (step 13): a typed `program` gets the path checks, and the refused lists still apply.  The next review marks what the user added or changed, against the project's suggestion, as "added by you" or "changed by you" (step 17), so edits stay visible.
+
+### Design: overriding a refusal for this project
+
+Refusals come from two places, and only one can be set aside here:
+
+* **Policy refusals** come from the user's own setup: a `host-commands` check with `action: refuse` (`host-bridge:shells`, say).  The user owns that policy, so they can make an exception to it.
+* **Safety refusals** come from facts that accepting can't change: the program isn't on this computer; it's in the project, the workspace or the repository; another user owns it, or anyone can write to it or a directory above it; a container directory has a symlink, a hard link or a special file.  These can't be overridden.
+
+A policy-refused item is generated commented out with an `$override` line, naming the checks that refused it.  Uncommenting the item with its `$override` accepts it for this project; uncommenting it without one, it's refused again, so a refusal is never undone by accident.
+
+* **`$override`** is a list of `section:key` check names, on a command (or an egress rule, when the later egress checks can refuse).  The named checks don't apply to that item; every other check still does.
+* **Exact names only**, as the setup's `overrides` (step 4): a check the list doesn't name still refuses, including one a later version of the setup adds.  A name that isn't a check refusing the item is an error, so a stale or misspelled override is caught.
+* **This project, this item, this acceptance.**  It doesn't change the setup, and it doesn't carry to other projects; an exception for every project belongs in the setup, as an `overrides` check.
+* **Recorded and visible.**  The acceptance records each override (in `accepted.json`, with the command, so the generator can tell an accepted override from a smuggled command), and the next review shows it: "you overrode `host-bridge:shells` here".  `scoter user-setup` lists the overrides in force, with the setup's own.
+* **Safety refusals get no `$override` line**, and the parser refuses one written on an item refused for safety.
+
+`$override` is data, like `$comment`, so it's kept with the review and carried into the next one on its item, as long as the item hasn't changed.  If it has, the override is dropped, and the item is refused again until the user looks at it: an override covers what the user saw.
+
+### Design: comments the user keeps
+
+`$comment` is text, on any mapping in the data.  The parser keeps them with the review (`review.yaml`, step 5), not in `accepted.json` (the runtime doesn't need them).  The next review puts each back on its item: the file's own on the file; a rule's or a command's on the item it was on, matched by what the item was (its accepted data, ignoring the `$comment`).  An item that changed keeps its note, marked "on the earlier version"; a note whose item is gone is listed in the header, so it isn't lost silently.
+
+### Design: the dev container
+
+As drafted earlier, the container was only described: the user could accept it or reject the whole review.  A user who doesn't trust what the project builds should have choices short of rejecting:
+
+* **`use`**: `"project"` (the project's container, the default), or the name of a container in the user's own `dev-containers-search` directories (`{name: "my-env"}`), which the user trusts as part of their setup.  The project's commands and egress still apply, but its Dockerfile isn't built.  The user's container must still be one whose `dev-env.yaml` gives what the tools need (mounts, the broker); the parser checks it's there and loads, as for any container.
+* **`images`**: each image the build starts from (the `FROM` lines, the project's and its local parents'), mapped to what to build from instead.  It starts as each image itself; the user can pin one to a digest (`"debian@sha256:4c1e..."`), or point it at an image they already have (`"local/debian-hardened:12"`).  The build passes them as named build contexts (`--build-context debian:bookworm=docker-image://debian@sha256:...`, which BuildKit and recent Podman read), so the project's Dockerfile needn't change.  The `docker` section gets a `runs` entry for the build context argument, so another container tool can say how it does it.
+
+Both go into `accepted.json` (step 8's shape gets a `dev-container` with `use` and `images`), and into the setup of the run: step 16 builds from the user's choice.  The fingerprint of the project's container (step 5) still matters with `use: "project"`; with the user's own, a change to the project's container is noted, but doesn't need a new review.
+
+### Design: writing it safely
+
+Step 14 writes it without a YAML library, so the format is a small subset that's easy to write and parse:
+
+* every string double-quoted, as JSON writes it, with `ensure_ascii=True` (so bidirectional, zero-width and look-alike characters show as `\u` escapes);
+* placeholders and short lists in flow style (`{any: {}}`, `["s3", "ls"]`), the rest in block style;
+* every key the parser expects written, in a fixed order; no anchors, aliases, tags or block scalars;
+* every comment written from data that's been stripped of control characters, one line each.
+
+### Design: the branch
+
+A `runs: current-branch` in each VCS section, like `find-root`: the distribution's script for Git reads `.git/HEAD` (following a `gitdir:` file, for worktrees) from the project directory, without running Git, which would read the repository's configuration.  It's a comment, and a note in `environment.json` (step 5), not part of the match.
+
+### Open items
+
+* **Image digests.**  Not looked up by default: asking a registry needs the network and credentials, and can be slow.  A quick `docker images` inventory, to say which of the `images` are already stored locally (and their digests), could be a sub-command of its own later.
+* **The dev container choices** (`use` and `images`) are in the first cut.  Step 8's `accepted.json` gains a `dev-container` with them.
+* **Refused items the user wants anyway**: an `$override` on the item, for policy refusals only (above).
+
 ## 13. Add the user verification file format parser
 
 Parsing the user verification file requires YAML parsing, which we currently only parse through the SUC generator.  It makes sense to allow this to be an additional input file passed to the SUC generator as another input file format.  It would output into the SUC in the same way as the verified project settings.
@@ -996,6 +1135,15 @@ Parsing the user verification file requires YAML parsing, which we currently onl
 The same parsing rules as step 7 apply.  After parsing, the checks library (step 11) runs on the result before anything is stored: paths the user typed get the same path checks as resolved ones, and the refused lists still apply.
 
 A missing piece here is the fingerprint parts of the project directory.  However, that may not be included in the file, based on its design in part 5 above.
+
+Completed:
+
+* **The parser.**  [`review.rs`](../../host/src/config/review.rs): step 7's rules (no tags, merge keys, duplicate keys or control characters); `review` must be the format's name; `result: reject` says no, whatever else the file says (the rest isn't read); `project-dir` and `expires-at` are required; `egress`, `env` and `commands` are checked as the project file's are, except that each `program` must be an absolute path, and a `${...}` in an `env` value is refused (the review's values are as accepted); `$comment` (text) and `$override` (`section:key` names) are allowed on the file and on each egress rule and command, and taken off before the checks; `dev-container` takes `use` (`"project"`, or `{name: NAME}`) and `images` (each mapped to an image reference, which can't start with `-` or hold spaces or `=`).
+* **What it gives.**  `Review::accepted` builds `accepted.json`'s contents: each command with its whole environment plan (the top-level `env` merged with its own, as written), the normalised egress rules, the `dev-container` choices and the `overrides`, with the project's `vcs` and the setup's gateway.  [`accepted.rs`](../../host/src/config/accepted.rs) reads `dev-container` and `overrides` back, checking each override's index.
+* **The generator.**  `gen-scoter-uc --review FILE` checks the review against the run (this project, an unexpired `expires-at`, a `{name: ...}` container that's in `dev-containers-search`) and writes the SUC's `review`: `file`, `result`, and the accepted settings (`null` when rejected).  Nothing runs from it.
+* **The checks.**  [`checks.check_review`](../../scripts/surf_scoter_lib/checks.py) runs step 11's checks on what the review gives: each program as given (nothing looked up; a missing one is refused), each command's whole plan for `env`, the review's egress rules, and the project's container files when `use` is `"project"`.  Then `apply_overrides`: a refusal whose checks are all named becomes a note ("You overrode ..."); a name that doesn't refuse the item, or an override on an item refused for safety, is refused.
+
+**Tests:** in `review.rs`: a full review, `reject` winning over a broken file, `result` other than `reject`, the format name, unknown keys, a relative `program`, a Windows device name, a `${...}` value, a bad `$override`, bad `use` and `images`, a merge key, a duplicate key, a control character, an unknown command field; and what it gives reading back as accepted settings.  In `universal.rs`: `--review` accepted, rejected, and refused (another project, expired, a container that isn't there), and `host-brokered` unchanged.  In `test_checks.py`: a policy refusal with and without an override, an override naming a check that doesn't refuse, a safety refusal that can't be overridden, the user's own container skipping the project's files, and no review or a rejected one.  Run on this repository, a review accepting `sh -c {any}` with `$override: [host-bridge:shells]` gives a note for the shell and keeps the `-c` and `github.com` warnings.
 
 ## 14. Add the main_verify.py script
 
@@ -1077,6 +1225,9 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - The path checks only cover the project's commands; step 2's note that they should cover the setup's own `programs` too still stands.
   - On Windows, the owner and mode checks are skipped.
   - A blanket acceptance (step 8) can now be checked on each run with `check_project`; the run (step 16) wires that in.
+- Step 13:
+  - Step 14 writes the review with each `${section:key}` frozen, and its source in a comment; the SUC has the project file as written and the merged plans, but not the split, resolved `env` the review shows.  The generator needs to give that (say, the project file with its `env` values resolved).
+  - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
 
 ## 19. Review the settings format
 

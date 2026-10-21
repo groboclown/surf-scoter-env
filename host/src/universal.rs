@@ -61,6 +61,10 @@ pub struct Universal {
     /// The accepted egress rules, and the gateway they were accepted for;
     /// `null` without accepted settings.
     pub egress: Option<Json>,
+    /// The user's review file, when given: its `file`, its `result`
+    /// (`accept` or `reject`), and the accepted settings it gives (`null`
+    /// when rejected), which the checks judge before anything is stored.
+    pub review: Option<Json>,
     /// The dev container's `dev-env.yaml`.
     pub dev_container: Option<Json>,
     /// The system setup as read.
@@ -258,6 +262,18 @@ pub fn build(config: &FullConfig, options: &BuildOptions) -> Result<Universal, C
         host_brokered,
         accepted_settings: config.accepted.as_ref().map(|a| a.to_universal()),
         egress: config.accepted.as_ref().map(|a| a.egress_universal()),
+        review: config.review.as_ref().map(|review| {
+            let vcs = config.project.as_ref().and_then(|p| p.vcs.as_deref());
+            let gateway = system.get(
+                crate::config::accepted::GATEWAY_SECTION,
+                crate::config::accepted::GATEWAY_NAME,
+            );
+            serde_json::json!({
+                "file": review.file.to_string_lossy(),
+                "result": if review.rejected { "reject" } else { "accept" },
+                "accepted": (!review.rejected).then(|| review.accepted(vcs, gateway.as_deref())),
+            })
+        }),
         dev_container,
         setup: system.setup_record().clone(),
         loaded_from: system.loaded_from().clone(),
@@ -279,7 +295,12 @@ fn path_text(path: &Path) -> String {
 
 /// Convert a YAML value read from `file` (at `key`), recording what JSON
 /// can't hold: numbers that aren't finite, and keys that aren't single values.
-fn yaml_to_json(value: &Yaml, file: &Path, key: &str, errors: &mut Vec<ConfigError>) -> Json {
+pub(crate) fn yaml_to_json(
+    value: &Yaml,
+    file: &Path,
+    key: &str,
+    errors: &mut Vec<ConfigError>,
+) -> Json {
     let mut error = |message: &str| errors.push(ConfigError::new(Some(file), key, message));
     match value {
         Yaml::Null => Json::Null,
@@ -1348,6 +1369,87 @@ mod tests {
         assert_eq!(
             check(before),
             ["active-config-locations.dev-container-path: the dev container directory is gone"]
+        );
+    }
+
+    // ---- review files ----
+
+    #[test]
+    fn review_into_the_universal_file() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\nvcs: git\n",
+        );
+        dir.write("mine/my-env/Dockerfile", "FROM scratch\n");
+        dir.write(
+            "home/setup.yaml",
+            &format!(
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\nnetwork-gateway:\n  values:\n    name: squid\n",
+                dir.path().join("mine").display()
+            ),
+        );
+        let project = dir.path().join("proj").display().to_string();
+        let write_review = |body: &str| {
+            dir.write(
+                "review.yaml",
+                &format!("review: \"surf-scoter-review-1\"\nproject-dir: \"{project}\"\n{body}"),
+            )
+        };
+        let load_with = |review: &Path| {
+            let options = LoadOptions {
+                project_dir: Some(dir.path().join("proj")),
+                review: Some(review.to_path_buf()),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_all_with_env(&options, env)
+        };
+        let review = write_review(concat!(
+            "expires-at: \"2999-01-01T00:00:00Z\"\n",
+            "commands:\n  - {command: \"aws\", program: \"/usr/local/bin/aws\", args: [\"s3\", \"ls\"]}\n",
+            "dev-container:\n  use: {name: \"my-env\"}\n",
+        ));
+        let universal = build(&load_with(&review).unwrap(), &BuildOptions::default()).unwrap();
+        let section = universal.review.unwrap();
+        assert_eq!(section["result"], "accept");
+        assert_eq!(section["accepted"]["vcs"], "git");
+        assert_eq!(section["accepted"]["gateway"], "squid");
+        assert_eq!(
+            section["accepted"]["commands"][0]["program"],
+            "/usr/local/bin/aws"
+        );
+        assert_eq!(
+            section["accepted"]["dev-container"]["use"]["name"],
+            "my-env"
+        );
+        // A review isn't accepted settings: nothing runs from it.
+        assert!(universal.host_brokered.is_empty());
+
+        let rejected = write_review("result: reject\n");
+        let section = build(&load_with(&rejected).unwrap(), &BuildOptions::default())
+            .unwrap()
+            .review
+            .unwrap();
+        assert_eq!(section["result"], "reject");
+        assert_eq!(section["accepted"], Json::Null);
+
+        let wrong = dir.write(
+            "wrong.yaml",
+            "review: \"surf-scoter-review-1\"\nproject-dir: \"/elsewhere\"\nexpires-at: \"2000-01-01T00:00:00Z\"\ndev-container:\n  use: {name: \"nope\"}\n",
+        );
+        assert_eq!(
+            error_texts(load_with(&wrong).unwrap_err()),
+            [
+                "project-dir: isn't this run's project; leave it as the review gave it",
+                "expires-at: must be in the future",
+                "dev-container.use: there's no container 'nope' in your `dev-containers-search` directories",
+            ]
         );
     }
 }

@@ -17,7 +17,7 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -209,13 +209,22 @@ def _code_options(command: jdata.DictJsonData, options: Sequence[str]) -> list[t
     return found
 
 
-def _env_allow(
-    config: UserConfig, command: jdata.DictJsonData, at: str,
-) -> list[tuple[str, str]]:
-    """Each `env` `allow` entry the command gets: (key, entry), the project's and its own."""
-    ret = [("env.allow", e) for e in config.project_env_allow()]
-    ret.extend((f"{at}.env.allow", e) for e in jdata.find_str_list(command, "env", "allow"))
-    return ret
+# Each `env` `allow` entry a command gets, as (key, entry): given the command and its key.
+EnvAllow = Callable[[jdata.DictJsonData, str], list[tuple[str, str]]]
+
+
+def _project_env_allow(config: UserConfig) -> EnvAllow:
+    """A project file command's `allow` entries: the project's, then its own."""
+    common = [("env.allow", e) for e in config.project_env_allow()]
+
+    def allow(command: jdata.DictJsonData, at: str) -> list[tuple[str, str]]:
+        return [*common, *((f"{at}.env.allow", e) for e in jdata.find_str_list(command, "env", "allow"))]
+    return allow
+
+
+def _plan_env_allow(command: jdata.DictJsonData, at: str) -> list[tuple[str, str]]:
+    """An accepted command's `allow` entries: its whole plan's."""
+    return [(f"{at}.env.allow", e) for e in jdata.find_str_list(command, "env", "allow")]
 
 
 @dataclass
@@ -227,15 +236,23 @@ class _Hit:
     item: str | None = None
 
 
-def check_host_commands(config: UserConfig, resolved: Sequence[Resolved]) -> list[Finding]:
-    """The setup's `host-commands` checks against the project's commands.
+def check_host_commands(
+    config: UserConfig,
+    resolved: Sequence[Resolved],
+    commands: Sequence[jdata.DictJsonData] | None = None,
+    env_allow: EnvAllow | None = None,
+) -> list[Finding]:
+    """The setup's `host-commands` checks against the commands (by default, the project file's).
 
     For each command, the checks without `overrides` that match it count,
     the most restrictive action winning; then each override for the command
     takes the place of the check it overrides (step 4).
     """
     checks = config.host_command_checks()
-    commands = config.project_commands()
+    if commands is None:
+        commands = config.project_commands()
+    if env_allow is None:
+        env_allow = _project_env_allow(config)
     findings: list[Finding] = []
     for r in resolved:
         command = commands[r.index]
@@ -250,7 +267,7 @@ def check_host_commands(config: UserConfig, resolved: Sequence[Resolved]) -> lis
             continue
         real = _real(r.executable)
         hits = [
-            h for h in _hits(config, checks, command, at, r.name, real)
+            h for h in _hits(env_allow, checks, command, at, r.name, real)
             if not _texts(h.check, "overrides")
         ]
         if not hits:
@@ -287,7 +304,7 @@ def check_host_commands(config: UserConfig, resolved: Sequence[Resolved]) -> lis
 
 
 def _hits(
-    config: UserConfig,
+    env_allow: EnvAllow,
     checks: dict[str, jdata.DictJsonData],
     command: jdata.DictJsonData,
     at: str,
@@ -311,7 +328,7 @@ def _hits(
             for j, option in _code_options(command, options):
                 yield _Hit(check_id, check, f"{at}.args[{j}]", option)
         elif env:
-            for key, entry in _env_allow(config, command, at):
+            for key, entry in env_allow(command, at):
                 if entry in env:
                     yield _Hit(check_id, check, key, entry)
         else:
@@ -405,10 +422,15 @@ def _host_covers(rule_host: str, pattern: str) -> bool:
     return rule_host.startswith("*.") and pattern.endswith("." + rule_host[2:])
 
 
-def check_egress(config: UserConfig) -> list[Finding]:
-    """Plain `http`, and hosts that can carry data out whatever the other rules say."""
+def check_egress(
+    config: UserConfig, entries: list[jdata.DictJsonData] | None = None,
+) -> list[Finding]:
+    """Plain `http`, and hosts that can carry data out whatever the other rules say.
+
+    The rules are `entries` when given (a review's), or else the file's own.
+    """
     try:
-        rules, _ = gateway.rules_from(config)
+        rules = gateway.rules_of(entries) if entries is not None else gateway.rules_from(config)[0]
     except gateway.RuleErr as err:
         return [Finding(Severity.REFUSE, "egress", str(err))]
     data_out = config.value_list("scoter", DATA_OUT_HOSTS)
@@ -599,3 +621,97 @@ def check_project(config: UserConfig, path_env: str | None = None) -> Report:
     except (KeyError, TypeError, ValueError) as err:
         raise ConfigErr(f"bad universal configuration file: {err}") from err
     return Report(resolved, findings)
+
+
+# ---------------------------------------------------------------------
+# A review's settings
+
+
+def check_review(config: UserConfig, path_env: str | None = None) -> Report:
+    """Every check on the accepted settings a review file gives (the file's `review`).
+
+    The same checks as the project's, on what the user left in the review:
+    each command's program as given (an absolute path, nothing looked up),
+    its whole environment plan, the egress rules, and the project's
+    container directories when the review uses the project's container.
+    Then the review's `$override`s (step 12): a refusal from the setup's
+    checks that the override names, every one of them, is set aside, as a
+    note; a refusal for safety (the program's missing, in the project, or
+    writable by others; a container file that's a link) never is; and an
+    override naming a check that doesn't refuse the item is refused itself.
+    No review, or a rejected one, is an empty report.
+    """
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+    accepted = config.review_accepted()
+    if accepted is None:
+        return Report()
+    try:
+        commands = [jdata.req_dict(accepted, *key) for key in jdata.find_list_keys(accepted, "commands")]
+        resolved = []
+        for i, command in enumerate(commands):
+            program = jdata.req_str(command, "program")
+            present = os.path.isfile(program) and os.access(program, os.X_OK)
+            resolved.append(Resolved(
+                i, jdata.req_str(command, "command"), _base_name(program),
+                program if present else None, "review",
+            ))
+        findings = check_host_commands(config, resolved, commands, _plan_env_allow)
+        findings.extend(check_program_paths(config, resolved, path_env))
+        egress = [jdata.req_dict(accepted, *key) for key in jdata.find_list_keys(accepted, "egress")]
+        findings.extend(check_egress(config, egress))
+        if jdata.find(accepted, "dev-container", "use") in (None, "project"):
+            findings.extend(check_project_files(config))
+        for kind in ("commands", "egress"):
+            overrides = {
+                jdata.req_int(accepted, *key, "index"): jdata.find_str_list(accepted, *key, "checks")
+                for key in jdata.find_list_keys(accepted, "overrides", kind)
+            }
+            findings = apply_overrides(findings, kind, overrides)
+    except (KeyError, TypeError, ValueError) as err:
+        raise ConfigErr(f"bad universal configuration file: review: {err}") from err
+    return Report(resolved, findings)
+
+
+def apply_overrides(
+    findings: Sequence[Finding], kind: str, overrides: dict[int, list[str]],
+) -> list[Finding]:
+    """The findings once the user's `$override`s on `kind` (`commands` or `egress`) apply."""
+    ret = list(findings)
+    for index, names in sorted(overrides.items()):
+        at = f"{kind}[{index}]"
+
+        def on_item(finding: Finding, at: str = at) -> bool:
+            return finding.key == at or finding.key.startswith((at + ".", at + "["))
+
+        # Worked out before anything is added for this item.
+        refusals = [f for f in ret if on_item(f) and f.severity == Severity.REFUSE]
+        refusing = {check for f in refusals for check in f.checks}
+        safety = [f for f in refusals if not f.checks]
+        for name in names:
+            if name not in refusing:
+                ret.append(Finding(
+                    Severity.REFUSE, f"{at}.$override",
+                    f"`{name}` doesn't refuse this item; an override names only the setup "
+                    "checks that refuse it.",
+                ))
+        if safety:
+            ret.append(Finding(
+                Severity.REFUSE, f"{at}.$override",
+                "Can't be overridden: it's refused for a reason that isn't a check in your "
+                "setup (" + safety[0].message.rstrip(".") + ").",
+            ))
+            continue
+        ret = [
+            Finding(
+                Severity.NOTE, f.key,
+                "You overrode " + ", ".join(f"`{c}`" for c in f.checks) + f" here: {f.message}",
+                f.checks,
+            )
+            if on_item(f) and f.severity == Severity.REFUSE and f.checks
+            and set(f.checks) <= set(names)
+            else f
+            for f in ret
+        ]
+    return ret
+

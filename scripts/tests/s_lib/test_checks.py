@@ -369,3 +369,89 @@ class BadFileTest(_Project):
         with self.assertRaises(checks.ConfigErr):
             self.report()
 
+
+
+@unittest.skipUnless(POSIX, "modes")
+class ReviewTest(_Project):
+    """Test the checks on a review's accepted settings, and its overrides."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.sh = self.tool("sh")
+        self.check("host-bridge:shells", "refuse", commands={"sh": str(self.sh)})
+        self.check("host-bridge:loader-env", "refuse", env=["LD_PRELOAD"])
+        self.accepted_commands: list[jdata.JsonData] = []
+        self.overrides: list[jdata.JsonData] = []
+        self.use: jdata.JsonData = "project"
+
+    def command(self, program: str, **extra: jdata.JsonData) -> dict[str, jdata.JsonData]:
+        return {
+            "command": "run", "program": program, "args": [],
+            "env": {"allow": [], "drop": [], "error": [], "set": {}, "default": {}},
+            **extra,
+        }
+
+    def review(self) -> checks.Report:
+        suc = self.suc()
+        suc["review"] = {"result": "accept", "accepted": {
+            "commands": self.accepted_commands,
+            "egress": [],
+            "dev-container": {"use": self.use, "images": {}},
+            "overrides": {"commands": self.overrides, "egress": []},
+        }}
+        return checks.check_review(UserConfig(suc), self.path_env)
+
+    def about(self, index: int) -> list[tuple[str, str]]:
+        return [
+            (str(f.severity), f.message) for f in self.review().findings
+            if f.key.startswith(f"commands[{index}]") and (f.checks or "$override" in f.key
+                                                          or "isn't on this computer" in f.message)
+        ]
+
+    def test_policy_refusal_and_override(self) -> None:
+        """Refused without an override; a note with one naming the refusing check."""
+        self.accepted_commands = [self.command(str(self.sh))]
+        self.assertEqual(self.about(0), [("refuse", "because host-bridge:shells")])
+        self.overrides = [{"index": 0, "checks": ["host-bridge:shells"]}]
+        self.assertEqual(
+            self.about(0),
+            [("note", "You overrode `host-bridge:shells` here: because host-bridge:shells")],
+        )
+
+    def test_override_names_exactly(self) -> None:
+        """A name that doesn't refuse the item is refused; an unnamed refusal stays."""
+        env = {"allow": ["LD_PRELOAD"], "drop": [], "error": [], "set": {}, "default": {}}
+        self.accepted_commands = [self.command(str(self.sh), env=env)]
+        self.overrides = [{"index": 0, "checks": ["host-bridge:shells", "host-bridge:other"]}]
+        found = self.about(0)
+        self.assertIn(("refuse", "because host-bridge:loader-env"), found)
+        unknown = (
+            "`host-bridge:other` doesn't refuse this item; an override names only "
+            "the setup checks that refuse it."
+        )
+        self.assertIn(("refuse", unknown), found)
+        self.assertIn(
+            ("note", "You overrode `host-bridge:shells` here: because host-bridge:shells"), found,
+        )
+
+    def test_safety_refusal_cant_be_overridden(self) -> None:
+        """A missing program stays refused, whatever the override says."""
+        self.accepted_commands = [self.command(str(self.tmp / "gone"))]
+        self.overrides = [{"index": 0, "checks": ["host-bridge:shells"]}]
+        severities = [s for s, m in self.about(0)]
+        self.assertTrue(all(s == "refuse" for s in severities), self.about(0))
+        self.assertTrue(any("Can't be overridden" in m for _, m in self.about(0)), self.about(0))
+
+    def test_own_container_skips_project_files(self) -> None:
+        """With one of the user's containers, the project's container files aren't checked."""
+        os.mkfifo(self.project / ".surf-scoter.d" / "env" / "pipe")
+        self.assertTrue(any(f.key == "env/pipe" for f in self.review().findings))
+        self.use = {"name": "my-env"}
+        self.assertFalse(any(f.key == "env/pipe" for f in self.review().findings))
+
+    def test_rejected_or_none(self) -> None:
+        """No review, or a rejected one: nothing to check."""
+        self.assertEqual(checks.check_review(UserConfig(self.suc())).findings, [])
+        suc = self.suc()
+        suc["review"] = {"result": "reject", "accepted": None}
+        self.assertEqual(checks.check_review(UserConfig(suc)).findings, [])

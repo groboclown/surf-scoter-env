@@ -310,6 +310,14 @@ class UserConfig:
         """Whether the setup has the section."""
         return self.__find(jdata.find_dict, "resolved", section) is not None
 
+    def review_result(self) -> str | None:
+        """The review file's `result` (`accept` or `reject`); None without a review."""
+        return self.__find(jdata.find_str, "review", "result")
+
+    def review_accepted(self) -> jdata.DictJsonData | None:
+        """The accepted settings the review file gives; None when rejected, or without one."""
+        return self.__find(jdata.find_dict, "review", "accepted")
+
     def raw(self, *path: jdata.JsonPathPart) -> jdata.JsonData:
         """The file's data at the path, as it is; None when it's missing or null.
 

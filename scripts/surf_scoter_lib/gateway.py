@@ -6,8 +6,10 @@ The rules come from the universal configuration file: the accepted ones
 docs/contributors/projects-v1.md), the project file's own (`current-project-setup`).
 
 Each gateway enforces what it can.  A rule it can't enforce is refused, with
-the reason; it's never dropped, or loosened into something broader.  See
-step 9 of docs/contributors/projects-v1.md.
+the reason; it's never dropped, or loosened into something broader.  Each
+gateway's own translation is in its script (`gateway_squid.py` for Squid),
+which the setup's `network-gateway: runs: write-config` runs.  See step 9 of
+docs/contributors/projects-v1.md.
 """
 import re
 from dataclasses import dataclass, field
@@ -72,7 +74,12 @@ def rules_from(config: UserConfig) -> tuple[list[Rule], str]:
         entries, source = config.egress_rules()
     except ConfigErr as err:
         raise RuleErr(str(err)) from err
-    return [_rule(entry, i) for i, entry in enumerate(entries)], source
+    return rules_of(entries), source
+
+
+def rules_of(entries: list[jdata.DictJsonData]) -> list[Rule]:
+    """Egress rules from their entries (the accepted shape, or the project file's)."""
+    return [_rule(entry, i) for i, entry in enumerate(entries)]
 
 
 def _rule(entry: jdata.DictJsonData, i: int) -> Rule:
@@ -110,63 +117,3 @@ def host_is_valid(host: str) -> bool:
         and len(name) <= 253
         and all(len(label) <= 63 and _LABEL.fullmatch(label) for label in labels)
     )
-
-
-# ---------------------------------------------------------------------
-# Squid
-
-
-SQUID = "squid"
-
-
-def squid_refusal(rule: Rule) -> str | None:
-    """Why the Squid gateway can't enforce `rule`, if it can't.
-
-    It sees only `CONNECT host:port` for TLS (it doesn't look inside), and its
-    firewall lets only TCP 443 out (N2, N4).  So it enforces `tls` rules on
-    port 443, and nothing else yet.
-    """
-    if rule.protocol == "https":
-        return (
-            "`https` needs a gateway that looks inside TLS to check the request; "
-            "the Squid gateway only sees the host name (use `tls`, without `methods`)"
-        )
-    if rule.protocol == "http":
-        return (
-            "plain `http` needs port 80 through the gateway's firewall and Squid's HTTP "
-            "handling, which the Squid gateway doesn't have yet (use `tls` on 443 if the host has it)"
-        )
-    if rule.port != 443:
-        return f"the gateway's firewall only lets TCP port 443 out, not {rule.port}"
-    if rule.methods:
-        return "the gateway can't see the methods inside `tls`"
-    return None
-
-
-def squid_pattern(host: str) -> str:
-    """The `dstdom_regex` line for a host rule.
-
-    `host` matches only that name; `*.example.com` matches its subdomains,
-    at any depth, but not `example.com` itself.
-    """
-    if host.startswith("*."):
-        return "^.+\\." + re.escape(host[2:]) + "$"
-    return "^" + re.escape(host) + "$"
-
-
-def squid(rules: list[Rule], source: str) -> tuple[Report, str]:
-    """The Squid gateway's report, and its host list (for `dstdom_regex -i`)."""
-    report = Report(SQUID, source)
-    for rule in rules:
-        reason = squid_refusal(rule)
-        if reason is None:
-            report.enforced.append(rule)
-        else:
-            report.refused.append((rule, reason))
-    lines = [
-        "# The hosts the dev container may reach, on TCP 443: one pattern per line,",
-        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from the egress rules"
-        + (" (unreviewed, from the project file)." if source == "project" else "."),
-    ]
-    lines.extend(sorted({squid_pattern(rule.host) for rule in report.enforced}))
-    return report, "\n".join(lines) + "\n"
