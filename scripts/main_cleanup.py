@@ -7,7 +7,9 @@ and removes it once you say so: environments whose `scoter run` is gone
 accepted settings of projects whose directory is gone, and the verified
 store's leftovers.  With `--workspaces`, the workspaces no running
 environment uses; with `--images`, the images it built that none uses.
-See step 23 of docs/contributors/projects-v1.md, and docs/cleaning-up.md.
+The ssh config entries of environments that aren't running go as `ssh:
+values: config-cleanup` says: with `ask`, they're asked about on their own,
+even with `--force`.  See step 23 of docs/contributors/projects-v1.md, and docs/cleaning-up.md.
 """
 import datetime
 import sys
@@ -19,15 +21,18 @@ import main_kill
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
     UserConfig,
+    argutil,
     cleanup,
     gen_parser,
     review,
+    ssh_hosts,
 )
 from surf_scoter_lib.active_env import EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import revoke, store
 
 PROMPT = "Remove these? [y/N]: "
+SSH_PROMPT = "Remove these ssh config entries? [y/N]: "
 
 
 @dataclass
@@ -41,11 +46,21 @@ class Found:
     workspaces: list[Path] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     verified_store: store.VerifiedStore | None = None
+    # The ssh config's entries for environments that aren't running, and
+    # `ssh: values: config-cleanup`; with `no`, only how many there are.
+    ssh: list[str] = field(default_factory=list)
+    ssh_mode: str = "ask"
+    ssh_kept: int = 0
+    ssh_problem: str | None = None
 
-    def __bool__(self) -> bool:
+    def others(self) -> bool:
+        """Whether there's anything but ssh entries."""
         return bool(
             self.stale or self.state or self.gone or self.leftovers or self.workspaces or self.images
         )
+
+    def __bool__(self) -> bool:
+        return self.others() or bool(self.ssh)
 
 
 def find(config: UserConfig, now: datetime.datetime, *, workspaces: bool, images: bool) -> Found:
@@ -61,6 +76,16 @@ def find(config: UserConfig, now: datetime.datetime, *, workspaces: bool, images
         found.workspaces = cleanup.find_workspaces(config, runs.running)
     if images:
         found.images = cleanup.find_images(config, runs.running)
+    found.ssh_mode = ssh_hosts.cleanup_mode(config)
+    try:
+        hosts = ssh_hosts.leftover_hosts(config, [env.host for env in runs.running])
+    except SurfScoterErr as err:
+        found.ssh_problem = str(err)
+        hosts = []
+    if found.ssh_mode == "no":
+        found.ssh_kept = len(hosts)
+    else:
+        found.ssh = hosts
     return found
 
 
@@ -93,6 +118,18 @@ def show(found: Found) -> None:
         f"{path}  ({cleanup.dir_size(path)} bytes)" for path in found.workspaces
     ])
     section("Images no running environment uses", found.images)
+    section(
+        "SSH config entries for environments that aren't running"
+        + (" (asked about on their own)" if found.ssh_mode == "ask" and found.others() else ""),
+        found.ssh,
+    )
+    if found.ssh_kept:
+        print(
+            f"Your ssh config has {found.ssh_kept} entr{'ies' if found.ssh_kept != 1 else 'y'} for "
+            "environments that aren't running, kept as `ssh: values: config-cleanup: no` says."
+        )
+    if found.ssh_problem:
+        print(f"Your ssh config wasn't looked at: {review.clean(found.ssh_problem)}")
 
 
 def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
@@ -111,8 +148,9 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
         def stop(env: EnvironmentDesc = env) -> None:
             nonlocal failed
             # Only if it's still stale: its run may have been started again meanwhile.
+            # Its ssh entries are asked about with the others, below.
             if cleanup.is_stale(config, env.host) and main_kill.run_kill(
-                config, host=env.host, fetch_branch=None, force_clean=False,
+                config, host=env.host, fetch_branch=None, force_clean=False, release_ssh=False,
             ) != 0:
                 failed = True
         step(env.host, stop)
@@ -139,7 +177,29 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
             for name in cleanup.remove_images(config, found.images):
                 print(f"Removed {name}.")
         step("the images", images)
+    if found.ssh and found.ssh_mode == "auto":
+        step("the ssh config entries", lambda: _say_ssh_removed(config, found.ssh))
     return 1 if failed else 0
+
+
+def _say_ssh_removed(config: UserConfig, hosts: Sequence[str]) -> None:
+    for host in ssh_hosts.remove_hosts(config, hosts):
+        print(f"Removed the ssh entries for {host}.")
+
+
+def _ask(ask: Callable[[str], str] | None, prompt: str, without: str) -> bool:
+    """Whether the user says yes; without a terminal to ask at (and no `ask`), no, saying `without`."""
+    if ask is None:
+        if not argutil.can_ask():
+            print(without)
+            return False
+        ask = input
+    try:
+        answer = ask(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        answer = ""
+    return answer in ("y", "yes")
 
 
 def _say_removed(paths: Sequence[Path]) -> None:
@@ -165,26 +225,31 @@ def run_cleanup(
         return 1
     if not found:
         print("Nothing to clean up.")
+        # What it didn't look at, or keeps.
+        show(found)
         return 0
     show(found)
     if dry_run:
         print("Nothing was removed (--dry-run).")
         return 0
-    if not force:
-        if ask is None:
-            if not sys.stdin.isatty():
-                print("Nothing was removed: give --force to remove these without being asked.")
-                return 0
-            ask = input
-        try:
-            answer = ask(PROMPT).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            answer = ""
-        if answer not in ("y", "yes"):
+    code = 0
+    if found.others() or (found.ssh and found.ssh_mode == "auto"):
+        if force or _ask(ask, PROMPT, "Nothing was removed: give --force to remove these without being asked."):
+            code = remove(config, found, now)
+        else:
             print("Nothing was removed.")
             return 0
-    return remove(config, found, now)
+    if found.ssh and found.ssh_mode == "ask":
+        # `ask` is the user's say over their ssh config: `--force` doesn't answer for them.
+        if _ask(ask, SSH_PROMPT, "The ssh config entries were kept: there's no terminal to ask at."):
+            try:
+                _say_ssh_removed(config, found.ssh)
+            except (OSError, SurfScoterErr) as err:
+                print(f"Couldn't remove the ssh config entries: {review.clean(str(err))}", file=sys.stderr)
+                code = 1
+        else:
+            print("The ssh config entries were kept.")
+    return code
 
 
 def main(argv: Sequence[str]) -> int:

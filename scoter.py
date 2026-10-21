@@ -31,6 +31,19 @@ SUB_CMD_PREFIX = "main_"
 SUB_CMD_SUFFIX = ".py"
 VCS_SECTION_SUFFIX = "-vcs"
 
+# Note: these lists hard-code sub-command usage.  That puts a limit on
+# what user-supplied sub-commands can do.  This should use
+# an alternative method for determining this relationship.
+# `help` lists the sub-commands, which needs the setup, not a project;
+# `list-accepted` lists every project's acceptances, from the setup's store,
+# and `cleanup` works on all of them.
+NO_PROJECT_CMDS = (None, "help", "list-accepted", "cleanup")
+# `verify` reviews what the project suggests; accepted settings
+# (a container of the user's, say) would change what it shows.
+# `revoke` works on the store itself, and the lookup could carry
+# an acceptance forward just before it's revoked.
+NO_ACCEPTANCE_CMDS = ("verify", "revoke", "kill", "exempt")
+
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
@@ -730,15 +743,8 @@ def main(argv: Sequence[str]) -> int:
         args = parse_arguments(argv)
         config = load_config(
             args,
-            # `help` lists the sub-commands, which needs the setup, not a project;
-            # `list-accepted` lists every project's acceptances, from the setup's store,
-            # and `cleanup` works on all of them.
-            with_project=args.cmd not in (None, "help", "list-accepted", "cleanup"),
-            # `verify` reviews what the project suggests; accepted settings
-            # (a container of the user's, say) would change what it shows.
-            # `revoke` works on the store itself, and the lookup could carry
-            # an acceptance forward just before it's revoked.
-            with_acceptance=args.cmd not in ("verify", "revoke", "kill", "exempt"),
+            with_project=args.cmd not in NO_PROJECT_CMDS,
+            with_acceptance=args.cmd not in NO_ACCEPTANCE_CMDS,
         )
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)

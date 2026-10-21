@@ -15,7 +15,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import main_cleanup
-from surf_scoter_lib import cleanup
+from surf_scoter_lib import cleanup, ssh_hosts
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.user_config import UserConfig
 from surf_scoter_lib.verified import records, store
@@ -64,6 +64,11 @@ class CleanupTest(StoreTest):
         )
         os.chmod(self.docker, 0o700)
         (self.tmp / "images").write_text("\n".join(self.images) + "\n", encoding="utf-8")
+        self.ssh = self.tmp / "ssh"
+        self.ssh.mkdir(mode=0o700)
+        (self.ssh / "key").write_text("", encoding="utf-8")
+        (self.ssh / "config").write_text("", encoding="utf-8")
+        self.ssh_mode = "ask"
 
     def config(
         self, project: Path | None = None, *, outside: bool = False, branch: str | None = None,
@@ -77,6 +82,15 @@ class CleanupTest(StoreTest):
             "state-dir": str(self.state),
             "running-envs": str(self.state / "running-env.json"),
             "running-envs-lock": str(self.state / "running-env.lock"),
+        }
+        resolved["scoter"]["values"]["backup-file-extension"] = ".backup"  # type: ignore[index]
+        resolved["ssh"] = {
+            "paths": {"key-file": str(self.ssh / "key"), "config-file": str(self.ssh / "config")},
+            "values": {"host-prefix": "scoter-", "config-cleanup": self.ssh_mode},
+            "runs": {
+                "remove-known-host": [str(self.docker), "forget", "{x:host}"],
+                "proxy-command": [str(self.docker), "exec", "%h", "{x:port}"],
+            },
         }
         resolved["dev-env"] = {"values": {
             "dev-env-image-prefix": PREFIX,
@@ -99,12 +113,12 @@ class CleanupTest(StoreTest):
             "compose_file": "", "compose_env_file": "", **fields,
         }
         env = EnvironmentDesc(
-            host_prefix="scoter-me-2000-", host_suffix=suffix,
+            host=f"scoter-me-2000-{suffix}",
             dev_env_ssh_port="2000", dev_env_ssh_user="me",
             created_at="2026-10-21T10:00:00", suc={}, pid=pid, **values,
         )
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.lock") as envs:
-            envs.environs[suffix] = env
+            envs.environs[env.host] = env
         return env
 
     def hosts(self) -> list[str]:
@@ -220,3 +234,44 @@ class CleanupTest(StoreTest):
         self.assertEqual(log, [
             f"list {PREFIX}*", f"rm {PREFIX}scoter-me-2000-z:latest", "prune",
         ])
+
+    def ssh_config(self) -> str:
+        return (self.ssh / "config").read_text(encoding="utf-8")
+
+    def write_ssh_hosts(self) -> None:
+        """A block of the user's, and the tools' blocks for a running and a stopped environment."""
+        (self.ssh / "config").write_text("Host scoter-mine\n  User me\n\n", encoding="utf-8")
+        for host in ("scoter-me-2000-a", "scoter-me-2000-z"):
+            ssh_hosts.write_host(self.config(), host, "me", "2000")
+        self.record_run("a", os.getpid())
+
+    def test_ssh_ask(self) -> None:
+        """`ask`: the stopped environment's entry is asked about on its own, even with `force`."""
+        self.write_ssh_hosts()
+        code, out = self.run_cleanup(force=True, ask=lambda prompt: "n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("SSH config entries for environments that aren't running:\n  scoter-me-2000-z\n", out)
+        self.assertIn("The ssh config entries were kept.", out)
+        self.assertIn("Host scoter-me-2000-z", self.ssh_config())
+        asked: list[str] = []
+        code, out = self.run_cleanup(force=True, ask=lambda prompt: asked.append(prompt) or "y")
+        self.assertEqual(asked, [main_cleanup.SSH_PROMPT])
+        self.assertIn("Removed the ssh entries for scoter-me-2000-z.", out)
+        config = self.ssh_config()
+        self.assertNotIn("Host scoter-me-2000-z", config)
+        self.assertIn("Host scoter-me-2000-a", config)
+        self.assertIn("Host scoter-mine\n  User me\n", config)
+        self.assertIn("forget scoter-me-2000-z", self.docker_log.read_text(encoding="utf-8"))
+
+    def test_ssh_auto_and_no(self) -> None:
+        """`auto`: removed with the rest; `no`: only counted."""
+        self.write_ssh_hosts()
+        self.ssh_mode = "no"
+        code, out = self.run_cleanup(force=True)
+        self.assertIn("Your ssh config has 1 entry for environments that aren't running", out)
+        self.assertIn("Host scoter-me-2000-z", self.ssh_config())
+        self.ssh_mode = "auto"
+        code, out = self.run_cleanup(force=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Removed the ssh entries for scoter-me-2000-z.", out)
+        self.assertNotIn("Host scoter-me-2000-z", self.ssh_config())

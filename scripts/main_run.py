@@ -5,8 +5,6 @@ import contextlib
 import datetime
 import json
 import os
-import re
-import shlex
 import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
 import tempfile
@@ -24,10 +22,10 @@ from surf_scoter_lib import (
     generator,
     jdata,
     setup_check,
+    ssh_hosts,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr, VerifiedStoreErr
-from surf_scoter_lib.ssh_config import SshConfig
 from surf_scoter_lib.verified import lookup, staging
 
 # The network gateway's configuration, in the resources directory.
@@ -60,25 +58,29 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         return 1
     vcs_section = config.get_vcs_section()
 
-    # -- Discovery, and the reservation of a host name, in one locked step:
-    # the port depends on the other environments, and they must see this one's.
-    with _active_envs(config) as active_envs:
-        # Configure the sshd port.  It might be dynamic.
-        _configure_sshd_port(config, active_envs)
+    # The environment is named by the project: one run of it at a time.
+    host = ssh_hosts.host_name(config)
 
-        # Setup the SSH config file for running.
-        host_prefix = _setup_ssh_config(config)
-        if not host_prefix:
-            return 1
-
-        # Discover the host suffix to use.
-        host_suffix = active_envs.reserve_environ(
-            host_prefix,
-            port=str(config.dev_container_sshd_port()),
-            user=config.dev_container_str("user"),
-            project_dir=str(config.require_active_location("project-dir")),
-        )
-    host = host_prefix + host_suffix
+    # -- The reservation of the host, its port and its ssh entry, in one
+    # locked step: the port depends on the other environments, and they must
+    # see this one's.
+    try:
+        with _active_envs(config) as active_envs:
+            # Configure the sshd port.  It might be dynamic.
+            _configure_sshd_port(config, active_envs)
+            active_envs.reserve_environ(
+                host,
+                port=str(config.dev_container_sshd_port()),
+                user=config.dev_container_str("user"),
+                project_dir=str(config.require_active_location("project-dir")),
+            )
+            # Its own `Host` block in the ssh config, for `ssh HOST` and the IDEs.
+            ssh_hosts.write_host(
+                config, host, config.dev_container_str("user"), str(config.dev_container_sshd_port()),
+            )
+    except (ActiveEnvErr, ConfigErr) as err:
+        print(err, file=sys.stderr)
+        return 1
     try:
         # -- Stage the accepted copy of the project's files to build from.
         plan = _stage_accepted(config, host)
@@ -170,8 +172,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         # -- Record this environment, in place of its reservation.
         with _active_envs(config) as active_envs:
             active_envs.update_environ(EnvironmentDesc(
-                host_prefix=host_prefix,
-                host_suffix=host_suffix,
+                host=host,
 
                 # See _write_docker_compose_env_file
                 dev_env_name=host,
@@ -254,6 +255,8 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Remove from active mode.
     with _active_envs(config) as active_envs:
         active_envs.rm_environ_by_host(host)
+    # Its ssh entries, as `ssh: values: config-cleanup` says.
+    _release_ssh(config, host)
 
     # scoter-host's copy of the configuration.
     fileutil.rm(universal_config_file.parent)
@@ -308,6 +311,16 @@ def _release(config: UserConfig, host: str) -> None:
     _remove_environment_dir(config, host)
     with contextlib.suppress(ActiveEnvErr), _active_envs(config) as active_envs:
         active_envs.rm_environ_by_host(host)
+    _release_ssh(config, host)
+
+
+def _release_ssh(config: UserConfig, host: str) -> None:
+    """Remove the environment's ssh entries, as `ssh: values: config-cleanup` says."""
+    try:
+        if ssh_hosts.release(config, host):
+            print(f"Removed the ssh entries for {host}.")
+    except (OSError, SurfScoterErr) as err:
+        print(f"Couldn't remove the ssh entries for {host}: {err}", file=sys.stderr)
 
 
 def _environment_dir(config: UserConfig, host: str) -> Path:
@@ -567,64 +580,29 @@ def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -
 
 
 def _configure_sshd_port(config: UserConfig, envs: ActiveEnvironmentSet) -> None:
-    port = config.dev_container_sshd_port()
-    if port is not None:
+    """Choose the sshd port, when the dev container leaves it to the run.
+
+    It's in the environment's own ssh block, not its name, so any free one
+    does: the first from `dev-env: values: start-sshd-port` that no running
+    environment has.
+    """
+    if config.dev_container_sshd_port() is not None:
         # Already set.
         return
-
-    # Check the ssh config for all ports already declared,
-    # and pick one that isn't active but has the same username.
-    user = config.dev_container_str("user")
-    all_config_ports: set[str] = set()
-    available_config_ports: set[str] = set()
-    ssh_config = SshConfig.read_ssh_config(config)
-    if ssh_config:
-        # It exists.  Find a port with the same username.
-        # The port is baked into the host pattern expression.
-        user_port_pattern = re.compile(
-            r"^" +
-            re.escape(config.require_value("ssh", "host-prefix")) +
-            r"-(.*?)-" +
-            r"-(\d+)-\*$"
-        )
-        for host in ssh_config.by_host:
-            if not host:
-                continue
-            match = user_port_pattern.match(host)
-            if match:
-                all_config_ports.add(match.group(2))
-                if ssh_config.get_host_key(host, "user") == user:
-                    # We have a winner.
-                    available_config_ports.add(match.group(1))
-    # Eliminate active environments' port.
-    for env in envs.environs.values():
-        if (
-            env.dev_env_ssh_port in available_config_ports
-            and env.dev_env_ssh_user == user
-        ):
-            available_config_ports.remove(env.dev_env_ssh_port)
-    ssh_port = ""
-    if available_config_ports:
-        # Reuse one.
-        ssh_port = next(iter(available_config_ports))
-    else:
-        # get an available one
-        start_sshd_port = config.require_value("dev-env", "start-sshd-port")
-        try:
-            ssh_port_i = int(start_sshd_port)
-        except (ValueError, TypeError) as err:
-            raise ConfigErr(
-                f"invalid dev-env values start-sshd-port ({start_sshd_port}): "
-                f"it must be an integer"
-            ) from err
-        while ssh_port_i < defaults.TOP_PORT_NUMBER:
-            ssh_port = str(ssh_port_i)
-            if ssh_port not in all_config_ports:
-                break
-            ssh_port_i += 1
-    if not ssh_port:
+    start_sshd_port = config.require_value("dev-env", "start-sshd-port")
+    try:
+        port = int(start_sshd_port)
+    except (ValueError, TypeError) as err:
+        raise ConfigErr(
+            f"invalid dev-env values start-sshd-port ({start_sshd_port}): "
+            f"it must be an integer"
+        ) from err
+    taken = {env.dev_env_ssh_port for env in envs.environs.values()}
+    while port < defaults.TOP_PORT_NUMBER and str(port) in taken:
+        port += 1
+    if port >= defaults.TOP_PORT_NUMBER:
         raise ConfigErr("no sshd listening port available")
-    config.set_dev_container_sshd_port(ssh_port)
+    config.set_dev_container_sshd_port(str(port))
 
 
 def _add_known_host(config: UserConfig, host: str, host_key_file: Path) -> None:
@@ -652,73 +630,6 @@ def _add_known_host(config: UserConfig, host: str, host_key_file: Path) -> None:
         known_hosts += "\n"
     known_hosts += f"{host} {parts[0]} {parts[1]}\n"
     known_hosts_file.write_text(known_hosts, encoding="utf-8")
-
-
-def _setup_ssh_config(config: UserConfig) -> str | None:
-    # Ensure the right SSH config host block exists.
-    # It generates the host prefix.
-    # This isn't 100% right, in that it doesn't check for all host matches.
-    ssh_config = SshConfig.read_ssh_config(config)
-    if not ssh_config:
-        return None
-
-    user = config.dev_container_str("user")
-    port = config.dev_container_sshd_port()
-    if port is None:
-        raise ConfigErr("the dev container's sshd port wasn't chosen")
-    key_file = config.require_path("ssh", "key-file")
-    proxy = config.require_run("ssh", "proxy-command", template={"port": port})
-    host_prefix = (
-        config.require_value("ssh", "host-prefix") +
-        user + "-" +
-        port + "-"
-    )
-    host = host_prefix + "*"
-
-    if ssh_config.has_host(host):
-        errs: list[str] = []
-        r_user = ssh_config.get_host_key(host, "user")
-        if r_user != user:
-            errs.append(f"  User {r_user}, requires {user}")
-        r_identity = ssh_config.get_host_key(host, "IdentityFile")
-        if not r_identity:
-            errs.append("  No IdentityFile line")
-        else:
-            r_identity = os.path.expanduser(r_identity)
-            if not os.path.samefile(r_identity, key_file):
-                errs.append(f"  IdentityFile {r_identity}, requires {key_file}")
-        r_proxy_raw = ssh_config.get_host_key(host, "ProxyCommand")
-        if not r_proxy_raw:
-            errs.append(f"  ProxyCommand requires {proxy}")
-        else:
-            r_proxy = shlex.split(r_proxy_raw)
-            if r_proxy != proxy:
-                errs.append(f"  ProxyCommand '{r_proxy_raw}', requires {proxy}")
-        if errs:
-            print(
-                f"Your {config.require_path('ssh', 'key-file')} file "
-                f"has issues that prevents execution:",
-                file=sys.stderr,
-            )
-            for err in errs:
-                print(err, file=sys.stderr)
-            return None
-        # It's all good.
-    else:
-        ssh_config.add_host(host)
-        ssh_config.add_comment(host, f"For Surf Scoter dev container user {user} on port {port}")
-        ssh_config.add_key_value(host, "User", user)
-        ssh_config.add_key_value(host, "IdentityFile", str(key_file))
-        ssh_config.add_key_value(host, "IdentitiesOnly", "yes")
-        ssh_config.add_key_value(host, "StrictHostKeyChecking", "yes")
-        ssh_config.add_key_value(host, "ProxyCommand", shlex.join(proxy))
-        ssh_config_file = config.require_path("ssh", "config-file")
-        fileutil.backup(ssh_config_file, config.require_value("scoter", "backup-file-extension"))
-        ssh_config_file.write_text(ssh_config.output(), encoding="utf-8")
-        # Ensure the file mode wasn't changed.
-        fileutil.touch(ssh_config_file, 0o600)
-
-    return host_prefix
 
 
 def _write_gateway_config(config: UserConfig, output: Path) -> Path:

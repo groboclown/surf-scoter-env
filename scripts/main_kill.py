@@ -12,7 +12,13 @@ import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from surf_scoter_lib import BAD_EXECUTION_ARGS_CODE, UserConfig, fileutil, gen_parser
+from surf_scoter_lib import (
+    BAD_EXECUTION_ARGS_CODE,
+    UserConfig,
+    fileutil,
+    gen_parser,
+    ssh_hosts,
+)
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
 
@@ -27,8 +33,13 @@ def run_kill(
     host: str | None,
     fetch_branch: str | None,
     force_clean: bool,
+    release_ssh: bool = True,
 ) -> int:
-    """Stop the environment `host`, or the project's one."""
+    """Stop the environment `host`, or the project's one.
+
+    With `release_ssh`, its ssh entries go as `ssh: values: config-cleanup`
+    says; `scoter cleanup` leaves them out, to ask about them all at once.
+    """
     try:
         file = config.require_path("scoter", "running-envs")
         lock_file = config.require_path("scoter", "running-envs-lock")
@@ -84,6 +95,12 @@ def run_kill(
         print(f"Couldn't forget {env.host}: {err}", file=sys.stderr)
         return 1
     print(f"Stopped {env.host}.")
+    if release_ssh:
+        try:
+            if ssh_hosts.release(config, env.host):
+                print(f"Removed the ssh entries for {env.host}.")
+        except (OSError, SurfScoterErr) as err:
+            print(f"Couldn't remove the ssh entries for {env.host}: {err}", file=sys.stderr)
     return 0
 
 

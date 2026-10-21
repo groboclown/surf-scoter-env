@@ -27,7 +27,7 @@ try:
     envs = json.load(open(sys.argv[1]))
 except (OSError, ValueError):
     envs = []
-print(next((e["host_prefix"] + e["host_suffix"] for e in envs if e.get("suc")), ""))
+print(next((e["host"] for e in envs if e.get("suc")), ""))
 PY
 }
 
@@ -60,6 +60,17 @@ while [ "${waited}" -lt "${IT_RUN_TIMEOUT}" ]; do
 done
 [ -n "${host}" ] && is_running "${host}" || { cat "${log}" >&2; it_fail "the environment didn't start in ${IT_RUN_TIMEOUT} seconds"; }
 it_say "running as ${host}"
+case "${host}" in
+    scoter-project-*) ;;
+    *) it_fail "the environment isn't named by its project: ${host}" ;;
+esac
+
+it_say "it has its own ssh config entry, and a second run of the project is refused"
+it_expect "${HOME}/.ssh/config" "Host ${host}"
+it_expect "${HOME}/.ssh/config" "# Surf Scoter environment"
+"${IT_DIST}/scoter" --project-dir "${IT_PROJECT}" run > "${IT_SANDBOX}/second.log" 2>&1 \
+    && it_fail "a second run of the project started"
+it_expect "${IT_SANDBOX}/second.log" "${host} is already running for this project"
 
 it_say "the gateway lets out the accepted host, and nothing else"
 "${tool}" exec "${host}" curl -sS -o /dev/null --max-time 30 https://registry.npmjs.org/ \
@@ -88,7 +99,7 @@ is_running "${host}" || it_fail "the containers went with the run; nothing to cl
 [ "$( running_host )" = "${host}" ] || it_fail "the environment isn't listed any more"
 
 it_say "scoter kill cleans up"
-scoter kill > "${IT_SANDBOX}/kill.log" 2>&1 || { cat "${IT_SANDBOX}/kill.log" >&2; it_fail "kill failed"; }
+scoter kill < /dev/null > "${IT_SANDBOX}/kill.log" 2>&1 || { cat "${IT_SANDBOX}/kill.log" >&2; it_fail "kill failed"; }
 it_expect "${IT_SANDBOX}/kill.log" "Stopped ${host}."
 for name in "${host}" "${host}-fr" "${host}-ng"; do
     if is_running "${name}"; then
@@ -98,5 +109,14 @@ done
 [ -z "$( running_host )" ] || it_fail "the environment is still listed"
 [ ! -e "${HOME}/.config/surf-scoter.d/state/environments/${host}" ] || it_fail "its state directory is still there"
 it_expect "${IT_SANDBOX}/kill.log" "The workspace is kept"
+
+it_say "without a terminal, its ssh entry is kept (config-cleanup: ask), and cleanup lists it"
+it_expect "${IT_SANDBOX}/kill.log" "Kept the ssh entries for ${host}"
+it_expect "${HOME}/.ssh/config" "Host ${host}"
+scoter cleanup --force < /dev/null > "${IT_SANDBOX}/cleanup.log" 2>&1 \
+    || { cat "${IT_SANDBOX}/cleanup.log" >&2; it_fail "cleanup failed"; }
+it_expect "${IT_SANDBOX}/cleanup.log" "SSH config entries for environments that aren't running:"
+it_expect "${IT_SANDBOX}/cleanup.log" "The ssh config entries were kept: there's no terminal to ask at."
+it_expect "${HOME}/.ssh/config" "Host ${host}"
 
 it_pass

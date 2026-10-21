@@ -16,7 +16,7 @@ This analysis starts from one assumption: **anything inside the dev container ma
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_setup_ssh_config` and `_write_docker_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
+| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_docker_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
 | `Dockerfile`, build context, parent directories | The project | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which doesn't override them |
 | Workspace files, including permission bits | Code in the container | The host file system, and whatever later reads it |
@@ -63,10 +63,10 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 
 ### DEV-1: `user` is written into the SSH configuration
 
-**Severity:** Critical.  **Status:** Open.
-**Where:** `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_setup_ssh_config` in [`main_run.py`](../../scripts/main_run.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py).
+**Severity:** Critical.  **Status:** Mitigated where it's written: `write_host` refuses a `user` that isn't a plain user name (letters, digits, `.`, `_` and `-`, at most 32), and the `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The generator still takes any non-empty string.
+**Where:** `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `write_host` and `host_name` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py).
 
-`user` goes into the developer's `~/.ssh/config`, in the container's `Host` line and its `User` line, without escaping.  The only check is that it's a non-empty string.  A value containing a newline adds arbitrary directives, such as a `Match all` block with a `ProxyCommand`, which runs on the host the next time the developer uses `ssh` for anything.  A value containing spaces adds extra `Host` patterns.  This happens before any container starts.
+`user` went into the developer's `~/.ssh/config`, in the container's `Host` line and its `User` line, without escaping.  The only check is that it's a non-empty string.  A value containing a newline adds arbitrary directives, such as a `Match all` block with a `ProxyCommand`, which runs on the host the next time the developer uses `ssh` for anything.  A value containing spaces adds extra `Host` patterns.  This happens before any container starts.
 
 **Red team:** a `dev-env.yaml` with `user: "ubuntu\nMatch all\n  ProxyCommand ..."`, delivered in a cloned project or a parent `dev-env.yaml`.
 

@@ -66,7 +66,7 @@ class KillTest(unittest.TestCase):
     def start(self, suffix: str = "a", *, reserved: bool = False) -> EnvironmentDesc:
         """Record an environment, as `scoter run` does (or only its reservation)."""
         env = EnvironmentDesc(
-            host_prefix="dev-me-2222-", host_suffix=suffix,
+            host=f"dev-me-2222-{suffix}",
             dev_env_name="dev", firewall_router_name="fr", network_gateway_name="ng",
             project_dir=str(self.project), resources_dir="" if reserved else str(self.resources),
             workspace_dir="" if reserved else str(self.workspace), setup_dir="",
@@ -76,7 +76,7 @@ class KillTest(unittest.TestCase):
             suc={} if reserved else self.suc(), pid=1,
         )
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.json.lock") as envs:
-            envs.environs[suffix] = env
+            envs.environs[env.host] = env
         (self.state / "environments" / env.host).mkdir(parents=True)
         return env
 
@@ -158,7 +158,7 @@ class KillTest(unittest.TestCase):
         """A workspace that is, or holds, the project isn't removed."""
         env = self.start()
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.json.lock") as envs:
-            envs.environs["a"] = EnvironmentDesc(**{**env.__dict__, "workspace_dir": str(self.tmp)})
+            envs.environs[env.host] = EnvironmentDesc(**{**env.__dict__, "workspace_dir": str(self.tmp)})
         code, text = self.kill(clean=True)
         self.assertEqual(code, 0, text)
         self.assertIn("is, or holds, the project directory", text)

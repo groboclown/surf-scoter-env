@@ -20,7 +20,19 @@ ssh:
         config-file: ${home}/config
         known-hosts: ${home}/known_hosts
     values:
+        # The start of each environment's name: its dev container's, and its
+        # `Host` in the ssh config, followed by its project's id
+        # (`scoter-my-project-c593c7ec2d55`).  Lowercase letters, digits, `.`
+        # and `-`.
         host-prefix: scoter-
+        # Each run writes its environment's `Host` block to the ssh config, so
+        # `ssh HOST` and the IDEs find it by name.  When the environment goes,
+        # its block and its known host key: `no`, are kept; `auto`, are
+        # removed; `ask`, are asked about (kept without a terminal to ask at).
+        # `scoter cleanup` finds those left behind, and with `ask`, asks about
+        # them on their own, even with `--force`.  Only blocks the tools wrote
+        # (marked "Surf Scoter environment") are touched.
+        config-cleanup: ask
 
 docker:
     programs:

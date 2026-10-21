@@ -210,8 +210,10 @@ The tools use these sections:
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
     * `paths: home`: your SSH directory, normally `~/.ssh`.
-    * `paths: config-file`: the SSH configuration file the tool adds the container's `Host` entry to.
+    * `paths: config-file`: the SSH configuration file each run adds its environment's `Host` entry to.
     * `paths: key-file`: the private key used to connect to the container.
+    * `values: host-prefix`: the start of each environment's name, followed by its project's id: `scoter-my-project-c593c7ec2d55`.  The name is the dev container's (the router and gateway add `-fr` and `-ng`), and the `Host` in the SSH configuration, so `ssh scoter-my-project-c593c7ec2d55` connects, and tools that list the hosts there (VS Code's Remote-SSH) offer it.  Lowercase letters, digits, `.` and `-`.  One environment runs for each project at a time: a second `scoter run` of a running project is refused.
+    * `values: config-cleanup`: what happens to an environment's `Host` entry, and its host key in `known_hosts`, when it stops (`scoter run` ending, `scoter kill`, or `scoter cleanup` stopping one whose run is gone).  `no` keeps them, for you to remove; `auto` removes them; `ask` (the default) asks, and keeps them when there's no terminal to ask at.  `scoter cleanup` lists the entries left behind: with `auto` it removes them with the rest, with `ask` it asks about them on their own, even with `--force`, and with `no` it only says how many there are.  The tools only change or remove the entries they wrote, which have a `# Surf Scoter environment` line; a `Host` of the same name that you wrote stops the run instead.
 * `scoter`: the tool's own settings.
     * `paths`: where the configuration came from, set by the tool (except that you can set `distribution-dir`), as described in [The `scoter:` section](#the-scoter-section).
     * `values: project-id` and `project-branch`, set by the tool for a project: see [The `scoter:` section](#the-scoter-section).

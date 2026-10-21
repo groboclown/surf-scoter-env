@@ -1617,16 +1617,66 @@ Instead of reading another setup file, let the user choose, for a project run, w
 
 This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.  This also applies to the host command blocking rules.
 
-## Naming by the environment id
+## ~~Naming by the environment id~~
 
 Step 5 gives each environment an id (the project directory's name and a hash of its canonical path), and uses it for the verified storage.  Use it for the rest of what's named per environment, so more than one `.surf-scoter.d` in a repository can run at once:
 
-* the container names, in place of the `ssh: values: host-prefix` and a reserved suffix;
+* the container names, in place of the `ssh: values: host-prefix` and a reserved suffix (part of ticket #12);
 * ~~the workspace path, which then moves out of the project, as `${scoter:state-dir}/workspaces/${scoter:environment-id}` (FILE-9).~~  Done in step 19, as `${scoter:project-id}`.
 
 ~~That needs the generator to work out the id, as a tool-set `${scoter:environment-id}`, with exactly the same result as step 5's Python code (or the Python code to read it from the SUC).~~  Done in step 19: the generator works out `${scoter:project-id}`, and the store reads it from the SUC.
 
 What's left is the container names.  They're still `host-prefix`, the container's user and sshd port, and a suffix the running environments file reserves (`scoter-ubuntu-20000-a`), so two runs of one project get different names, and the names say nothing of which project they're for.  Naming them by `project-id` (with the branch, or a suffix, for a second run of the same project) changes `scoter run`, `scoter kill`, the running environments file, and the ssh configuration's `Host` patterns, which are per user and port today.
+
+Ticket #12 asks for the same from the ssh side: `~/.ssh/config` has one `Host scoter-USER-PORT-*` block, shared by the runs, so a tool that offers the hosts it reads there (VS Code's Remote-SSH) can't offer the running one; the user types its name.  One block per running environment, named as its containers are, fixes that, and lets the tools remove the block (and its `known_hosts` key) when the environment goes.  Writing a block per run fills the file unless something removes them, so the user decides how much the tools may touch it: `ssh: values: config-cleanup: no | auto | ask`.
+
+### Draft: the names
+
+* **The host** (the dev container's name, the ssh `Host`, and the base of the other containers' and the image's names) is `${ssh:values:host-prefix}${scoter:project-id}`: `scoter-my-project-c593c7ec2d55`; the router and gateway add `-fr` and `-ng` as now.  A project id is lowercase letters, digits and `-`, at most 45 characters, so the names stay valid container names and DNS labels (63).
+* **One run per project.**  The workspace is the project's (`workspaces/${scoter:project-id}`), so two runs of a project would share it; a second `scoter run` of a running project stops, naming the running one (`scoter kill`, or `scoter cleanup` if its run is gone).  The user and port no longer name anything.
+* **The running environments file** keys environments by host; the reserved suffixes go.
+
+### Draft: the ssh block
+
+Each run writes its own block, replacing any block of that name the tools wrote before:
+
+```text
+Host scoter-my-project-c593c7ec2d55
+  # Surf Scoter: /home/me/src/my-project
+  User ubuntu
+  IdentityFile ~/.ssh/scoter-dev-container
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  ProxyCommand docker exec -i %h socat STDIO TCP:127.0.0.1:20000
+```
+
+The tools only touch blocks they can tell they wrote: `Host` starting with `host-prefix`, and the `# Surf Scoter:` marker line inside the block (a comment above a `Host` line belongs to the block before it).  A block of that name without the marker is the user's, and the run stops rather than replace it.  The port is the run's choice (from `dev-env: values: start-sshd-port`, avoiding the running environments'), as it's in the block, not in the name; reusing ports from the ssh configuration goes.
+
+### Draft: `config-cleanup`
+
+When an environment goes (`scoter run` ending, `scoter kill`, `scoter cleanup` stopping a stale one), its block and its `known_hosts` key (`ssh: runs: remove-known-host`):
+
+* `no`: are kept; the user removes them.
+* `auto`: are removed.
+* `ask` (the default): the tool asks at a terminal, and keeps them without one.
+
+`scoter cleanup` also lists the marked blocks whose environment isn't running (left by `no`, `ask` answered no, or a crash): with `auto` they're removed with the rest (`--force` included); with `ask` it asks about them on their own, even with `--force` or after a yes to the rest, and keeps them without a terminal; with `no` it only mentions how many there are.
+
+### Design decisions
+
+* **One run per project**: a second `scoter run` of a running project is refused.
+* **`config-cleanup`** as drafted, `ask` by default; under `ask`, `scoter run` asks at its end.
+* The old shared `scoter-USER-PORT-*` blocks aren't looked for: nothing's released.
+
+### Completed
+
+* **The names** ([`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py)): `host_name` is `${ssh:host-prefix}${scoter:project-id}`, checked against `[a-z0-9][a-z0-9.-]{0,62}` (a container name and an ssh `Host`).  The running environments file ([`active_env.py`](../../scripts/surf_scoter_lib/active_env.py)) keys environments by `host`; `host_prefix`, `host_suffix`, the reserved suffixes and the host id lookups are gone, and `reserve_environ` refuses a host already listed, naming it and how to free it (`scoter kill`, or `scoter cleanup`).  The containers, image tag, compose files and state directory follow the host as before.
+* **The port** (`main_run._configure_sshd_port`): the first from `start-sshd-port` that no running environment has; the ssh configuration isn't read for ports any more.
+* **The block**: `write_host` writes the environment's own block (a `# Surf Scoter environment` line first, then `User`, `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`, `ProxyCommand`), under the running environments' lock, in place of a marked block of that name; an unmarked one is the user's, and the run stops.  It refuses a `user` that isn't a plain user name, and a port that isn't a number: DEV-1 is mitigated where it's written.  `SshConfig.remove_host` removes a block with the blank lines after it, keeping the comments after its last setting (they're about the next `Host`), so a block written again doesn't grow the file.
+* **`ssh: values: config-cleanup: no | auto | ask`** (default `ask`; a bare YAML `no` reads as false, and counts as `no`): `release` removes the block and the known host key (`ssh: runs: remove-known-host`) for `auto`, asks for `ask` (keeping them without a terminal), and keeps them for `no`.  `scoter run` releases at its end, and when a run that didn't start gives up its reservation; `scoter kill` after it forgets the environment (`release_ssh`, which `scoter cleanup` turns off).  `scoter cleanup` lists the marked blocks no running environment has (`leftover_hosts`): with `auto` they go with the rest, with `ask` they get their own question, asked even with `--force` (and not when there's no terminal), and with `no` it says how many.  A question is only asked when both the input and the output are a terminal (`argutil.can_ask`, as `scoter verify` checks): `input` writes its prompt to the output, so with the output going to a file (as integration test 03 sends `scoter kill`'s) the question went unseen, and the command waited.
+* **Docs**: [the system configuration file](../system-config-file.md) (`host-prefix`, `config-cleanup`), the README's SSH and VS Code steps (no more "Add new SSH Host"), [`through-wsl.md`](../through-wsl.md), [`cleaning-up.md`](../cleaning-up.md), and DEV-1 in [the dev container attack vectors](../security/dev-container-attack-vectors.md).
+
+**Tests:** [`test_ssh_hosts.py`](../../scripts/tests/s_lib/test_ssh_hosts.py): the host name (and refused prefixes, no project id), `config-cleanup` (default, a YAML false, a bad value), writing and rewriting a block (the file doesn't grow; mode 0600), refusing the user's own block and a hostile `user` or port, the leftovers (only the tools' blocks with the prefix), removing (with the known host key), and `release` in each mode.  [`test_ssh_config.py`](../../scripts/tests/s_lib/test_ssh_config.py): removing a block, keeping the next block's comment.  [`test_active_env.py`](../../scripts/tests/s_lib/test_active_env.py): a second reservation of a host refused.  [`test_main_cleanup.py`](../../scripts/tests/test_main_cleanup.py): the ssh leftovers with `ask` (asked on their own, with `--force`; no, then yes), `auto` and `no`.  All five integration tests pass; `03` now checks the environment's name, its block, a second run refused, and its entry kept without a terminal and listed by `scoter cleanup`.
 
 ## ~~Additional declarative prohibitions to include project files and egress hosts~~
 
@@ -1683,7 +1733,7 @@ Still possible: shipping the list with the distribution (it's MPL 2.0, and chang
 
 ## Allow `scoter user-setup` to work with automation
 
-The current defaults with `--non-interactive` use the safest approach.  Automation tooling should have an option to perform the "needs to exist but requires modifications" actions to run.
+The current defaults with `--non-interactive` use the safest approach.  Automation tooling should have an option to perform the "needs to exist but requires modifications" actions to run.  Similar to the `--force` versus `--dry-run` with the cleanup sub-command.
 
 ## Allow `scoter user-setup` to download and update the public-suffix-lists
 

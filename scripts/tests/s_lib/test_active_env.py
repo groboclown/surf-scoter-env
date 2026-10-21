@@ -34,7 +34,7 @@ class ActiveEnvTest(unittest.TestCase):
     def test_first_time(self) -> None:
         """No state directory yet: it's made, private."""
         with ActiveEnvironmentSet.locked(self.file, self.lock) as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("h")
         self.assertEqual(len(ActiveEnvironmentSet.read(self.file).environs), 1)
         if POSIX:
             self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o700)
@@ -44,28 +44,30 @@ class ActiveEnvTest(unittest.TestCase):
         self.assertEqual(ActiveEnvironmentSet.read(self.file).environs, {})
 
     def test_reserve_and_update(self) -> None:
-        """A reservation records the port, user, project and process at once."""
+        """A reservation records the port, user, project and process at once; one per host."""
         with self.locked() as envs:
-            suffix = envs.reserve_environ("dev-me-2222-", port="2222", user="me", project_dir="/p")
-        env = ActiveEnvironmentSet.read(self.file).get_environ_by_host("dev-me-2222-" + suffix)
+            envs.reserve_environ("scoter-p-0123", port="2222", user="me", project_dir="/p")
+        env = ActiveEnvironmentSet.read(self.file).get_environ_by_host("scoter-p-0123")
         assert env is not None  # nosec: B101  # narrowing for the type checker
         self.assertEqual((env.dev_env_ssh_port, env.dev_env_ssh_user, env.pid), ("2222", "me", os.getpid()))
         self.assertEqual(
             [e.host for e in ActiveEnvironmentSet.read(self.file).environs_for_project("/p")], [env.host],
         )
-        # Another reservation gets another suffix.
+        # A second run of the project is refused, naming the first.
+        with self.assertRaisesRegex(ActiveEnvErr, "scoter-p-0123 is already starting"), self.locked() as envs:
+            envs.reserve_environ("scoter-p-0123", port="2223", user="me")
         with self.locked() as envs:
-            other = envs.reserve_environ("dev-me-2222-", port="2222", user="me")
-        self.assertNotEqual(other, suffix)
+            envs.reserve_environ("scoter-q-4567", port="2223", user="me")
         with self.locked() as envs:
             self.assertTrue(envs.rm_environ_by_host(env.host))
-        self.assertEqual(ActiveEnvironmentSet.read(self.file).get_active_host_ids(), [other])
+            self.assertFalse(envs.rm_environ_by_host(env.host))
+        self.assertEqual(list(ActiveEnvironmentSet.read(self.file).environs), ["scoter-q-4567"])
 
     def test_update_after_removal(self) -> None:
         """Updating an environment someone else removed (`scoter kill`) is an error."""
         with self.locked() as envs:
-            suffix = envs.reserve_environ("h-")
-        env = ActiveEnvironmentSet.read(self.file).environs[suffix]
+            envs.reserve_environ("h")
+        env = ActiveEnvironmentSet.read(self.file).environs["h"]
         with self.locked() as envs:
             envs.rm_environ_by_host(env.host)
         with self.assertRaisesRegex(ActiveEnvErr, "isn't registered any more"), self.locked() as envs:
@@ -74,10 +76,10 @@ class ActiveEnvTest(unittest.TestCase):
     def test_error_changes_nothing(self) -> None:
         """An error in the block leaves the file as it was."""
         with self.locked() as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("h")
         before = self.file.read_bytes()
         with self.assertRaises(RuntimeError), self.locked() as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("other")
             raise RuntimeError("stop")
         self.assertEqual(self.file.read_bytes(), before)
 
@@ -89,7 +91,7 @@ class ActiveEnvTest(unittest.TestCase):
         self.file.write_text("[]", encoding="utf-8")
         os.chmod(self.file, 0o644)  # nosec: B103  # As an earlier version left it.
         with self.locked() as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("h")
         self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
         self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o700)
 
@@ -116,7 +118,7 @@ class ActiveEnvTest(unittest.TestCase):
             pass
         # Once it's let go, it's free: nothing is left held.
         with self.locked() as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("h")
 
     @unittest.skipUnless(POSIX, "modes")
     def test_old_lock_file(self) -> None:
@@ -125,5 +127,5 @@ class ActiveEnvTest(unittest.TestCase):
         self.lock.write_text("[]", encoding="utf-8")
         os.chmod(self.lock, 0o400)
         with self.locked() as envs:
-            envs.reserve_environ("h-")
+            envs.reserve_environ("h")
         self.assertEqual(len(json.loads(self.file.read_text())), 1)

@@ -43,8 +43,9 @@ class EnvironmentDesc:
     """
 
     # Data extracted from the SUC used to execute the environment.
-    host_prefix: str
-    host_suffix: str
+    # The host: `${ssh:host-prefix}${scoter:project-id}`, the dev container's
+    # name, and its ssh `Host`.
+    host: str
     dev_env_name: str
     firewall_router_name: str
     network_gateway_name: str
@@ -65,19 +66,13 @@ class EnvironmentDesc:
     # The `scoter run` process; 0 when it isn't known.
     pid: int = 0
 
-    @property
-    def host(self) -> str:
-        """The environment's host name."""
-        return self.host_prefix + self.host_suffix
-
     @staticmethod
     def from_json(file: Path, data: jdata.JsonData) -> "EnvironmentDesc":
         """Extract this from JSON formatted data."""
         try:
             pid = jdata.find(data, "pid")
             return EnvironmentDesc(
-                host_prefix=jdata.req_str(data, "host_prefix"),
-                host_suffix=jdata.req_str(data, "host_suffix"),
+                host=jdata.req_str(data, "host"),
                 dev_env_name=jdata.req_str(data, "dev_env_name"),
                 firewall_router_name=jdata.req_str(data, "firewall_router_name"),
                 network_gateway_name=jdata.req_str(data, "network_gateway_name"),
@@ -99,8 +94,7 @@ class EnvironmentDesc:
     def to_json(self) -> jdata.JsonData:
         """Serialize this data."""
         return {
-            "host_prefix": self.host_prefix,
-            "host_suffix": self.host_suffix,
+            "host": self.host,
             "dev_env_name": self.dev_env_name,
             "firewall_router_name": self.firewall_router_name,
             "network_gateway_name": self.network_gateway_name,
@@ -125,77 +119,66 @@ class ActiveEnvironmentSet:
     when its block ends without an error.
     """
 
-    ENVIRON_IDS = "abcdefghijklmnopqrstuvwxyz"
-
     def __init__(self, *, file: Path, environs: list[EnvironmentDesc]) -> None:
         self._file = file
         self.environs: dict[str, EnvironmentDesc] = {}
         for env in environs:
-            if env.host_suffix in self.environs:
+            if env.host in self.environs:
                 raise ActiveEnvErr(
                     f"bad active environment config ({file}): "
-                    f"duplicate id {env.host_suffix}"
+                    f"duplicate host {env.host}"
                 )
-            self.environs[env.host_suffix] = env
+            self.environs[env.host] = env
 
     def to_json(self) -> jdata.JsonData:
         """Serialize this data."""
         return [e.to_json() for e in self.environs.values()]
 
     def reserve_environ(
-        self, host_prefix: str, *, port: str = "", user: str = "", project_dir: str = "",
-    ) -> str:
-        """Reserve a host environment; its suffix.
+        self, host: str, *, port: str = "", user: str = "", project_dir: str = "",
+    ) -> None:
+        """Reserve the host for a run; one already listed is refused (one run per project).
 
         The port and user are recorded now, so another run choosing its port
         sees this one's.
         """
-        for eid in ActiveEnvironmentSet.ENVIRON_IDS:
-            if eid not in self.environs:
-                self.environs[eid] = EnvironmentDesc(
-                    host_prefix=host_prefix,
-                    host_suffix=eid,
-                    dev_env_name="",
-                    firewall_router_name="",
-                    network_gateway_name="",
-                    project_dir=project_dir,
-                    resources_dir="",
-                    workspace_dir="",
-                    setup_dir="",
-                    compose_file="",
-                    compose_env_file="",
-                    dev_env_ssh_port=port,
-                    dev_env_ssh_user=user,
-                    created_at=datetime.datetime.now().isoformat(),
-                    suc={},
-                    pid=os.getpid(),
-                )
-                return eid
-        raise ActiveEnvErr("Too many registered environments.")
+        running = self.environs.get(host)
+        if running is not None:
+            raise ActiveEnvErr(
+                f"{host} is already {'running' if running.suc else 'starting'} for this project "
+                f"(since {running.created_at}).  Connect to it with `ssh {host}`; if its run is "
+                "gone, `scoter kill` (or `scoter cleanup`) stops it."
+            )
+        self.environs[host] = EnvironmentDesc(
+            host=host,
+            dev_env_name="",
+            firewall_router_name="",
+            network_gateway_name="",
+            project_dir=project_dir,
+            resources_dir="",
+            workspace_dir="",
+            setup_dir="",
+            compose_file="",
+            compose_env_file="",
+            dev_env_ssh_port=port,
+            dev_env_ssh_user=user,
+            created_at=datetime.datetime.now().isoformat(),
+            suc={},
+            pid=os.getpid(),
+        )
 
     def update_environ(self, env: EnvironmentDesc) -> None:
         """Update the environment description."""
-        if env.host_suffix not in self.environs:
+        if env.host not in self.environs:
             raise ActiveEnvErr(
                 f"environment {env.host} isn't registered any more; "
                 "was it stopped with `scoter kill`?"
             )
-        self.environs[env.host_suffix] = replace(env, pid=env.pid or self.environs[env.host_suffix].pid)
-
-    def get_active_host_ids(self) -> list[str]:
-        """Get all the active host IDs."""
-        return list(self.environs.keys())
-
-    def get_active_host_ids_for_prefix(self, prefix: str) -> list[str]:
-        """Get all the active host IDs for the given host prefix."""
-        return [env.host_suffix for env in self.environs.values() if env.host_prefix == prefix]
+        self.environs[env.host] = replace(env, pid=env.pid or self.environs[env.host].pid)
 
     def get_environ_by_host(self, host: str) -> EnvironmentDesc | None:
         """Get the environment description by the host name."""
-        for env in self.environs.values():
-            if env.host == host:
-                return env
-        return None
+        return self.environs.get(host)
 
     def environs_for_project(self, project_dir: str) -> list[EnvironmentDesc]:
         """The environments running for the project directory (by its real path)."""
@@ -207,11 +190,7 @@ class ActiveEnvironmentSet:
 
     def rm_environ_by_host(self, host: str) -> bool:
         """Attempt to remove the host from the active list."""
-        env = self.get_environ_by_host(host)
-        if env:
-            del self.environs[env.host_suffix]
-            return True
-        return False
+        return self.environs.pop(host, None) is not None
 
     @staticmethod
     def read(file: Path) -> "ActiveEnvironmentSet":

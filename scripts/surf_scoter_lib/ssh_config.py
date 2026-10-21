@@ -139,6 +139,46 @@ class SshConfig:
             )
         ]
 
+    def add_blank(self, host: str) -> None:
+        """Add an empty line to the end of the host block, which must exist."""
+        if host not in self.by_host:
+            raise SshConfigErr(f"ssh config does not have Host block {host}")
+        self._last_new_line -= 1
+        self.by_host[host].append(SshConfigLine(
+            line="\n", line_no=self._last_new_line, valid=True, host=host, key=None, value=None,
+        ))
+
+    def remove_host(self, host: str) -> None:
+        """Remove the host block, if it's there.
+
+        Comments after its last setting (a user's, about the next `Host`)
+        are kept, with the block before it; the blank lines between go with
+        it, so writing a block again doesn't add one each time.
+        """
+        lines = self.by_host.pop(host, None)
+        if not lines:
+            return
+        ordered = sorted(lines, key=lambda line: line.line_no if line.line_no > 0 else 1 << 30)
+        last = max(
+            (i for i, line in enumerate(ordered) if line.key),
+            default=0,
+        )
+        after = ordered[last + 1:]
+        first = next((i for i, line in enumerate(after) if line.line.strip()), len(after))
+        trailing = [line for line in after[first:] if line.line_no > 0]
+        if not trailing:
+            return
+        start = ordered[0].line_no
+        before = [
+            h for h, block in self.by_host.items()
+            if block and 0 < block[0].line_no < start
+        ]
+        previous = max(before, key=lambda h: self.by_host[h][0].line_no) if before else None
+        self.by_host.setdefault(previous, []).extend(
+            SshConfigLine(line.line, line.line_no, line.valid, previous, line.key, line.value)
+            for line in trailing
+        )
+
     def get_host_key(self, host: str, key: str) -> str | None:
         """Read the host's key."""
         if host not in self.by_host:

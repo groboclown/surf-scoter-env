@@ -24,7 +24,9 @@ Without a terminal to ask at, and without `--force`, it only lists.  What it rem
 * With **`--workspaces`**, the workspaces no running environment uses, in the default place (`state/workspaces`).  Anything in them that you haven't fetched back into your project is lost, so it only removes them when you ask.
 * With **`--images`**, the images Surf Scoter built (`local-surf-scoter/...`) that no running environment uses, and then the layers no image uses any more (`image prune`).  The next run builds what it needs again.
 
-It leaves alone: expired acceptances (the next review compares with them: `scoter revoke` removes them), running environments, your container tool's build cache and the images it didn't build, and the SSH entries.
+* **SSH entries** for environments that aren't running, as `ssh: values: config-cleanup` says (see [SSH Entries](#ssh-entries)): with `auto`, with the rest; with `ask`, it asks about them on their own, even with `--force`; with `no`, it only says how many there are.
+
+It leaves alone: expired acceptances (the next review compares with them: `scoter revoke` removes them), running environments, and your container tool's build cache and the images it didn't build.
 
 ## What's Kept
 
@@ -37,7 +39,7 @@ The locations below are the defaults; your [setup file](system-config-file.md) c
 | The project's workspace: its clone, setup and resources directories | `~/.config/surf-scoter.d/state/workspaces/PROJECT-ID/` | You remove it, or `scoter cleanup --workspaces` |
 | Your accepted settings, with a copy of the project files you accepted | `~/.config/surf-scoter.d/verified/` | `scoter revoke`, or `scoter cleanup` once the project's directory is gone |
 | The container images | Your container tool's image store, tagged `local-surf-scoter/...` (and the dev container's parents' tags) | You remove them, or `scoter cleanup --images` |
-| The ssh host entries | `~/.ssh/config` and `~/.ssh/known_hosts` | You remove them |
+| Each environment's ssh entries | `~/.ssh/config` and `~/.ssh/known_hosts` | The environment stops, as `ssh: values: config-cleanup` says; or `scoter cleanup` |
 
 ## Environments Left Running
 
@@ -103,4 +105,10 @@ With Podman, use `podman` in place of `docker`.  The next run builds what it nee
 
 ## SSH Entries
 
-`scoter run` adds a `Host` entry for the environment to `~/.ssh/config` (one for each user and port, reused by later runs), and replaces the environment's host key in `~/.ssh/known_hosts` each time it starts.  They do no harm when no environment is running.  To remove them, delete the `Host scoter-...` entries from `~/.ssh/config`, and their lines from `~/.ssh/known_hosts` (`ssh-keygen -R HOST` removes one host's).
+Each `scoter run` writes its environment's own `Host` entry to `~/.ssh/config`, named after the project (`scoter-my-project-c593c7ec2d55`), so `ssh` and your IDE find it by name, and puts its host key in `~/.ssh/known_hosts`.  When the environment stops, `ssh: values: config-cleanup` in your setup says what happens to them:
+
+* `ask` (the default): you're asked whether to remove them.  Without a terminal to ask at, they're kept.
+* `auto`: they're removed.
+* `no`: they're kept, for you to remove.
+
+`scoter cleanup` finds the entries left behind (by `no`, a "no" to the question, or a crash).  The tools only change or remove the entries they wrote, which have a `# Surf Scoter environment` line; your own entries are left alone.  To remove one by hand, delete its `Host` entry from `~/.ssh/config`, and its key (`ssh-keygen -R HOST`).
