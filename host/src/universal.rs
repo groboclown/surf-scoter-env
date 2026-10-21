@@ -1398,6 +1398,7 @@ mod tests {
             "container:\n  dev-container-path: ./env\nvcs: git\n",
         );
         dir.write("mine/my-env/Dockerfile", "FROM scratch\n");
+        dir.write("mine/my-env/dev-env.yaml", DEV_ENV);
         dir.write(
             "home/setup.yaml",
             &format!(
@@ -1462,7 +1463,125 @@ mod tests {
             [
                 "project-dir: isn't this run's project; leave it as the review gave it",
                 "expires-at: must be in the future",
-                "dev-container.use: there's no container 'nope' in your `dev-containers-search` directories",
+                "dev-container.use: there's no container 'nope' in your `dev-containers-search` directories outside the project",
+            ]
+        );
+    }
+
+    // ---- the accepted settings' container ----
+
+    /// A project, the user's containers in `mine` (searched after the
+    /// project's own files directory, as the default setup does), and
+    /// accepted settings with `dev_container`.
+    #[cfg(unix)]
+    fn accepted_container(dir: &TempDir, dev_container: &str) -> Result<FullConfig, ConfigErrors> {
+        use std::os::unix::fs::PermissionsExt;
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        // The same names as the user's, in the project: never used for them.
+        dir.write("proj/.surf-scoter.d/my-env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/my-env/dev-env.yaml", "user: project\n");
+        dir.write("proj/.surf-scoter.d/base/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/base/dev-env.yaml", "user: project\n");
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        dir.write("mine/base/Dockerfile", "FROM scratch\n");
+        dir.write("mine/base/dev-env.yaml", DEV_ENV);
+        dir.write("mine/my-env/Dockerfile", "FROM base\n");
+        dir.write(
+            "mine/my-env/dev-env.yaml",
+            "user: me\nparents:\n  - {name: base, tag: my-base}\n",
+        );
+        let project = dir.path().join("proj");
+        dir.write(
+            "home/setup.yaml",
+            &format!(
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}/.surf-scoter.d', '{}']\n",
+                project.display(),
+                dir.path().join("mine").display()
+            ),
+        );
+        let accepted = dir.write(
+            "verified/env-1/acceptances/a1/accepted.json",
+            &format!(
+                r#"{{"$schema": "surf-scoter-accepted-settings-1", "project-dir": "{}", "expires-at": "2999-01-01T00:00:00Z",
+                    "vcs": null, "gateway": null, "egress": [], "commands": [], "dev-container": {dev_container}}}"#,
+                project.display()
+            ),
+        );
+        for path in [&dir.path().join("verified"), &accepted] {
+            let mode = if path.is_dir() { 0o700 } else { 0o600 };
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let options = LoadOptions {
+            project_dir: Some(project),
+            accepted_settings: Some(accepted),
+            ..LoadOptions::default()
+        };
+        let env = Env {
+            scoter_home: Some(dir.path().join("home")),
+            ..Env::default()
+        };
+        load_all_with_env(&options, env)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_settings_use_the_users_container() {
+        let dir = TempDir::new();
+        let config =
+            accepted_container(&dir, r#"{"use": {"name": "my-env"}, "images": {}}"#).unwrap();
+        let universal = build(&config).unwrap();
+        let mine = dir.path().join("mine");
+        assert_eq!(
+            universal.active_config_locations.dev_container_path,
+            Some(mine.join("my-env").display().to_string())
+        );
+        let dev = universal.dev_container.unwrap();
+        assert_eq!(dev["user"], "me");
+        // Its parent is the user's too, not the project's `base`.
+        assert_eq!(
+            dev["parent-builds"][0]["dir"],
+            mine.join("base").display().to_string()
+        );
+        // The project file is still the project's.
+        assert_eq!(
+            universal.current_project_setup.unwrap()["container"]["dev-container-path"],
+            "./env"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_settings_use_the_projects_container() {
+        let dir = TempDir::new();
+        let config = accepted_container(&dir, r#"{"use": "project", "images": {}}"#).unwrap();
+        let universal = build(&config).unwrap();
+        assert_eq!(
+            universal.active_config_locations.dev_container_path,
+            Some(
+                dir.path()
+                    .join("proj/.surf-scoter.d/env")
+                    .display()
+                    .to_string()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_settings_container_only_outside_the_project() {
+        let dir = TempDir::new();
+        // `env` is only in the project: not one of the user's.
+        let errors = error_texts(
+            accepted_container(&dir, r#"{"use": {"name": "env"}, "images": {}}"#).unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            [
+                "dev-container.use: there's no container 'env' in your `dev-containers-search` directories outside the project"
             ]
         );
     }

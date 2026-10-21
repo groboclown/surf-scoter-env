@@ -307,6 +307,23 @@ class UserConfig:
         """Whether the setup has the section."""
         return self.__find(jdata.find_dict, "resolved", section) is not None
 
+    def accepted_settings_file(self) -> Path | None:
+        """The accepted settings file the generator loaded; None without accepted settings."""
+        file = self.__find(jdata.find_str, "accepted-settings", "file")
+        return None if file is None else Path(file)
+
+    def accepted_container_name(self) -> str | None:
+        """The user's own container the accepted settings use; None for the project's."""
+        choice = self.__find(jdata.find, "accepted-settings", "contents", "dev-container", "use")
+        if isinstance(choice, dict):
+            return jdata.req_str(choice, "name")
+        return None
+
+    def accepted_images(self) -> dict[str, str]:
+        """Each image the accepted settings build from instead of the one the project names."""
+        images = self.__find(jdata.find_dict, "accepted-settings", "contents", "dev-container", "images")
+        return {key: jdata.req_str(images, key) for key in images} if images else {}
+
     def review_result(self) -> str | None:
         """The review file's `result` (`accept` or `reject`); None without a review."""
         return self.__find(jdata.find_str, "review", "result")

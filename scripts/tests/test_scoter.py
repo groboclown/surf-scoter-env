@@ -298,11 +298,17 @@ class HelpTest(unittest.TestCase):
     """Test that `help` doesn't need a project."""
 
     def test_help_skips_the_project(self) -> None:
-        """`help` loads the setup alone; other commands look for the project."""
-        seen: list[bool] = []
+        """`help` loads the setup alone; other commands look for the project.
 
-        def fake_load(args: object, *, with_project: bool = True) -> scoter.DictJsonData:
-            seen.append(with_project)
+        `verify` loads the project as it suggests, without the user's
+        accepted settings; `run` loads them too.
+        """
+        seen: list[tuple[bool, bool]] = []
+
+        def fake_load(
+            args: object, *, with_project: bool = True, with_acceptance: bool = True,
+        ) -> scoter.DictJsonData:
+            seen.append((with_project, with_acceptance))
             raise scoter.ConfigErr("stop here")
 
         original = scoter.load_config
@@ -311,6 +317,8 @@ class HelpTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 scoter.main(["scoter", "help"])
                 scoter.main(["scoter", "verify"])
+                scoter.main(["scoter", "run"])
         finally:
             scoter.load_config = original  # type: ignore[assignment]
-        self.assertEqual(seen, [False, True])
+        self.assertEqual([p for p, _ in seen], [False, True, True])
+        self.assertEqual([a for _, a in seen[1:]], [False, True])

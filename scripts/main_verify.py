@@ -7,7 +7,6 @@ deny it.  Using it stores your acceptance, which later runs use.  See
 steps 12 and 15 of docs/contributors/projects-v1.md.
 """
 import datetime
-import json
 import os
 import shlex
 import shutil
@@ -24,10 +23,10 @@ from surf_scoter_lib import (
     UserConfig,
     checks,
     gen_parser,
+    generator,
     jdata,
     review,
 )
-from surf_scoter_lib.defaults import GEN_SCOTER_UC_EXEC
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import accept, lookup, snapshot
 
@@ -307,36 +306,12 @@ def parse_review(
     config: UserConfig, file: Path, directory: Path,
 ) -> tuple[jdata.DictJsonData | None, list[str]]:
     """Run the generator with the review file: its universal file, or its complaints."""
-    universal = directory / "universal.json"
-    output = directory / "reviewed.json"
-    write_private(universal, json.dumps(config.raw()))
-    args = [
-        str(config.get_dist_bin_dir() / GEN_SCOTER_UC_EXEC),
-        "--universal", str(universal), "--no-setup-search",
-        "--project-dir", str(project_dir(config)),
-    ]
+    args = ["--project-dir", str(project_dir(config))]
     vcs_root = config.active_location("vcs-root")
     if vcs_root is not None:
         args.extend(("--vcs-root", str(vcs_root)))
-    args.extend(("--review", str(file), "--output", str(output)))
-    try:
-        res = subprocess.run(  # nosec: B603  # The distribution's own generator.
-            args, capture_output=True, check=False, shell=False, timeout=60,
-        )
-        if res.returncode != 0:
-            lines = res.stderr.decode("utf-8", errors="replace").splitlines()
-            return None, [line for line in lines if line.strip()]
-        with open(output, "rb") as inp:
-            data = json.load(inp)
-    except (OSError, ValueError, subprocess.SubprocessError) as err:
-        return None, [f"couldn't run the generator: {err}"]
-    finally:
-        for path in (universal, output):
-            if os.path.lexists(path):
-                os.unlink(path)
-    if not isinstance(data, dict):
-        return None, ["the generator wrote something unexpected"]
-    return data, []
+    args.extend(("--review", str(file)))
+    return generator.run(config, args, directory)
 
 
 # ---------------------------------------------------------------------

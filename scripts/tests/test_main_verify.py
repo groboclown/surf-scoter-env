@@ -5,7 +5,6 @@ import io
 import json
 import os
 import shutil
-import subprocess  # nosec: B404  # Runs the generator to make the test's universal file.
 import sys
 import tempfile
 import unittest
@@ -20,19 +19,9 @@ import main_verify
 from surf_scoter_lib.user_config import UserConfig
 from surf_scoter_lib.verified import lookup, records, store
 
-REPO = SCRIPTS.parent
-GENERATOR = REPO / "host" / "target" / "debug" / "gen-scoter-uc"
-POSIX = sys.platform != "win32"
+from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, DistTest
 
-PROJECT_FILE = """\
-container:
-  dev-container-path: ./env
-egress:
-  - {host: registry.npmjs.org, protocol: tls}
-commands:
-  - {command: ls, args: [{any: {}}]}
-  - {command: sh, args: ["-c", {any: {}}]}
-"""
+POSIX = sys.platform != "win32"
 
 
 def quiet() -> contextlib.ExitStack:
@@ -163,46 +152,13 @@ class ReadOnceTest(_TempDir):
             main_verify.read_once(path)
 
 
-@unittest.skipUnless(POSIX and GENERATOR.is_file(), "needs the generator (cd host && cargo build)")
-class PromptTest(_TempDir):
+@unittest.skipUnless(HAVE_GENERATOR, NEEDS_GENERATOR)
+class PromptTest(DistTest):
     """Test the prompt end to end, with the generator, and stand-ins for the user and their editor."""
 
     def setUp(self) -> None:
         super().setUp()
-        # A distribution like an installed one: the generator, the scripts, the defaults.
-        dist = self.tmp / "dist"
-        (dist / "bin").mkdir(parents=True)
-        os.symlink(GENERATOR, dist / "bin" / "gen-scoter-uc")
-        for script in SCRIPTS.glob("*.py"):
-            os.symlink(script, dist / "bin" / script.name)
-        os.symlink(SCRIPTS / "surf_scoter_lib", dist / "bin" / "surf_scoter_lib")
-        os.symlink(REPO / "defaults", dist / "defaults")
-        os.symlink(REPO / "containers", dist / "containers")
-        shutil.copy(REPO / "defaults" / "setup.yaml", dist / "setup.yaml")
-        self.verified = self.tmp / "verified"
-        home = self.tmp / "home"
-        home.mkdir()
-        (home / "setup.yaml").write_text(
-            f"scoter:\n  paths:\n    verified-dir: {json.dumps(str(self.verified))}\n", encoding="utf-8",
-        )
-        self.project = self.tmp / "proj"
-        files = self.project / ".surf-scoter.d"
-        (files / "env").mkdir(parents=True)
-        (files / "project.yaml").write_text(PROJECT_FILE, encoding="utf-8")
-        (files / "env" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-        shutil.copy(REPO / "containers" / "dev-env" / "dev-env.yaml", files / "env" / "dev-env.yaml")
-
-        env = {**os.environ, "SURF_SCOTER_HOME": str(home)}
-        first = self.tmp / "first.json"
-        for args in (
-            ["--distribution-dir", str(dist), "--output", str(first)],
-            ["--universal", str(first), "--no-setup-search", "--project-dir", str(self.project),
-             "--output", str(self.tmp / "suc.json")],
-        ):
-            subprocess.run(  # nosec: B603  # The generator under test.
-                [str(GENERATOR), *args], env=env, check=True, capture_output=True,
-            )
-        self.suc = json.loads((self.tmp / "suc.json").read_text(encoding="utf-8"))
+        self.suc = self.project_suc()
         self.config = UserConfig(self.suc)
 
     def prompt(

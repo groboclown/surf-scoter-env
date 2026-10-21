@@ -65,21 +65,70 @@ fn review_problems(review: &Review, system: &SystemConfig) -> Vec<ConfigError> {
     if review.expires_at <= accepted::now() {
         errors.push(error("expires-at", "must be in the future".to_string()));
     }
-    if let ContainerUse::Name(name) = &review.container_use {
-        let search = system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH);
-        let found = search
-            .iter()
-            .any(|dir| dir.join(name).join(dev_env::DOCKERFILE).is_file());
-        if !found {
-            errors.push(error(
-                "dev-container.use",
-                format!(
-                    "there's no container '{name}' in your `dev-containers-search` directories"
-                ),
-            ));
-        }
+    if let ContainerUse::Name(name) = &review.container_use
+        && find_user_container(name, system).is_none()
+    {
+        errors.push(error("dev-container.use", no_user_container(name)));
     }
     errors
+}
+
+/// The `dev-containers-search` directories that hold the user's own
+/// containers: those outside the project directory and its repository, which
+/// the project controls.  The default search list starts with the project's
+/// own files directory.
+fn user_containers_search(system: &SystemConfig) -> Vec<PathBuf> {
+    let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    let project: Vec<PathBuf> = [system::PROJECT_DIR, system::VCS_ROOT]
+        .into_iter()
+        .filter_map(|key| system.get_path(system::SCOTER_SECTION, key))
+        .map(canonical)
+        .collect();
+    system
+        .path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH)
+        .into_iter()
+        .filter(|dir| {
+            let dir = canonical(dir.clone());
+            !project.iter().any(|p| dir.starts_with(p))
+        })
+        .collect()
+}
+
+/// The search directory holding the user's own container `name`, if any.
+fn find_user_container(name: &str, system: &SystemConfig) -> Option<PathBuf> {
+    user_containers_search(system).into_iter().find(|dir| {
+        dir.join(name).join(dev_env::DOCKERFILE).is_file()
+            && dir.join(name).join(dev_env::DEV_ENV_FILE).is_file()
+    })
+}
+
+fn no_user_container(name: &str) -> String {
+    format!(
+        "there's no container '{name}' in your `dev-containers-search` directories outside the project"
+    )
+}
+
+/// The user's own container, `name`, which the accepted settings use
+/// instead of the project's.  It and its parents are looked for only
+/// outside the project, so a name can't lead back into the project's files.
+fn user_container(
+    name: &str,
+    accepted: &AcceptedSettings,
+    project_file: &Path,
+    system: &SystemConfig,
+) -> Result<DevContainer, Vec<ConfigError>> {
+    if find_user_container(name, system).is_none() {
+        return Err(vec![ConfigError::new(
+            Some(&accepted.file),
+            "dev-container.use",
+            no_user_container(name),
+        )]);
+    }
+    dev_env::find(
+        &project::ContainerRef::Name(name.to_string()),
+        project_file,
+        &user_containers_search(system),
+    )
 }
 
 /// The `scoter` section's `value-lists` key listing the domains an egress
@@ -499,6 +548,21 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
+    // The user's own container, when the accepted settings name one, in
+    // place of the project's.
+    let mut dev_container = dev_container;
+    if let (Some(accepted), Some(system), Some(path)) =
+        (&accepted, &mut system, project_path.as_deref())
+        && let Some(name) = &accepted.container_name
+    {
+        match user_container(name, accepted, path, system) {
+            Ok(dev) => {
+                system.set_dev_container_path(&dev.dir);
+                dev_container = Some(dev);
+            }
+            Err(e) => errors.extend(e),
+        }
+    }
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,

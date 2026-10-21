@@ -40,11 +40,15 @@ class ConfigErr(Exception):
     """A problem with the configuration file or arguments that control it."""
 
 
-def load_config(args: argparse.Namespace, *, with_project: bool = True) -> DictJsonData:
+def load_config(
+    args: argparse.Namespace, *, with_project: bool = True, with_acceptance: bool = True,
+) -> DictJsonData:
     """Load the SUC based on the arguments.
 
     Without `with_project`, only the setup is loaded: for commands, such as
-    `help`, that don't need a project.
+    `help`, that don't need a project.  Without `with_acceptance`, the
+    project is loaded as it suggests, without the user's accepted settings:
+    for `verify`, which reviews the suggestion.
     """
     bin_dir = args.bin_dir
     distribution_dir = args.distribution_dir
@@ -81,6 +85,7 @@ def load_config(args: argparse.Namespace, *, with_project: bool = True) -> DictJ
             settings,
         )
         check_project_vcs(settings, vcs_root)
+    if project_dir and with_acceptance:
         # Phase 3: with the user's accepted settings, if they accepted it.
         found = find_acceptance(settings)
         accepted = found.get("accepted-settings") if found else None
@@ -665,7 +670,13 @@ def main(argv: Sequence[str]) -> int:
     try:
         args = parse_arguments(argv)
         # `help` lists the sub-commands, which needs the setup, not a project.
-        config = load_config(args, with_project=args.cmd not in (None, "help"))
+        config = load_config(
+            args,
+            with_project=args.cmd not in (None, "help"),
+            # `verify` reviews what the project suggests; accepted settings
+            # (a container of the user's, say) would change what it shows.
+            with_acceptance=args.cmd != "verify",
+        )
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1

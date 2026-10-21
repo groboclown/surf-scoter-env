@@ -1204,6 +1204,59 @@ In the first cut, the run script will not allow re-validation, but instead will 
 
 **Tests:** a change to `.surf-scoter.d` after verification and before the build; an expired acceptance.
 
+### Draft: what the run has to go on
+
+By the time `main_run.py` starts, `scoter.py` has run the lookup (step 8) and, if it matched, the generator's third run has loaded the acceptance's `accepted.json`.  So the SUC's `accepted-settings` says whether there is one; its `host-brokered` and `egress` already come only from it (step 15).  What the run doesn't have is the snapshot the acceptance was made for, and nothing yet stops it building from the live `.surf-scoter.d`.
+
+### Draft: no acceptance, no run
+
+Without `accepted-settings`, the run stops before building anything, and says how to go on:
+
+> You haven't accepted this project's settings.  Run `scoter verify` to review them, then run again.
+
+Saying *why* (no acceptance for this project; the matching one expired; the files or the setup changed since) is left for later work.
+
+This holds for a project with no host commands and no egress rules too: its container files (`dev-env.yaml`'s mounts, [DEV-2](../security/dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file), and the Dockerfiles) are part of what's reviewed.
+
+A blanket acceptance (step 8) has no snapshot to build from, so it still counts as no match; that stays a future task.
+
+### Draft: finding the snapshot
+
+`main_run.py` finds the acceptance from the environment's record: the `accepted.json` the SUC loaded must be one of the project's acceptances in the store, still usable, and with a snapshot.  (The draft had the run do the lookup again, but with `use: {name}` the SUC's dev container is the user's, not the one the snapshot was taken of, so the lookup can't match on it.  For the same reason, `scoter verify` now stops after the generator's second run: it reviews what the project suggests.)
+
+### Draft: staging and checking the copy
+
+* **Where.**  `${scoter:state-dir}/environments/HOST/build/`, next to `scoter-host`'s `suc.json`, private, and removed with it at teardown.  The manifest's files are restored (step 5's `restore`, checking each blob's hash) under `build/project/<project-files-dir>/`, so the copy is laid out like a project.
+* **Checking.**  The SUC's `current-project-setup` and `dev-container` were parsed from the live files, before the snapshot was read, so the YAML files' canonical hashes vouch only for that parse (step 5).  Run the generator on the copy: `gen-scoter-uc --universal SUC --no-setup-search --project-dir build/project`.  Its `current-project-setup` must equal the SUC's, and so must its `dev-container`, once `parent-builds` directories inside the live files directory are mapped to the copy.  A difference stops the run ("the project's files changed while `scoter` was starting; run again").  Only these two sections are compared: a different project directory changes every `./` location in the setup, so nothing else is taken from this run.
+* **Building.**  The dev container and its parents inside `.surf-scoter.d` build from the copy (the checking run's `dev-container-path` and `parent-builds`).  Parents outside it come from `dev-containers-search`, which the user's setup controls, and are trusted (step 5).  Those in `dev-containers-verified` had their manifest ids checked by the lookup a moment earlier; they still build from the live directory, which leaves a short window (a carry-over).  The firewall and gateway images are the distribution's.
+
+### Draft: the acceptance's container choices
+
+The review lets the user choose the container (step 12): `accepted.json` keeps `dev-container: use` and `images`, and nothing applies them yet.
+
+* **`images`.**  Each mapping that isn't to itself rewrites the matching `FROM` in the staged Dockerfiles; the copy is private, so the live files are never touched.  The image is matched as the review listed it (`checks.from_images`: not `scratch`, a local parent's tag, or an earlier stage).  A `FROM` that spans lines with continuations isn't rewritten: the run stops and says so, rather than guessing.  The staged files are checked (above) before they're rewritten.
+* **`use: {name: NAME}`.**  The user's own container from `dev-containers-search` replaces the project's.  Its `dev-env.yaml` gives the container's settings (user, mounts, `broker-bin`, sshd), so it has to come through the generator: given accepted settings that name a container, `dev-container-path` becomes that container's directory, and `dev-container` is its merged `dev-env.yaml`.  It's outside `.surf-scoter.d`, so it builds from the live directory, like any trusted parent.  The project's container files aren't built at all, though they're still in the snapshot.
+
+### Design decisions
+
+* `use: {name}` and `images` are applied in this step.
+* The run finds the acceptance from the record, not by the lookup (above); `scoter verify` reviews without the accepted settings.
+* Without an acceptance, the run only says to run `scoter verify`; later work refines the message (why there's no match).
+* Building from the copy is fine: the build only ever runs within the container's own directory.
+
+Completed:
+
+* **No acceptance, no run.**  `scoter run` stops before anything else without `accepted-settings`: "You haven't accepted this project's settings.  Run `scoter verify` to review them, then run again."
+* **Staging** ([`verified/staging.py`](../../scripts/surf_scoter_lib/verified/staging.py)), called by `main_run.py` once the environment's host name is reserved, into `${scoter:state-dir}/environments/HOST/build/` (private; removed at teardown, when the build fails, and when the run aborts; a stale one from a crashed run is removed first):
+  * `find_accepted`: the loaded `accepted.json` must be `ENV-ID/acceptances/ID/accepted.json` in the store, for this project's environment id, with the acceptance in the record, usable now, and with a snapshot.  Otherwise the run stops, with the reason and "run `scoter verify`".
+  * `stage`: restores the snapshot under `build/project/<project-files-dir>/`.  Restored files now get the usual modes (0644, 0755 when executable, directories 0755) inside the private root, whatever the umask, since a build's `COPY` keeps them in the image; before, they were 0600 and 0700.
+  * `build_plan`: runs the generator on the copy ([`generator.py`](../../scripts/surf_scoter_lib/generator.py), now shared with `main_verify.py`).  Its `current-project-setup` must equal the SUC's, and, for the project's container, so must its `dev-container-path` and `dev-container` with `parent-builds` mapped back to the live files directory.  A difference stops the run with "the project's files changed while `scoter` was starting ... run again" (no new review needed).  The project's container and its parents inside `.surf-scoter.d` build from the copy; parents outside it from where they are.
+  * `apply_images`: each `images` mapping that isn't to itself rewrites the `FROM` word in the staged Dockerfiles (`rewrite_images`); local parents' tags and earlier stages are left alone, and a `FROM` continued over lines is refused when its image would change.  Only for the project's container.
+* **`use: {name}`.**  The generator, given accepted settings naming a container, makes it the dev container (`dev-container-path` and `dev-container`) in place of the project's.  It, and its parents by name, are looked for only in `dev-containers-search` directories outside the project directory and the VCS root (the default list starts with the project's own files directory), and the review check (step 13) uses the same rule.  The run builds it from where it is, and never builds the project's container.
+* **`scoter verify`** loads without the accepted settings (`load_config(with_acceptance=False)`), so it reviews the project's suggestion even when an acceptance uses the user's container.
+
+**Tests:** in [`test_main_run_staging.py`](../../scripts/tests/test_main_run_staging.py), with the generator and acceptances made through the review prompt: the step's two (a change to `.surf-scoter.d` after the run read it doesn't reach the build, and one before it stops the run; an expired acceptance asks for a review), no acceptance, an `accepted.json` outside the store, a parent inside the project, `images` rewriting only the copy, and the user's own container.  `rewrite_images` on flags, stages, local tags, a mapping to itself, and continued lines.  In `universal.rs`: accepted settings using the user's container (with its parent the user's, not the project's same-named one), the project's, and a name only found in the project refused.  In `test_snapshot.py`: the restored modes.  In `test_scoter.py`: `verify` loads without the acceptance.  By hand: `scoter run` on a project with no acceptance stops with the message.  A full run wasn't tried: the scratch setup's state directory is the real one in `~/.config`.
+
 ## 17. Add diff verify to main_verify.py script
 
 Add in the capability for the main_verify.py script to perform a diff if the directory changed.
@@ -1219,7 +1272,6 @@ Things left dangling because of dependency ordering.  These may be tackled earli
 - Step 3:
   - The container's starting directory in the workspace should be the project directory's path relative to the VCS root.
   * The VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with.  A project can set `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*` when you enter its directory (say, through a `.envrc`), which would redirect them.  Run them without the VCS's own environment variables; the VCS section could list the ones to drop.
-  * ~~If the project file gets a `root` setting (step 7), it may only name a directory between the project directory and the root found here.~~  Step 7 decided against a project `root`.
 - Step 4:
   - The checks are only validated and combined.  Nothing applies them to the project's commands yet: that's step 11, and `host-brokered` still finds each command's `program` on the `PATH` rather than through the checks' `command-map` (steps 7, 8 and 10).
   - The project files (secret-looking files) and egress host lists are drafted above, as kinds of their own, for steps 11 and 9.
@@ -1228,7 +1280,6 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - The notices only show in `scoter user-setup`.  Decide whether the review (step 14) shows them too.
 - Step 5:
   - `active_env.py`'s lock checks and then writes, which two runs can interleave, and a crashed run leaves it held.  Move it to `fileutil.exclusive_lock`.
-  - Step 16 builds from a restored snapshot; it must check that the staged copy parses to the same `project` and `dev-container` as the SUC that gave the YAML files their canonical hashes (run the generator against the staged copy and compare).
   - Step 17 decides when a match on meaning carries an acceptance forward (`EnvironmentRecord.carry_forward`), and how the user is told.
   - On Windows, the store's owner and mode checks are skipped; the design's "under the user's profile" check isn't written yet.
   - Case-insensitive file systems: the environment id doesn't fold the path's case.
@@ -1249,10 +1300,14 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - On Windows, the owner and mode checks are skipped.
   - A blanket acceptance (step 8) can now be checked on each run with `check_project`; the run (step 16) wires that in.
 - Step 13:
-  - ~~Step 14 needs the generator to give the project's split `env`, resolved.~~  Done: `current-project-resolved`.
   - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
 - Step 14:
   - The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet.  Step 15 now stores `review.yaml`; the rest needs the matching of items (step 17).
+- Step 16:
+  - The message without an acceptance doesn't say why (never accepted, expired, the files or the setup changed).
+  - Containers in `dev-containers-verified`, and the user's own (`use: {name}`), build from their live directories: the lookup checked the verified ones' manifests a moment earlier, which leaves a short window.
+  - `images` only applies to the project's container; with `use: {name}`, the user's container builds as it is.  A `FROM` naming an image through an `ARG` isn't matched.
+  - A full `scoter run` against the staged copy hasn't been tried end to end (it needs `scoter user-setup` and the container tools).
 - Step 15:
   - The whole review is printed before the prompt; with long Dockerfiles it scrolls away.  A pager, or only the summary with the file opened on request, may read better.
   - `scoter verify` snapshots the project's files when it starts, after `scoter.py`'s generator run parsed them.  A change in between gives a snapshot that doesn't match the parsed suggestion.  Step 16's check that the staged copy parses to the same `project` and `dev-container` catches it at run time.
@@ -1271,9 +1326,8 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 ## 20. Put a bow on it
 
 - Allow a timed exemption for working on a project.
-- Allow a user to declare a project "accept" through CLI args (also used by CI/CD).  This passes an already accepted file explicitly; it never accepts a suggestion automatically.
 - Allow a user to revoke a project's acceptance.
-- Allow a user to list accepted projects, with their expiry and exemptions.
+- Allow a user to list accepted projects, with their expiration and exemption.
 - Add a user cache cleanup step.
 - Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
 - Clean up the code to remove references to steps from this document.

@@ -155,19 +155,18 @@ def is_windows() -> bool:
 # Private files
 
 
-def write_private(root: Path, parts: Sequence[str], data: bytes) -> Path:
-    """Write `data` to `root/parts...`, private to the user, replacing any file whole.
+def private_dir(root: Path, parts: Sequence[str]) -> Path:
+    """The directory `root/parts...`, private to the user.
 
     `root` and the directories below it are created with mode 0700 as
-    needed; none of them may be a symlink.  The file is written to a
-    temporary file beside it (mode 0600) and renamed into place.
+    needed, and made 0700 if they exist; none of them may be a symlink.
     """
     if not root.is_absolute():
         raise SurfScoterErr(f"{root}: must be an absolute path")
     if not os.path.lexists(root):
         root.mkdir(mode=MODE_USER_RWX, parents=True)
     directory = root
-    for part in ("", *parts[:-1]):
+    for part in ("", *parts):
         if part:
             if part in (".", "..") or "/" in part or "\\" in part:
                 raise SurfScoterErr(f"`{part}` is not a directory name")
@@ -178,7 +177,18 @@ def write_private(root: Path, parts: Sequence[str], data: bytes) -> Path:
             raise SurfScoterErr(f"{directory}: not a directory (or a symlink)")
         if not is_windows():
             os.chmod(directory, MODE_USER_RWX)
-    path = directory / parts[-1]
+    return directory
+
+
+def write_private(root: Path, parts: Sequence[str], data: bytes) -> Path:
+    """Write `data` to `root/parts...`, private to the user, replacing any file whole.
+
+    `root` and the directories below it are created with mode 0700 as
+    needed; none of them may be a symlink.  The file is written to a
+    temporary file beside it (mode 0600) and renamed into place.
+    """
+    path = private_dir(root, parts[:-1]) / parts[-1]
+    directory = path.parent
     fd, temp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
     try:
         with os.fdopen(fd, "wb") as out:

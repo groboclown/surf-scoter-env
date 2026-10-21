@@ -163,7 +163,11 @@ class SnapshotTest(TempDirTest):
         dest.mkdir(mode=0o700)
         snapshot.restore(verified, manifest, dest, self.LIMITS)
         self.assertEqual((dest / "env" / "Dockerfile").read_text(), "FROM scratch\n")
-        self.assertEqual(os.stat(dest / "env" / "bin" / "run.sh").st_mode & 0o777, 0o700)
+        # The usual modes, which a build's `COPY` keeps, inside the private directory.
+        self.assertEqual(os.stat(dest / "env" / "bin" / "run.sh").st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(dest / "env" / "Dockerfile").st_mode & 0o777, 0o644)
+        self.assertEqual(os.stat(dest / "env" / "bin").st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(dest).st_mode & 0o777, 0o700)
         with self.assertRaisesRegex(snapshot.SnapshotErr, "not empty"):
             snapshot.restore(verified, manifest, dest, self.LIMITS)
 

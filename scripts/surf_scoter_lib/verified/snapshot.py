@@ -402,7 +402,10 @@ def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: Snapsh
     """Write the manifest's files into `dest`: an empty directory only the user can use.
 
     Each blob is checked against its hash and size as it's read, and each
-    path before it's written; nothing is written outside `dest`.
+    path before it's written; nothing is written outside `dest`.  Below
+    `dest`, files and directories get the usual modes (0644, or 0755 when
+    executable, and 0755), since a build's `COPY` keeps them in the image;
+    `dest` itself keeps everyone else out.
     """
     st = os.lstat(dest)
     if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
@@ -421,15 +424,19 @@ def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: Snapsh
         for part in rel.split("/")[:-1]:
             target = target / part
             if not os.path.lexists(target):
-                target.mkdir(mode=0o700)
+                target.mkdir(mode=0o755)
+                os.chmod(target, 0o755)  # nosec: B103  # Inside `dest`, which only the user can enter.
             elif os.path.islink(target) or not target.is_dir():
                 raise SnapshotErr(f"{target}: not a directory")
         target = target / rel.rsplit("/", 1)[-1]
-        mode = 0o700 if entry.executable else 0o600
+        mode = 0o755 if entry.executable else 0o644
         fd = os.open(
             target,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | fileutil.O_NOFOLLOW | fileutil.O_BINARY,
             mode,
         )
         with os.fdopen(fd, "wb") as out:
+            if hasattr(os, "fchmod"):
+                # Whatever the umask: the build's `COPY` keeps the mode.
+                os.fchmod(out.fileno(), mode)
             out.write(data)
