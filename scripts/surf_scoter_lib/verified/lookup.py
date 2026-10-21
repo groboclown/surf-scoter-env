@@ -171,17 +171,27 @@ def vcs_section(config: UserConfig) -> str | None:
     return section if config.has_section(section) else None
 
 
-def verified_containers(config: UserConfig) -> dict[str, str]:
-    """The build's container directories in `dev-containers-verified`, with their manifests' ids."""
-    roots = [
+def verified_roots(config: UserConfig) -> list[Path]:
+    """The setup's `dev-containers-verified` directories, as real paths."""
+    return [
         Path(os.path.realpath(p)) for p in config.optional_path_list("scoter", "dev-containers-verified")
     ]
-    found: dict[str, str] = {}
+
+
+def verified_container_snapshots(config: UserConfig) -> dict[str, snapshot.Snapshot]:
+    """The build's container directories in `dev-containers-verified` (real paths), with their snapshots."""
+    roots = verified_roots(config)
+    found: dict[str, snapshot.Snapshot] = {}
     for directory in container_dirs(config):
         real = Path(os.path.realpath(directory))
         if any(real.is_relative_to(root) for root in roots):
-            found[str(real)] = snapshot.snapshot_dir(real, limits(config)).manifest.id
+            found[str(real)] = snapshot.snapshot_dir(real, limits(config))
     return found
+
+
+def verified_containers(config: UserConfig) -> dict[str, str]:
+    """The build's container directories in `dev-containers-verified`, with their manifests' ids."""
+    return {d: s.manifest.id for d, s in verified_container_snapshots(config).items()}
 
 
 def _carry_forward(

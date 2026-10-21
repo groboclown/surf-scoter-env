@@ -1357,17 +1357,12 @@ Done by later steps, or only notes:
 - ~~Step 17: the top-level `env` is compared as one item.~~  Done in batch D: `review.merge_env` merges it by entry (each `allow`, `drop` and `error` name, each `set` and `default` variable): one the project didn't change keeps the user's value, or their removal; one it changed takes the project's, with the user's earlier value commented out below when they'd edited it; new ones are added, removed ones dropped and noted.  **Tests:** in `test_review.py`.
 - ~~Step 17: a `${...}` that resolves differently on the host shows as "changed since", as a project change does.~~  Done in batch D: the earlier acceptance's project file (`suggestion.json`'s `project`, now on `Previous.project`) tells them apart: an `env` value whose `${...}` didn't change says "your setup now gives X (was Y), from `${...}`"; a command whose only change is its `program` says it's "found somewhere else since you accepted it (the project didn't change it)".  **Tests:** in `test_review.py`.
 - ~~Step 17: a `$comment` on an item gone from both the project and the user's acceptance is lost.~~  Done in batch D: the review where the project removes the item offers it back commented out, with its note, and now also lists the note in the header, saying it goes with the item unless the user keeps it; accepting without it is then the user's choice, made in view of the note.  **Tests:** in `test_main_verify_diff.py`.
+- ~~Step 16: containers in `dev-containers-verified` build from their live directories, leaving a short window after the lookup checked their manifests.~~  Done in batch E: an acceptance now keeps them as it keeps the project's files: `containers.json` beside `accepted.json` (each directory's manifest, `lookup.verified_container_snapshots`), with their contents in the store.  The run's staging (`staging.stage_containers`) restores each one the build uses and builds from that; an acceptance made before they were kept asks for a new review.  **Tests:** in `test_main_run_staging.py`: a verified parent changed after the acceptance builds as accepted, and an acceptance without `containers.json`.
+- ~~Step 16: `images` only applies to the project's container; with `use: {name}`, the user's container builds as it is.~~  Done in batch E: the user's own container is trusted, as their setup is, and still builds from where it is, unless the acceptance's `images` change a `FROM`: then from a copy in the staging directory, which they're applied to (the user's own is left as it is).  `images` now rewrites every staged Dockerfile.  Its parents, found by name outside the project, build as they are.  **Tests:** in `test_main_run_staging.py`.
+- ~~Step 16: a `FROM` naming an image through an `ARG` isn't matched.~~  Done in batch E: `images` can't map it, as the image isn't known until the build, so the review notes each one.  **Tests:** in `test_review.py`.
+- ~~Step 8 and step 11: blanket acceptances.~~  Folded into step 20's timed exemption.
+- ~~Step 15: `--accept-file`.~~  For automation, out of scope for now: a future task, with its draft.
 - ~~Step 3: the VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with, which a project's `.envrc` could set (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`).~~  Done in batch B: any section's `value-lists: drop-env` names the variables its `runs` commands don't get (a name, or a prefix ending in `*`; case-insensitive on Windows).  `UserConfig.run_command` (the run's clone, fetch and merge), `scoter verify`'s `current-branch` and `scoter.py`'s `find-root` use it.  The distribution's `git-vcs` drops `GIT_*`; [the system configuration file](../system-config-file.md#value-lists) says how to add to it or drop less, and why `docker` has none (a future task, below).  **Tests:** in `test_user_config.py`: `drop_env`, and `run_command` without a dropped variable, another section's command with it.  In `test_scoter.py`: `find-root` without `GIT_DIR`.
-
-### E. What can be accepted
-
-- Step 8 and step 11: a blanket acceptance has no `accepted.json`, and `scoter.py` treats a blanket match as no match.  It could be checked on each run with `check_project`, but the run (step 16) also needs files to build from.
-- Step 15: automation passing an already accepted file (the design's `--accept-file`) isn't written.
-- Step 16:
-  - Containers in `dev-containers-verified`, and the user's own (`use: {name}`), build from their live directories: the lookup checked the verified ones' manifests a moment earlier, which leaves a short window.
-  - `images` only applies to the project's container; with `use: {name}`, the user's container builds as it is.  A `FROM` naming an image through an `ARG` isn't matched.
-
-Moved to the future tasks: the container's starting directory (step 3, with ticket #22), the gateway's other protocols and ports (steps 7 and 9), Windows (steps 4, 5, 11 and 15), matching `env` patterns against patterns (step 4), egress `$override`s (step 13).  Which setup changes need a new review (step 5) is step 19's.
 
 ## 19. Review the settings format
 
@@ -1380,6 +1375,7 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 ## 20. Put a bow on it
 
 - Allow a timed exemption for working on a project.
+  - It covers blanket acceptances too (moved from step 18).  The kind exists in the records and the lookup (step 5), for a private project nobody else contributes to, but no command creates one, and `scoter.py` treats a match as none (steps 8 and 11).  Step 16 also changed what one would have to mean: the run builds only from a stored, accepted copy, and a blanket acceptance has none.  One way, drafted in step 18: "accept as suggested" on each run, recorded by a `scoter verify` option: each run takes a fresh snapshot and, if the checks refuse nothing, stores an acceptance of the suggestion as it stands (as using the review unedited would), and builds from that; refusals, setup changes and a gateway change still stop it.  A timed exemption ("don't ask me again for a week") covers much of the same need with less trust handed out.
 - ~~Allow a user to revoke a project's acceptance.~~  Done, after step 16: `scoter revoke` ([`main_revoke.py`](../../scripts/main_revoke.py), with [`verified/revoke.py`](../../scripts/surf_scoter_lib/verified/revoke.py)).
   - Without arguments, it lists the project's acceptances: id, kind, branch, fingerprint (the snapshot id, first 12 characters), expiry and validity.
   - Positional arguments name acceptance ids (as `scoter list-accepted` shows them), for any project and from anywhere; or, for the current project, branches or fingerprints (the whole id, with or without `sha256:`, or its first 12 hex characters or more, in any case).  `--all` takes every one of the current project's, and can't be given with names.  An acceptance carried forward from a chosen one goes too, as it holds the same settings.
@@ -1460,6 +1456,15 @@ Left from steps 4, 5, 11 and 15, for a pass with a Windows machine to test on:
 * The verified store's owner and mode checks, and the path checks' owner and mode checks, are skipped; the store design's "under the user's profile" check isn't written.
 * Case-insensitive file systems: the environment id doesn't fold the path's case.
 * The review prompt's `read_once` has no `O_NOFOLLOW`, and skips the owner check.
+
+## Accepting a review file without the prompt (`--accept-file`)
+
+For automation, out of scope for now (moved from step 18; step 12's design names it).  The draft:
+
+`scoter verify --accept-file FILE`, for automation: no terminal and no prompt.  The file, a review the user wrote earlier (`scoter verify --output`, then edited), is read once as the prompt reads an edit (no link, a regular file of the user's), parsed and checked the same way (the generator's `--review`, then `checks.check_review`), and stored if it can be used; otherwise the command fails, listing why.  It never accepts a project's suggestion by itself: only a file the user gives.
+
+The review has to be for the files as they are now.  The prompt has that by construction (it snapshots the files, then writes the review from them); a file written earlier doesn't.  So the format gains a `snapshot` key: the snapshot id the review was made from, written by every review, read-only like `project-dir`.  `--accept-file` refuses a file whose `snapshot` isn't the current one ("the project's files changed since this review was written"), or that has none.  The prompt checks it too, for an edit that changed it.  An earlier acceptance's `review.yaml` (`--previous-review`) may lack it.
+
 
 ## A `drop-env` for Docker
 

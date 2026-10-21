@@ -895,7 +895,13 @@ def _dev_container(out: Writer, config: UserConfig, context: Context) -> None:
     if use != "project":
         out.note("your choice, kept from your earlier acceptance.", indent=2)
     out.data(f"use: {flow(use)}", indent=2)
-    images = _images(context, [tag for tag, _ in builds])
+    images, through_args = _images(context, [tag for tag, _ in builds])
+    for rel, image in through_args:
+        out.note(
+            f"note: {rel} builds `FROM {image}`, an image named through an `ARG`: `images` can't "
+            "map it, as it isn't known until the build.",
+            indent=2,
+        )
     if not images:
         out.data("images: {}", indent=2)
         return
@@ -937,14 +943,18 @@ def _file_diff(old: bytes, new: bytes) -> list[str]:
     return lines
 
 
-def _images(context: Context, local_tags: Sequence[str]) -> list[str]:
-    """The images the project's container directories build from, in order, each once."""
+def _images(context: Context, local_tags: Sequence[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """The images the project's containers build from, each once; and each `FROM` that
+    names its image through an `ARG` (as its Dockerfile, and the image as written)."""
     if not context.files:
-        return []
+        return [], []
     images: list[str] = []
+    through_args: list[tuple[str, str]] = []
     for rel, data in sorted(context.files.contents.items()):
         if snapshot.is_dockerfile(rel.rsplit("/", 1)[-1]):
             for image in checks.from_images(data.decode("utf-8", errors="replace"), local_tags):
-                if image not in images and "$" not in image:
+                if "$" in image:
+                    through_args.append((rel, image))
+                elif image not in images:
                     images.append(image)
-    return images
+    return images, through_args

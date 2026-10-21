@@ -12,6 +12,9 @@ An acceptance keeps, in the verified store:
 * `suggestion.json`: the project file and dev container it was reviewed from,
   and the suggestion as the review wrote it (`review`), which the next
   review compares with (step 17);
+* `containers.json`: the build's `dev-containers-verified` containers, each
+  directory's manifest (their contents as blobs), for the run to build from
+  (step 18);
 
 and, in the environment's record, the snapshot of the project's files (its
 contents as blobs) and the setup values it was reviewed under.
@@ -28,6 +31,10 @@ from . import lookup, records, snapshot, store
 
 REVIEW_FILE = "review.yaml"
 SUGGESTION_FILE = "suggestion.json"
+# The `dev-containers-verified` containers the build uses, as accepted: each
+# directory's manifest, their contents in the store, for the run to build from.
+CONTAINERS_FILE = "containers.json"
+CONTAINERS_SCHEMA = "surf-scoter-accepted-containers-1"
 
 
 def store_acceptance(
@@ -55,13 +62,14 @@ def store_acceptance(
     if verified is None:
         raise VerifiedStoreErr("the setup gives no `scoter: paths: verified-dir` to keep it in")
     project_dir = os.path.realpath(project)
+    containers = lookup.verified_container_snapshots(config)
     acceptance = records.Acceptance(
         id=records.new_acceptance_id(now),
         kind=records.Kind.REVIEWED,
         accepted_at=now,
         expires_at=records.parse_time(jdata.req_str(accepted, "expires-at")),
         setup=records.SetupRecord(records.setup_values(
-            config, lookup.vcs_section(config), lookup.verified_containers(config),
+            config, lookup.vcs_section(config), {d: c.manifest.id for d, c in containers.items()},
         )),
         suggestion=taken.manifest,
         branch=branch,
@@ -82,6 +90,12 @@ def store_acceptance(
         verified_store.write_bytes(*where, lookup.ACCEPTED_FILE, data=_json(accepted))
         verified_store.write_bytes(*where, REVIEW_FILE, data=review_text)
         verified_store.write_bytes(*where, SUGGESTION_FILE, data=_json(suggestion))
+        for container in containers.values():
+            container.store(verified_store)
+        verified_store.write_json(*where, CONTAINERS_FILE, data={
+            "$schema": CONTAINERS_SCHEMA,
+            "containers": {d: c.manifest.to_json() for d, c in sorted(containers.items())},
+        })
         record.add(acceptance)
         records.save_environment(verified_store, record)
     return acceptance

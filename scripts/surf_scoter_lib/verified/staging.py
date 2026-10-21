@@ -18,6 +18,7 @@ docs/contributors/projects-v1.md, step 16.
 import datetime
 import os
 import re
+import shutil
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,7 @@ from pathlib import Path
 from .. import jdata
 from ..err import VerifiedStoreErr
 from ..user_config import CURRENT_PROJECT_SETUP, UserConfig
-from . import lookup, records, snapshot, store
+from . import accept, lookup, records, snapshot, store
 
 STAGED_PROJECT = "project"
 DOCKERFILE = "Dockerfile"
@@ -53,6 +54,7 @@ class Accepted:
     store: store.VerifiedStore
     acceptance: records.Acceptance
     manifest: snapshot.Manifest
+    env_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,7 +92,7 @@ def find_accepted(config: UserConfig, now: datetime.datetime) -> Accepted | None
         raise StagingErr(f"your acceptance of this project's settings ({found.id}) has expired")
     if found.suggestion is None:
         raise StagingErr(f"your acceptance ({found.id}) has no copy of the project's files to build from")
-    return Accepted(verified_store, found, found.suggestion)
+    return Accepted(verified_store, found, found.suggestion, env_id)
 
 
 def stage(config: UserConfig, accepted: Accepted, dest: Path) -> Path:
@@ -161,13 +163,67 @@ def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> 
     return BuildPlan(dev_path, parents)
 
 
-def apply_images(plan: BuildPlan, staged_project: Path, images: Mapping[str, str]) -> list[Path]:
+def stage_containers(
+    config: UserConfig, accepted: Accepted, plan: BuildPlan, dest: Path,
+) -> BuildPlan:
+    """The build's other containers, staged in `dest` where they need to be.
+
+    * Each `dev-containers-verified` container the build uses is restored
+      from the copy kept with the acceptance (`accept.CONTAINERS_FILE`), so
+      it's built as it was accepted, not as it is now.
+    * The user's own container (`use: {name}`), trusted as their setup is,
+      builds from where it is, unless the acceptance's `images` change a
+      `FROM`: then from a copy, which they're applied to.
+    """
+    roots = lookup.verified_roots(config)
+    stored: dict[str, snapshot.Manifest] | None = None
+    count = 0
+
+    def place(directory: Path) -> Path:
+        nonlocal stored, count
+        real = Path(os.path.realpath(directory))
+        if not any(real.is_relative_to(root) for root in roots):
+            return directory
+        if stored is None:
+            data = accepted.store.read_json(
+                accepted.env_id, records.ACCEPTANCES_DIR, accepted.acceptance.id, accept.CONTAINERS_FILE,
+                schema=accept.CONTAINERS_SCHEMA,
+            )
+            if data is None:
+                raise StagingErr(
+                    f"your acceptance ({accepted.acceptance.id}) was made before the containers in "
+                    "`dev-containers-verified` were kept with it"
+                )
+            stored = {
+                str(key[-1]): snapshot.Manifest.from_json(jdata.req_dict(data, *key))
+                for key in jdata.find_dict_keys(data, "containers")
+            }
+        manifest = stored.get(str(real))
+        if manifest is None:
+            raise StagingErr(f"{real}: isn't among the containers your acceptance kept")
+        count += 1
+        target = dest / "containers" / str(count)
+        target.mkdir(mode=0o700, parents=True)
+        snapshot.restore(accepted.store, manifest, target, lookup.limits(config))
+        return target
+
+    parents = [(tag, place(directory)) for tag, directory in plan.parents]
+    dev_container = place(plan.dev_container)
+    images = {k: v for k, v in config.accepted_images().items() if k != v}
+    if config.accepted_container_name() is not None and dev_container == plan.dev_container and images:
+        copy = dest / "user-container"
+        shutil.copytree(plan.dev_container, copy, symlinks=True)
+        dev_container = copy
+    return BuildPlan(dev_container, parents)
+
+
+def apply_images(plan: BuildPlan, staged_root: Path, images: Mapping[str, str]) -> list[Path]:
     """Rewrite the staged Dockerfiles' `FROM`s with `images`; the Dockerfiles changed.
 
-    Only the copy's are rewritten: a directory outside it (the user's own
-    container) is left as it is.
+    Only the staged copies (under `staged_root`) are rewritten: a directory
+    built from where it is is left as it is.
     """
-    staged = Path(os.path.realpath(staged_project))
+    staged = Path(os.path.realpath(staged_root))
     local = [tag for tag, _ in plan.parents]
     changed: list[Path] = []
     for directory in [*(d for _, d in plan.parents), plan.dev_container]:
@@ -269,7 +325,6 @@ def prepare(
         raise StagingErr(
             "The accepted copy of the project's files can't be read: " + "; ".join(problems)
         )
-    plan = build_plan(config, UserConfig(staged), staged_project)
-    if config.accepted_container_name() is None:
-        apply_images(plan, staged_project, config.accepted_images())
+    plan = stage_containers(config, accepted, build_plan(config, UserConfig(staged), staged_project), dest)
+    apply_images(plan, dest, config.accepted_images())
     return plan

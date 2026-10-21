@@ -419,7 +419,7 @@ git-vcs:
 # Default for no vcs - stored as simple files.
 # TODO create a "file vcs" python script in the install directory to handle these mechanisms.
 #      That should help make this safer.  Also, it will make cross platform (e.g. Windows)
-#      support easier.  It also leads to allowing an ignore-file.
+#      support easier.  It also leads to allowing an ignore-file.  See ticket #23.
 file-vcs:
     programs:
         cp: cp

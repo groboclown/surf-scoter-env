@@ -159,6 +159,19 @@ class BuildTest(unittest.TestCase):
         self.assertIn("#scoter: Your setup's host command checks: none removed, replaced or overridden.", build([]))
         self.assertFalse(any("host command checks" in line for line in build(None)))
 
+    def test_image_through_an_arg(self) -> None:
+        """A `FROM` naming its image through an `ARG` is noted: `images` can't map it."""
+        (self.project / ".surf-scoter.d" / "env" / "Dockerfile").write_text(
+            "ARG BASE=debian:bookworm\nFROM ${BASE}\n", encoding="utf-8",
+        )
+        lines = self.build().splitlines()
+        self.assertIn(
+            "  #scoter: note: env/Dockerfile builds `FROM ${BASE}`, an image named through an `ARG`: "
+            "`images` can't map it, as it isn't known until the build.",
+            lines,
+        )
+        self.assertIn("  images: {}", lines)
+
     def test_values_cant_pose_as_comments(self) -> None:
         """A newline in a value stays inside its quotes, on one line."""
         text = self.build()

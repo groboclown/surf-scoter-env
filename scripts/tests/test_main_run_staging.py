@@ -176,6 +176,62 @@ class PrepareTest(DistTest):
         self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM debian:trixie\n")
         self.assertEqual((self.files / "env" / "Dockerfile").read_text(), "FROM debian:bookworm\n")
 
+    def verified_parent(self) -> None:
+        """The project's container builds on `base`, one of the user's, which their setup verifies."""
+        (self.mine / "base").mkdir()
+        (self.mine / "base" / "Dockerfile").write_text("FROM debian:bookworm\n", encoding="utf-8")
+        (self.mine / "base" / "dev-env.yaml").write_text(self.dev_env_yaml, encoding="utf-8")
+        (self.files / "env" / "Dockerfile").write_text("FROM my-base\n", encoding="utf-8")
+        (self.files / "env" / "dev-env.yaml").write_text(
+            "parents:\n  - {name: base, tag: my-base}\n", encoding="utf-8",
+        )
+        setup = self.home / "setup.yaml"
+        setup.write_text(
+            setup.read_text(encoding="utf-8")
+            + f"    dev-containers-verified:\n      - {json.dumps(str(self.mine))}\n",
+            encoding="utf-8",
+        )
+        # The later runs start from the first one's setup: make it again.
+        self.generate("--distribution-dir", str(self.dist), output=self.tmp / "first.json")
+
+    def test_verified_container_as_accepted(self) -> None:
+        """A `dev-containers-verified` container builds from the copy kept with the acceptance."""
+        self.verified_parent()
+        accepted = self.accept()
+        kept = json.loads((accepted.parent / "containers.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(kept["containers"]), [str(self.mine / "base")])
+        # It changes after the acceptance: the build still has what was accepted.
+        (self.mine / "base" / "Dockerfile").write_text("FROM evil\n", encoding="utf-8")
+        plan, build = self.prepare(self.project_suc(accepted))
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        [(tag, parent)] = plan.parents
+        self.assertEqual(tag, "my-base")
+        self.assertTrue(parent.is_relative_to(build))
+        self.assertEqual((parent / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
+    def test_verified_container_not_kept(self) -> None:
+        """An acceptance from before the containers were kept with it: a new review."""
+        self.verified_parent()
+        accepted = self.accept()
+        (accepted.parent / "containers.json").unlink()
+        with self.assertRaisesRegex(staging.StagingErr, "were kept with it") as caught:
+            self.prepare(self.project_suc(accepted))
+        self.assertTrue(caught.exception.reverify)
+
+    def test_users_container_with_images(self) -> None:
+        """`use: {name}` with an `images` mapping: built from a copy, rewritten; the user's own is left."""
+        (self.mine / "my-env").mkdir()
+        (self.mine / "my-env" / "Dockerfile").write_text("FROM debian:bookworm\n", encoding="utf-8")
+        (self.mine / "my-env" / "dev-env.yaml").write_text(self.dev_env_yaml, encoding="utf-8")
+        accepted = self.accept(lambda text: text.replace(
+            'use: "project"', 'use: {name: "my-env"}',
+        ).replace('"debian:bookworm": "debian:bookworm"', '"debian:bookworm": "debian:trixie"'))
+        plan, build = self.prepare(self.project_suc(accepted))
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(plan.dev_container.is_relative_to(build))
+        self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM debian:trixie\n")
+        self.assertEqual((self.mine / "my-env" / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
     def test_users_container(self) -> None:
         """`use: {name}`: the user's own container, where it is; the project's isn't built."""
         (self.mine / "my-env").mkdir()
