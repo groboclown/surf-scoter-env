@@ -293,3 +293,42 @@ class RunToEndTest(unittest.TestCase):
         """The command's exit code."""
         self.assertEqual(scoter.run_to_end([sys.executable, "-c", "import sys; sys.exit(4)"]), 4)
 
+
+
+class SetupWithoutProjectNamesTest(unittest.TestCase):
+    """Test a setup that doesn't say how to find a project."""
+
+    def test_warning(self) -> None:
+        """No project is looked for, with a warning naming the setup file it expected."""
+        settings: scoter.DictJsonData = {
+            "resolved": {"scoter": {"values": {}}},
+            "active-config-locations": {"distribution-dir": "/opt/scoter"},
+            "loaded-from": {"user-setup-file": []},
+        }
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            found = scoter.find_project_dir(settings, Path("/nonexistent/start"), None)
+        self.assertIsNone(found)
+        self.assertIn("/opt/scoter/setup.yaml", err.getvalue())
+
+
+class HelpTest(unittest.TestCase):
+    """Test that `help` doesn't need a project."""
+
+    def test_help_skips_the_project(self) -> None:
+        """`help` loads the setup alone; other commands look for the project."""
+        seen: list[bool] = []
+
+        def fake_load(args: object, *, with_project: bool = True) -> scoter.DictJsonData:
+            seen.append(with_project)
+            raise scoter.ConfigErr("stop here")
+
+        original = scoter.load_config
+        scoter.load_config = fake_load  # type: ignore[assignment]
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                scoter.main(["scoter", "help"])
+                scoter.main(["scoter", "verify"])
+        finally:
+            scoter.load_config = original  # type: ignore[assignment]
+        self.assertEqual(seen, [False, True])

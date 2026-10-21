@@ -40,12 +40,16 @@ class ConfigErr(Exception):
     """A problem with the configuration file or arguments that control it."""
 
 
-def load_config(args: argparse.Namespace) -> DictJsonData:
-    """Load the SUC based on the arguments."""
+def load_config(args: argparse.Namespace, *, with_project: bool = True) -> DictJsonData:
+    """Load the SUC based on the arguments.
+
+    Without `with_project`, only the setup is loaded: for commands, such as
+    `help`, that don't need a project.
+    """
     bin_dir = args.bin_dir
     distribution_dir = args.distribution_dir
 
-    dist_dir = require_global_config_path(distribution_dir)
+    dist_dir = require_global_dist_dir(distribution_dir)
     resolved_bin_dir = find_bin_dir(bin_dir, dist_dir)
     # Phase 1: the setup alone, which says how to find the project.
     settings = generate_config(
@@ -57,6 +61,9 @@ def load_config(args: argparse.Namespace) -> DictJsonData:
         universal_file=None,
         no_setup_search=False,
     )
+
+    if not with_project:
+        return settings
 
     # Look from `--project-dir`, or the current directory, up to the root of
     # the repository holding it.
@@ -172,13 +179,24 @@ def find_project_dir(
     tried, up to and including `vcs_root`; never above it, so a project
     planted above the repository isn't found.  Without a VCS root, only
     `start` is tried.
+
+    When the setup doesn't name the project files directory and file, no
+    project can be found: that's a warning, not an error, so commands that
+    don't need a project (`user-setup`, say) still run.
     """
     files_dir = _opt_lookup(settings, "resolved", "scoter", "values", "project-files-dir")
     file_name = _opt_lookup(settings, "resolved", "scoter", "values", "project-file-name")
     if not isinstance(files_dir, str) or not isinstance(file_name, str):
-        raise ConfigErr(
-            "Required scoter/values/project-files-dir and project-file-name in the configuration."
+        distribution = _opt_lookup(settings, "active-config-locations", "distribution-dir")
+        read = _opt_lookup(settings, "loaded-from", "user-setup-file")
+        print(
+            "Warning: no setup file sets the `scoter` section's `values: project-files-dir` "
+            "and `project-file-name`, which say how to find a project, so none is looked for.  "
+            f"The distribution's setup file normally does: is there one at {distribution}/setup.yaml?  "
+            f"(Setup files read: {read or 'none'}.)  Did you remember to run 'scoter user-setup'?",
+            file=sys.stderr,
         )
+        return None
     real_start = Path(os.path.realpath(start))
     dirs = [real_start]
     if vcs_root is not None:
@@ -323,7 +341,7 @@ def remove_tmp(file: str) -> None:
     shutil.rmtree(os.path.dirname(file), ignore_errors=True)
 
 
-def require_global_config_path(distribution_dir: str | None) -> Path:
+def require_global_dist_dir(distribution_dir: str | None) -> Path:
     """Find where the OS installed the global configuration path.
     
     This can come from the user supplied argument.  That's common for a
@@ -353,7 +371,7 @@ def require_global_config_path(distribution_dir: str | None) -> Path:
     raise ConfigErr(
         "Could not find the Surf Scoter distribution directory.  "
         "You will need to pass it with the '--distribution-dir=PATH' argument."
-)
+    )
 
 
 def find_bin_dir(bin_dir: str | None, dist_dir: Path) -> Path:
@@ -560,8 +578,6 @@ def run_sub_command(
         bin_dir = _dist_bin_dir(config)
     cmd_file = bin_dir / (SUB_CMD_PREFIX + argv[0].replace("-", "_") + SUB_CMD_SUFFIX)
     if not cmd_file.is_file():
-        print(f"Unknown command '{argv[0]}'.", file=sys.stderr)
-        print("Run with 'help' for a full list of commands.", file=sys.stderr)
         return 1
 
     # Checked before the configuration is saved, so a problem leaves no file.
@@ -673,7 +689,8 @@ def main(argv: Sequence[str]) -> int:
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        config = load_config(args)
+        # `help` lists the sub-commands, which needs the setup, not a project.
+        config = load_config(args, with_project=args.cmd not in (None, "help"))
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1

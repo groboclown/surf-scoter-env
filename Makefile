@@ -54,12 +54,6 @@ lint:
 dev-install:
 
 # ---------------------------------------------------------------------
-## dev-prep                  Prepare this directory for running the scoter tool from here.
-##                           Set the --distribution-dir= argument to this current directory.
-.PHONY: dev-prep
-dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug self-host-install
-
-# ---------------------------------------------------------------------
 # Running Surf Scoter on itself.  See CONTRIBUTORS.md.
 
 SELF_HOST_REF ?= main
@@ -249,17 +243,17 @@ python-bandit:
 # ---------------------------------------------------------------------
 # Installation tasks
 
-## mk-installer              Create the installation zip file.
-.PHONY: mk-installer
-mk-installer:
+## installer                 Create the installation zip file.
+.PHONY: installer
+installer:
 
 # TODO come up with an approach to handle all platforms,
 # rather than a onsey-twosy.
 
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
-mk-installer: mk-installer-x86_64-unknown-linux-gnu
+installer: mk-installer-x86_64-unknown-linux-gnu
 mk-installer-x86_64-unknown-linux-gnu: host-build-release-x86_64-unknown-linux-gnu
-	build-scripts/mk-install.sh x86_64-unknown-linux-gnu
+	bash -x build-scripts/mk-install.sh target/surf-scoter-x86_64-unknown-linux-gnu-1.0.0 x86_64-unknown-linux-gnu
 
 ## installer-clean           Clean the installation build generated files.
 .PHONY: installer-clean
