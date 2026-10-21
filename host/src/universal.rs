@@ -29,6 +29,7 @@ use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
 use crate::config::host_commands::{self, Combined};
+use crate::config::simple_checks::{EGRESS_HOSTS, PROJECT_FILES, SimpleCheck};
 use crate::config::system::{self, LoadedFrom, ScalarValue, SectionDefaults, SetupRecord};
 use crate::config::{ConfigError, ConfigErrors, FullConfig, child_key, index_key};
 
@@ -141,6 +142,58 @@ pub struct UniversalSection {
     pub value_lists: BTreeMap<String, Option<Vec<String>>>,
     /// Plain values, by key.
     pub values: BTreeMap<String, ScalarValue>,
+    /// The `project-files` and `egress-hosts` checks, as written, by key.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_files: BTreeMap<String, SimpleCheck>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress_hosts: BTreeMap<String, SimpleCheck>,
+}
+
+/// The problems with the `project-files` and `egress-hosts` checks' overrides,
+/// which no one file can tell: each must name a check of the same group that
+/// is set, and that isn't an override itself.
+fn simple_check_problems(
+    system: &crate::config::system::SystemConfig,
+    resolved: &BTreeMap<String, UniversalSection>,
+) -> Vec<ConfigError> {
+    let mut errors = Vec::new();
+    for group in [PROJECT_FILES, EGRESS_HOSTS] {
+        let checks: BTreeMap<String, (&str, &str, &SimpleCheck)> = resolved
+            .iter()
+            .flat_map(|(name, section)| {
+                let checks = if group == EGRESS_HOSTS {
+                    &section.egress_hosts
+                } else {
+                    &section.project_files
+                };
+                checks.iter().map(move |(key, check)| {
+                    (
+                        format!("{name}:{key}"),
+                        (name.as_str(), key.as_str(), check),
+                    )
+                })
+            })
+            .collect();
+        for (name, key, check) in checks.values() {
+            for (i, target) in check.overrides.iter().enumerate() {
+                let problem = match checks.get(target) {
+                    None => Some(format!("`{target}` isn't one of the `{group}` checks set")),
+                    Some((_, _, overridden)) if !overridden.overrides.is_empty() => Some(format!(
+                        "`{target}` is an override itself; override the check it overrides"
+                    )),
+                    Some(_) => None,
+                };
+                if let Some(message) = problem {
+                    errors.push(ConfigError::new(
+                        system.check_file(name, group, key),
+                        &format!("{name}.{group}.{key}.overrides[{i}]"),
+                        message,
+                    ));
+                }
+            }
+        }
+    }
+    errors
 }
 
 /// Gather the universal configuration from a loaded configuration.
@@ -182,6 +235,8 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                         path_lists,
                         value_lists: section.value_lists.clone(),
                         values: section.values.clone(),
+                        project_files: section.project_files.clone(),
+                        egress_hosts: section.egress_hosts.clone(),
                     },
                 );
                 sections.push(section);
@@ -192,6 +247,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     let host_command_checks = host_commands::combine(system, &sections)
         .map_err(|e| errors.extend(e))
         .unwrap_or_default();
+    errors.extend(simple_check_problems(system, &resolved));
 
     // Only the accepted commands run, as accepted: never the project file's.
     let host_brokered = config
@@ -498,6 +554,8 @@ mod tests {
                 path_lists: BTreeMap::new(),
                 value_lists: BTreeMap::new(),
                 values: BTreeMap::new(),
+                project_files: BTreeMap::new(),
+                egress_hosts: BTreeMap::new(),
             }
         };
         let ssh_config = p(&dir.path().join("proj/ssh/config"));
@@ -1184,13 +1242,70 @@ mod tests {
             scoter_home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        let errors = error_texts(load_all_with_env(&options, env).unwrap_err());
+        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
         assert_eq!(
             errors,
             [
-                "egress[0].host: '*.github.io' would allow every name under `github.io`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+                "egress[0].host: '*.github.io' would allow every name under `github.io`, where anyone can have one (your setup's `verification: value-lists: egress-refused-wildcards`)"
             ]
         );
+
+        // The Public Suffix List files the setup names: a wildcard on a public
+        // suffix is refused, but not on an exception to a wildcard rule.
+        dir.write("psl.dat", "// A sample.\nexample.com\n*.ck\n!www.ck\n");
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\negress:\n  - {host: '*.example.com', protocol: tls}\n  - {host: '*.a.ck', protocol: tls}\n  - {host: '*.www.ck', protocol: tls}\n",
+        );
+        let with_list = |list: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!(
+                    "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  path-lists:\n    public-suffix-lists: ['{list}']\n"
+                ),
+            );
+            load_all_with_env(&options, env.clone())
+        };
+        let psl = dir.path().join("psl.dat").display().to_string();
+        assert_eq!(
+            error_texts(with_list(&psl).unwrap_err()),
+            [
+                "egress[0].host: '*.example.com' would allow every name under `example.com`, where anyone can have one (a public suffix, in your setup's `verification: path-lists: public-suffix-lists`)",
+                "egress[1].host: '*.a.ck' would allow every name under `a.ck`, where anyone can have one (a public suffix, in your setup's `verification: path-lists: public-suffix-lists`)",
+            ]
+        );
+        // A file that isn't there is an error, not a list with nothing in it.
+        let errors = error_texts(with_list("/no/such/psl.dat").unwrap_err());
+        assert!(
+            errors[0].contains("https://publicsuffix.org/list/public_suffix_list.dat"),
+            "{errors:?}"
+        );
+
+        // A wildcard typed in the review is refused the same way.
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        let review = dir.write(
+            "review.yaml",
+            &format!(
+                "review: \"surf-scoter-review-1\"\nproject-dir: \"{}\"\nexpires-at: \"2999-01-01T00:00:00Z\"\negress:\n  - {{host: \"*.example.com\", protocol: \"tls\"}}\n",
+                dir.path().join("proj").display()
+            ),
+        );
+        let reviewed = LoadOptions {
+            review: Some(review),
+            ..options.clone()
+        };
+        dir.write(
+            "home/setup.yaml",
+            &format!("scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  path-lists:\n    public-suffix-lists: ['{psl}']\n"),
+        );
+        let errors = error_texts(load_all_with_env(&reviewed, env).unwrap_err());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with(
+            "egress[0].host: '*.example.com' would allow every name under `example.com`"
+        ));
     }
 
     // ---- accepted settings ----
@@ -1416,6 +1531,83 @@ mod tests {
             check(before),
             ["active-config-locations.dev-container-path: the dev container directory is gone"]
         );
+    }
+
+    // ---- project-files and egress-hosts checks ----
+
+    #[test]
+    fn simple_checks() {
+        let dir = TempDir::new();
+        dir.write(
+            "dist/setup.yaml",
+            concat!(
+                "verification:\n",
+                "  project-files:\n",
+                "    secrets: {action: warn, reason: secrets, patterns: [.env, .aws/]}\n",
+                "    keys: {action: refuse, reason: keys, patterns: ['*.pem']}\n",
+                "  egress-hosts:\n",
+                "    code-hosts: {action: warn, reason: uploads, hosts: [github.com, '*.githubusercontent.com']}\n",
+            ),
+        );
+        let load = |user: &str| {
+            dir.write("home/setup.yaml", user);
+            let options = LoadOptions {
+                distribution_dir: Some(dir.path().join("dist")),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_all_with_env(&options, env).and_then(|config| build(&config))
+        };
+        // The user's file replaces one, removes another, and relaxes a third for one host.
+        let universal = load(concat!(
+            "verification:\n",
+            "  project-files:\n",
+            "    secrets: {action: refuse, reason: mine, patterns: [.env]}\n",
+            "    keys: null\n",
+            "  egress-hosts:\n",
+            "    our-git: {action: allow, reason: ours, hosts: [github.com], overrides: ['verification:code-hosts']}\n",
+        ))
+        .unwrap();
+        let section = &universal.resolved["verification"];
+        assert_eq!(
+            section.project_files.keys().collect::<Vec<_>>(),
+            ["secrets"]
+        );
+        assert_eq!(section.project_files["secrets"].patterns, [".env"]);
+        assert_eq!(
+            section.egress_hosts.keys().collect::<Vec<_>>(),
+            ["code-hosts", "our-git"]
+        );
+        let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
+        assert_eq!(
+            json["resolved"]["verification"]["egress-hosts"]["our-git"]["overrides"][0],
+            "verification:code-hosts"
+        );
+        // Other sections have none, and the file says nothing of them.
+        assert!(json["resolved"]["scoter"].get("project-files").is_none());
+        // Overrides must name a check of the same group that's set, and not an override.
+        let errors = error_texts(
+            load(concat!(
+                "verification:\n",
+                "  egress-hosts:\n",
+                "    a: {action: allow, reason: r, hosts: [x.example.com], overrides: ['verification:secrets']}\n",
+                "    b: {action: allow, reason: r, hosts: [github.com], overrides: ['verification:code-hosts']}\n",
+                "    c: {action: allow, reason: r, hosts: [github.com], overrides: ['verification:b']}\n",
+            ))
+            .unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            [
+                "verification.egress-hosts.a.overrides[0]: `verification:secrets` isn't one of the `egress-hosts` checks set",
+                "verification.egress-hosts.c.overrides[0]: `verification:b` is an override itself; override the check it overrides",
+            ]
+        );
+        // A reference to one is an error.
+        assert!(load("other:\n  values:\n    x: ${verification:code-hosts}\n").is_err());
     }
 
     // ---- the project's id and branch ----

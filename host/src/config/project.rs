@@ -508,25 +508,36 @@ impl ProjectConfig {
     /// The `egress` rules whose wildcard is on one of `refused` (the setup's
     /// `scoter: value-lists: egress-refused-wildcards`: public suffixes and
     /// shared hosting, where `*.` would allow names anyone can register).
-    pub fn wildcard_problems(&self, refused: &[String]) -> Vec<ConfigError> {
-        self.egress
-            .iter()
-            .enumerate()
-            .filter_map(|(i, rule)| {
-                let domain = rule.wildcard_domain()?;
-                refused.iter().any(|r| r == domain).then(|| {
-                    ConfigError::new(
-                        Some(&self.path),
-                        &format!("{}.host", index_key("egress", i)),
-                        format!(
-                            "'{}' would allow every name under `{domain}`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)",
-                            rule.host
-                        ),
-                    )
-                })
-            })
-            .collect()
+    /// The egress wildcards on a domain `refused` gives a reason for (see
+    /// `config::RefusedWildcards`).
+    pub fn wildcard_problems(&self, refused: &dyn Fn(&str) -> Option<String>) -> Vec<ConfigError> {
+        wildcard_errors(
+            &self.path,
+            self.egress.iter().map(|rule| rule.host.as_str()),
+            refused,
+        )
     }
+}
+
+/// The errors for egress hosts (`egress[i].host` in `file`) that are a
+/// wildcard on a domain `refused` gives a reason for.
+pub fn wildcard_errors<'a>(
+    file: &Path,
+    hosts: impl Iterator<Item = &'a str>,
+    refused: &dyn Fn(&str) -> Option<String>,
+) -> Vec<ConfigError> {
+    hosts
+        .enumerate()
+        .filter_map(|(i, host)| {
+            let domain = host.strip_prefix("*.")?;
+            let why = refused(domain)?;
+            Some(ConfigError::new(
+                Some(file),
+                &format!("{}.host", index_key("egress", i)),
+                format!("'{host}' would allow every name under `{domain}`, where anyone can have one ({why})"),
+            ))
+        })
+        .collect()
 }
 
 fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option<ContainerRef> {
@@ -1298,7 +1309,7 @@ mod tests {
         assert_eq!(config.egress.len(), 2);
         let refused = |list: &[&str]| -> Vec<String> {
             config
-                .wildcard_problems(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .wildcard_problems(&|domain| list.contains(&domain).then(|| "refused".to_string()))
                 .into_iter()
                 .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
                 .collect()
@@ -1307,7 +1318,7 @@ mod tests {
         assert_eq!(
             refused(&["github.io", "pkg.dev"]),
             [
-                "egress[0].host: '*.pkg.dev' would allow every name under `pkg.dev`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+                "egress[0].host: '*.pkg.dev' would allow every name under `pkg.dev`, where anyone can have one (refused)"
             ]
         );
         let errors = parse_text(&format!(

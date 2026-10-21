@@ -32,7 +32,8 @@ class _Project(unittest.TestCase):
         self.host_checks: dict[str, jdata.JsonData] = {}
         self.command_map: dict[str, jdata.JsonData] = {}
         self.egress: list[jdata.JsonData] = []
-        self.value_lists: dict[str, jdata.JsonData] = {}
+        self.project_files: dict[str, jdata.JsonData] = {}
+        self.egress_hosts: dict[str, jdata.JsonData] = {}
 
     def write(self, rel: str, text: str, mode: int = 0o644) -> Path:
         path = self.tmp / rel
@@ -60,7 +61,7 @@ class _Project(unittest.TestCase):
                 "scoter": {
                     "values": {"project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml"},
                 },
-                "verification": {"value-lists": self.value_lists},
+                "verification": {"project-files": self.project_files, "egress-hosts": self.egress_hosts},
             },
             "current-project-setup": {"commands": self.commands, "egress": self.egress},
             "host-command-checks": {"checks": self.host_checks, "command-map": self.command_map},
@@ -277,9 +278,12 @@ class ProgramPathsTest(_Project):
 class EgressTest(_Project):
     """Test the egress rules."""
 
+    def host_check(self, name: str, action: str, hosts: list[str], **extra: jdata.JsonData) -> None:
+        self.egress_hosts[name] = {"action": action, "reason": f"because {name}", "hosts": hosts, **extra}
+
     def test_http_and_data_out(self) -> None:
-        """Plain `http`, and hosts anyone can upload to (exactly, or under a wildcard)."""
-        self.value_lists["egress-data-out-hosts"] = ["github.com", "*.githubusercontent.com"]
+        """Plain `http`, and the `egress-hosts` checks (a host exactly, or under a wildcard)."""
+        self.host_check("code-hosts", "warn", ["github.com", "*.githubusercontent.com"])
         self.egress = [
             {"host": "mirror.example.com", "protocol": "http"},
             {"host": "github.com", "protocol": "tls"},
@@ -287,18 +291,52 @@ class EgressTest(_Project):
             {"host": "*.github.com", "protocol": "tls"},
             {"host": "registry.npmjs.org", "protocol": "tls"},
         ]
-        keys = [(key, message.split(" ")[0]) for _, key, message in self.found(Severity.WARN)]
+        found = [(key, message) for _, key, message in self.found(Severity.WARN)]
+        self.assertEqual([k for k, _ in found], ["egress[0]", "egress[1]", "egress[2]"])
+        self.assertEqual(found[1][1], "`github.com` (`github.com`): because code-hosts")
         self.assertEqual(
-            keys,
-            [
-                ("egress[0]", "`mirror.example.com`"),
-                ("egress[1]", "`github.com`"),
-                ("egress[2]", "`raw.githubusercontent.com`"),
-            ],
+            found[2][1], "`raw.githubusercontent.com` (`*.githubusercontent.com`): because code-hosts",
         )
         # A wildcard rule that covers a listed host warns too.
-        self.value_lists["egress-data-out-hosts"] = ["gist.github.com"]
+        self.host_check("code-hosts", "warn", ["gist.github.com"])
         self.assertEqual([k for _, k, _ in self.found(Severity.WARN)], ["egress[0]", "egress[3]"])
+
+    def test_actions_and_overrides(self) -> None:
+        """The action decides the severity; each check that counts is shown; an override
+        takes the place of the checks it names, for the hosts it matches."""
+        self.host_check("code-hosts", "warn", ["github.com", "gitlab.com"])
+        self.host_check("forbidden", "refuse", ["github.com", "pastebin.com"])
+        self.egress = [
+            {"host": "github.com", "protocol": "tls"},
+            {"host": "gitlab.com", "protocol": "tls"},
+            {"host": "pastebin.com", "protocol": "tls"},
+        ]
+        found = [(s, k, f.checks) for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings
+                 for s, k in [(str(f.severity), f.key)] if k.startswith("egress")]
+        self.assertEqual(found, [
+            ("refuse", "egress[0]", ("verification:forbidden",)),
+            ("warn", "egress[0]", ("verification:code-hosts",)),
+            ("warn", "egress[1]", ("verification:code-hosts",)),
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+        ])
+        # Ours: allowed for github.com only, and only in place of `code-hosts`.
+        self.host_check("our-git", "allow", ["github.com"], overrides=["verification:code-hosts"])
+        found = [(str(f.severity), f.key, f.checks)
+                 for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings
+                 if f.key.startswith("egress")]
+        self.assertEqual(found, [
+            ("refuse", "egress[0]", ("verification:forbidden",)),
+            ("note", "egress[0]", ("verification:our-git",)),
+            ("warn", "egress[1]", ("verification:code-hosts",)),
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+        ])
+        # An override of a check that doesn't match does nothing.
+        self.host_check("our-git", "allow", ["pastebin.com"], overrides=["verification:code-hosts"])
+        self.assertIn(
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+            [(str(f.severity), f.key, f.checks)
+             for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings],
+        )
 
 
 @unittest.skipUnless(POSIX, "symlinks and FIFOs")
@@ -306,8 +344,10 @@ class ProjectFilesTest(_Project):
     """Test the container directories."""
 
     def test_symlink_and_secrets(self) -> None:
-        """A symlink is refused; a secret-looking file warns."""
-        self.value_lists["secret-file-patterns"] = [".env", ".aws/"]
+        """A symlink is refused; a secret-looking file is as its check says."""
+        self.project_files["secret-files"] = {"action": "warn", "reason": "secrets", "patterns": [".env", ".aws/"]}
+        self.project_files["keys"] = {"action": "refuse", "reason": "keys", "patterns": ["*.pem"]}
+        self.write("proj/.surf-scoter.d/env/id.pem", "x\n")
         os.symlink(self.tmp / "elsewhere", self.project / ".surf-scoter.d" / "env" / "creds")
         self.write("proj/.surf-scoter.d/env/.env", "TOKEN=x\n")
         (self.project / ".surf-scoter.d" / "env" / ".aws").mkdir()
@@ -315,6 +355,7 @@ class ProjectFilesTest(_Project):
         self.assertIn(("refuse", "env/creds"), [(s, k) for s, k, _ in found])
         warned = sorted(k for s, k, _ in found if s == "warn")
         self.assertEqual(warned, ["env/.aws", "env/.env"])
+        self.assertIn(("refuse", "env/id.pem", "keys (`*.pem`)"), found)
 
     def test_hard_links_and_fifos(self) -> None:
         """Hard links and special files in a container directory are refused."""
@@ -409,6 +450,26 @@ class ReviewTest(_Project):
             if f.key.startswith(f"commands[{index}]") and (f.checks or "$override" in f.key
                                                           or "isn't on this computer" in f.message)
         ]
+
+    def test_egress_refusal_and_override(self) -> None:
+        """An `egress-hosts` refusal is a policy refusal: the review's `$override` sets it aside."""
+        self.egress_hosts["forbidden"] = {"action": "refuse", "reason": "no", "hosts": ["pastebin.com"]}
+        egress = [{"host": "pastebin.com", "protocol": "tls", "port": 443, "methods": []}]
+
+        def egress_findings(overrides: list[jdata.JsonData]) -> list[tuple[str, str]]:
+            suc = self.suc()
+            suc["review"] = {"result": "accept", "accepted": {
+                "commands": [], "egress": egress,
+                "dev-container": {"use": self.use, "images": {}},
+                "overrides": {"commands": [], "egress": overrides},
+            }}
+            return [(str(f.severity), f.message) for f in checks.check_review(UserConfig(suc), self.path_env).findings
+                    if f.key.startswith("egress")]
+
+        self.assertEqual(egress_findings([]), [("refuse", "`pastebin.com` (`pastebin.com`): no")])
+        found = egress_findings([{"index": 0, "checks": ["verification:forbidden"]}])
+        self.assertEqual([s for s, _ in found], ["note"])
+        self.assertIn("You overrode `verification:forbidden`", found[0][1])
 
     def test_policy_refusal_and_override(self) -> None:
         """Refused without an override; a note with one naming the refusing check."""

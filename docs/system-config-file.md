@@ -199,8 +199,9 @@ The tools use these sections:
     * `host-commands`: every [host command check](#host-command-checks): shells, interpreters, programs that run other programs, options and environment variables that run code, version manager shims, and the `docker` command (mapped to the `docker` section's program).  Keeping them in one section means none is missed by being somewhere else.
     * `paths: store`: where your acceptances are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
     * `path-lists: verified-containers`: the `scoter: path-lists: dev-containers-search` directories whose containers are reviewed like a project's own: kept in the store with each acceptance, and built from that copy.  The others (such as the distribution's `containers`) are trusted as part of your installation.  Empty by default; add `${scoter:distribution-dir}/containers` to review the distribution's containers too.
-    * `value-lists: secret-file-patterns`: names of files (and, ending in `/`, directories) that look like secrets, such as `.env`, `*.pem` or `.aws/`.  The review warns about each in a project's container directories, as everything there goes into the image.  Patterns use `*`, `?` and `[...]`, matched against each name.
-    * `value-lists: egress-data-out-hosts`: hosts anyone can upload to (code hosts, paste sites, object storage, tunnels, webhooks, file sharing), as host names or `*.` and a domain.  The review warns about an egress rule that reaches one: it lets the container send data out, whatever the other rules say.
+    * `project-files`: checks on the files in a project's container directories, as [project file and egress host checks](#project-file-and-egress-host-checks).  The distribution's `secret-files` warns about names that look like secrets, such as `.env`, `*.pem` or `.aws/`, as everything in a container directory goes into the image.
+    * `egress-hosts`: checks on the hosts a project's egress rules reach, the same way.  The distribution's warn about hosts anyone can upload to (`code-hosts`, `paste-sites`, `object-storage`, `user-content`, `webhooks`, `file-sharing`): a rule that reaches one lets the container send data out, whatever the other rules say.
+    * `path-lists: public-suffix-lists`: [Public Suffix List](https://publicsuffix.org/) files: a project's egress rule can't allow every subdomain (`*.DOMAIN`) of a public suffix, where anyone can have a name.  None by default.  To use the published list, download it (`curl -o ~/.config/surf-scoter.d/public_suffix_list.dat https://publicsuffix.org/list/public_suffix_list.dat`), name the file here, and refresh it now and then.  Its plain, wildcard (`*.ck`) and exception (`!www.ck`) rules are all used, its private section (shared hosting) too; entries outside ASCII are skipped, as egress hosts are written in their `xn--` form.  A file named here that can't be read is an error.  The refusal applies to the project file's rules, to those typed in a review, and to accepted settings at each run, so a refreshed list can refuse a wildcard accepted before.
     * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
     * `values: expiry-days`: how long an acceptance lasts, in days.  The default is 30.
     * `values: keep`: how many expired acceptances to keep for each project when you ask for a cleanup; nothing removes them on its own.  The default is 10.
@@ -375,6 +376,35 @@ For `ksh`, this check's `warn` takes the place of `verification: shells`' `refus
 * A check can only override checks from its own setup file or a lower priority one: the distribution's can't override yours.
 * It can only override checks without `overrides` of their own.
 * Two checks can't override the same check for the same command (or, with `options` or `env`, for the same option or variable): only one can say what the check becomes.  `gen-scoter-uc` reports it as an error, as it does the two above.
+
+## Project File and Egress Host Checks
+
+A section's `project-files` and `egress-hosts` are checks of the same kind as [host command checks](#host-command-checks), each matching one thing:
+
+```yaml
+verification:
+    project-files:
+        keys:
+            action: refuse
+            reason: A private key doesn't belong in an image.
+            patterns: ['*.pem', id_*]
+    egress-hosts:
+        our-git:
+            action: allow
+            reason: Our own code host; the container's token only reads.
+            hosts: [git.example.com, github.com]
+            overrides: [verification:code-hosts]
+```
+
+* `action` (required): `refuse`, `warn` or `allow`.  Each check that counts is shown, with its reason, and the most restrictive decides: a refused file or egress rule can't be accepted as it is.
+* `reason` (required): why, shown when the check matches.
+* `patterns` (`project-files`): names of files, and, ending in `/`, directories, with `*`, `?` and `[...]`, matched against each file's and directory's own name in the project's container directories.
+* `hosts` (`egress-hosts`): host names, or `*.` and a domain for its subdomains.  A check's host matches an egress rule that reaches it: `github.com` matches a rule for `github.com`, `*.githubusercontent.com` one for `raw.githubusercontent.com`, and a rule for `*.github.com` matches a check for `gist.github.com`.
+* `overrides` (optional): the checks (`section:key`, of the same kind) this one takes the place of, for what it matches.  An override of a check that doesn't match does nothing; it must name a check that's set, and one that isn't an override itself.
+
+They merge across your setup files key by key, as the other checks do: add a check with a name of your own, set one again to replace it, or set it to `null` to remove it.  Prefer `overrides` to replacing or removing one, for the same reason.
+
+An egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check: uncommenting it with its `$override` accepts it for that project only.  A refused file has no such override: change the file, choose your own container (`use: {name}`), or change the check.
 
 ## The Verified Store
 

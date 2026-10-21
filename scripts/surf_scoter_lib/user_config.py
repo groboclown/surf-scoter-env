@@ -255,6 +255,15 @@ class UserConfig:
                     ret.append((file, section, str(key_path[-1]), value))
         return ret
 
+    def simple_checks(self, group: str) -> dict[str, jdata.DictJsonData]:
+        """The setup's `project-files` or `egress-hosts` checks, by `section:key`, as written."""
+        found: dict[str, jdata.DictJsonData] = {}
+        for path in self.__find(jdata.find_dict_keys, "resolved"):
+            section = str(path[-1])
+            for key_path in self.__find(jdata.find_dict_keys, "resolved", section, group):
+                found[f"{section}:{key_path[-1]}"] = self.__req_dict(*key_path)
+        return found
+
     def host_command_checks(self) -> dict[str, jdata.DictJsonData]:
         """The setup's `host-commands` checks, by `section:key`, as the generator combined them."""
         # A universal file from before the checks has none.

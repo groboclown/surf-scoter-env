@@ -1485,34 +1485,21 @@ This also bears on the accepted egress rules: they were reviewed for one gateway
 Step 5 gives each environment an id (the project directory's name and a hash of its canonical path), and uses it for the verified storage.  Use it for the rest of what's named per environment, so more than one `.surf-scoter.d` in a repository can run at once:
 
 * the container names, in place of the `ssh: values: host-prefix` and a reserved suffix;
-* the workspace path, which then moves out of the project, as `${scoter:state-dir}/workspaces/${scoter:environment-id}` (FILE-9).
+* ~~the workspace path, which then moves out of the project, as `${scoter:state-dir}/workspaces/${scoter:environment-id}` (FILE-9).~~  Done in step 19, as `${scoter:project-id}`.
 
-That needs the generator to work out the id, as a tool-set `${scoter:environment-id}`, with exactly the same result as step 5's Python code (or the Python code to read it from the SUC).  It changes `scoter run`, and the running environments file.
+~~That needs the generator to work out the id, as a tool-set `${scoter:environment-id}`, with exactly the same result as step 5's Python code (or the Python code to read it from the SUC).~~  Done in step 19: the generator works out `${scoter:project-id}`, and the store reads it from the SUC.
 
-## Additional declarative prohibitions to include project files and egress hosts
+What's left is the container names.  They're still `host-prefix`, the container's user and sshd port, and a suffix the running environments file reserves (`scoter-ubuntu-20000-a`), so two runs of one project get different names, and the names say nothing of which project they're for.  Naming them by `project-id` (with the branch, or a suffix, for a second run of the same project) changes `scoter run`, `scoter kill`, the running environments file, and the ssh configuration's `Host` patterns, which are per user and port today.
 
-The secret-looking files and the hosts that can carry data out follow the same shape (`action`, `reason`, the most restrictive action winning), each as a kind of its own with its own match field.  They can wait for the steps that use them (step 11 for the files, step 9 for the egress rules).  Their starting lists:
+## ~~Additional declarative prohibitions to include project files and egress hosts~~
 
-Project files (`.gitignore`-style patterns, warn): `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `*.kdbx`, `*.tfstate`, `.aws/`, `.ssh/`, `.docker/config.json`, `.kube/config`.
+Done (after step 19): `project-files` and `egress-hosts` are check kinds of their own, in [`simple_checks.rs`](../../host/src/config/simple_checks.rs), which the generator checks, merges key by key across the setup files (`null` removes one), and writes to the universal file's resolved sections as written; it also refuses an override that names a check that isn't set, or one that's an override itself.  The review's checks apply them (`checks.simple_findings`) as `host-commands` work: the matching checks without `overrides` count, each matching override takes the place of the checks it names, and every check that counts is a finding with its action's severity.  The defaults' `verification` section has `project-files: secret-files` (the old `secret-file-patterns`) and `egress-hosts` checks for each of the old `egress-data-out-hosts` groups (`code-hosts`, `paste-sites`, `object-storage`, `user-content`, `webhooks`, `file-sharing`), all `warn`, as before.
 
-Egress hosts (all warn; several, like `github.com`, are often needed, which is why they warn rather than refuse):
+So egress `$override`s (step 13) now mean something: an egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check, and uncommenting it with that override accepts it (`apply_overrides`, as for commands); the override is recorded in `accepted.json`.
 
-| Check | Matches |
-|---|---|
-| `code-hosts` | `github.com`, `*.github.com`, `*.githubusercontent.com`, `gitlab.com`, `*.gitlab.com`, `bitbucket.org`, `codeberg.org` |
-| `paste-sites` | `pastebin.com`, `paste.ee`, `hastebin.com`, `dpaste.org`, `ghostbin.site`, `rentry.co` |
-| `object-storage` | `*.s3.amazonaws.com`, `s3.amazonaws.com`, `*.blob.core.windows.net`, `storage.googleapis.com`, `*.r2.cloudflarestorage.com`, `*.digitaloceanspaces.com` |
-| `user-content` | `*.ngrok.io`, `*.ngrok-free.app`, `*.trycloudflare.com`, `*.workers.dev`, `*.pages.dev`, `*.vercel.app`, `*.netlify.app`, `*.herokuapp.com`, `*.glitch.me`, `*.repl.co` |
-| `webhooks` | `webhook.site`, `*.requestbin.com`, `*.pipedream.net`, `hooks.slack.com`, `discord.com`, `*.discord.com`, `api.telegram.org` |
-| `file-sharing` | `transfer.sh`, `file.io`, `wetransfer.com`, `*.dropbox.com`, `drive.google.com` |
+Still to do: `scoter user-setup` reports the host command checks a setup removes, replaces or overrides, but not these; step 20's guarded settings report could take them on.
 
-These should go into a similar "checks" structure as the host-bridge items.  Step 11 added both as `scoter: value-lists` (`secret-file-patterns`, `egress-data-out-hosts`), which only warn; check kinds would let a user make one refuse, or override one.
-
-Egress `$override`s (step 13) depend on this: they're read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
-
-## The container's starting directory
-
-From step 3: the container's starting directory in the workspace should be the project directory's path relative to the VCS root.  It isn't set today: an ssh session starts in the container user's home, and sees neither the container's environment variables nor the Dockerfile's `WORKDIR`.  This folds into ticket #22, which changes similar functionality.  One way, suggested in step 18: `scoter run` writes the path (the workspace mount, then the project's path in the repository) into the read-only settings directory, and as `SCOTER_PROJECT_DIR` and the main process's `working_dir`, and the distribution's dev-env image has an `/etc/profile.d` script that changes to it for login shells.
+**Tests:** in `simple_checks.rs`: parsing, and each problem (an empty `reason`, a bad pattern or host, the other kind's field, a bad `overrides` name, `${...}`).  In `universal.rs`: the checks in the universal file, replaced and removed by a higher priority file, an override that names nothing, or an override; a reference to one.  In `test_checks.py`: egress hosts exactly and by wildcard, the actions' severities, every check that counts shown, an override for one host, and an override that does nothing; project files by pattern and action; an egress refusal set aside by the review's `$override`.  In `test_review.py`: a refused egress rule commented out with its `$override`.  In `test_main_verify.py`, with the generator: an egress rule the user's setup refuses, accepted with its `$override`, recorded in `accepted.json`.
 
 ## The gateway's other protocols and ports
 
@@ -1535,7 +1522,6 @@ For automation, out of scope for now (moved from step 18; step 12's design names
 
 The review has to be for the files as they are now.  The prompt has that by construction (it snapshots the files, then writes the review from them); a file written earlier doesn't.  So the format gains a `snapshot` key: the snapshot id the review was made from, written by every review, read-only like `project-dir`.  `--accept-file` refuses a file whose `snapshot` isn't the current one ("the project's files changed since this review was written"), or that has none.  The prompt checks it too, for an edit that changed it.  An earlier acceptance's `review.yaml` (`--previous-review`) may lack it.
 
-
 ## A `drop-env` for Docker
 
 Step 18 (batch B) added `value-lists: drop-env` and gave `git-vcs` one (`GIT_*`), but not `docker`.  A project's `.envrc` could set `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` (whose credential helpers run programs) for the tools' Docker commands.  Dropping them by default would break Podman and remote-daemon setups, which set `DOCKER_HOST` themselves; [the system configuration file](../system-config-file.md#value-lists) suggests one for setups that don't.  Consider a default that keeps working for them: say, the `docker` section's `runs` passing the daemon explicitly (`--host ${docker:host}`, from a `values: host` the user sets once), so `DOCKER_HOST` can be dropped.
@@ -1548,10 +1534,20 @@ From step 4: `env` entries match a command's `allow` entries as exact text.  Mat
 
 With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.
 
-## Compare the "egress-refused-wildcards" setting with Browser cookie domains
+## ~~Compare the "egress-refused-wildcards" setting with Browser public suffix list~~
 
-The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).  This means the list should be loadable from a file (not url) so that the long list can match the pulled file.
+~~The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).  This means the list should be loadable from a file (not url) so that the long list can match the pulled file.~~
+
+Done (with the step 19 `verification` changes): `verification: path-lists: public-suffix-lists` names Public Suffix List files (none by default; the defaults say how to download the published one), which the generator reads ([`public_suffix.rs`](../../host/src/config/public_suffix.rs): plain, `*.` wildcard and `!` exception rules, the private section too, comments skipped; entries outside ASCII skipped, as egress hosts must be in `xn--` form and nothing converts to it).  An egress `*.DOMAIN` is refused when `DOMAIN` is a public suffix by those rules, or in `value-lists: egress-refused-wildcards`, which stays as the setup's own additions; the message says which.  `config::RefusedWildcards` applies it to the project file's rules, and now also to a review's (a typed wildcard) and to accepted settings at each run (a refreshed list refuses one accepted before), which were unchecked.  A named file that can't be read is an error.  The old message's `scoter: value-lists` (from before step 19) is corrected.
+
+Still possible: shipping the list with the distribution (it's MPL 2.0, and changes often), or a `scoter` command to refresh it; and converting the list's internationalized entries to `xn--` names.
+
+**Tests:** in `public_suffix.rs`: the rule kinds, case, a wildcard's exception, a name two labels under a wildcard, the internationalized entry.  In `universal.rs`: the setup's own list; a suffix list file (a suffix refused, a wildcard rule's name refused, its exception allowed); a missing file; a review's typed wildcard.  By hand, with the published list: `*.fly.dev`, `*.onrender.com`, `*.myshopify.com`, `*.gov.au` and `*.foo.ck` refused by it; `*.www.ck`, `*.example.org` and `*.pkg.dev` allowed.
 
 ## Allow `scoter user-setup` to work with automation
 
 The current defaults with `--non-interactive` use the safest approach.  Automation tooling should have an option to perform the "needs to exist but requires modifications" actions to run.
+
+## Allow `scoter user-setup` to download and update the public-suffix-lists
+
+Because the tool shouldn't ship with the public suffix list, instead it should give the end-user the opportunity to download it and updat ethe public-suffix-lists to point to that local download.

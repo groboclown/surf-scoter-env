@@ -159,6 +159,21 @@ class BuildTest(unittest.TestCase):
         self.assertIn("#scoter: Your setup's host command checks: none removed, replaced or overridden.", build([]))
         self.assertFalse(any("host command checks" in line for line in build(None)))
 
+    def test_refused_egress_rule(self) -> None:
+        """An egress rule an `egress-hosts` check refuses is commented out, with its `$override`."""
+        suc = self.suc()
+        suc["resolved"]["verification"]["egress-hosts"] = {  # type: ignore[index]
+            "npm": {"action": "refuse", "reason": "not here", "hosts": ["registry.npmjs.org"]},
+        }
+        config = UserConfig(suc)
+        lines = review.build(config, review.Context(
+            report=checks.check_project(config, str(self.bin)), now=NOW,
+        )).splitlines()
+        self.assertIn("  #scoter: refuse: `registry.npmjs.org` (`registry.npmjs.org`): not here (verification:npm)", lines)
+        self.assertIn(
+            '  # - {host: "registry.npmjs.org", protocol: "tls", port: 443, $override: ["verification:npm"]}', lines,
+        )
+
     def test_image_through_an_arg(self) -> None:
         """A `FROM` naming its image through an `ARG` is noted: `images` can't map it."""
         (self.project / ".surf-scoter.d" / "env" / "Dockerfile").write_text(

@@ -442,6 +442,23 @@ verification:
         store: ~/.config/surf-scoter.d/verified
 
     path-lists:
+        # Public Suffix List files (https://publicsuffix.org/): a project's egress
+        # rule can't allow every subdomain (`*.DOMAIN`) of a public suffix, where
+        # anyone can have a name, such as `co.uk` or `github.io`.  None by
+        # default; to use the published list, download it, and name the file:
+        #     curl -o ~/.config/surf-scoter.d/public_suffix_list.dat \
+        #         https://publicsuffix.org/list/public_suffix_list.dat
+        # and in your setup file:
+        #     verification:
+        #         path-lists:
+        #             public-suffix-lists:
+        #                 - ~/.config/surf-scoter.d/public_suffix_list.dat
+        # Refresh it now and then: the list changes.  A file named here that
+        # can't be read is an error.  `value-lists: egress-refused-wildcards`
+        # (below) adds to it.
+        # (That file is under the MPL-2.0, and should be pulled for a fresh
+        # copy, so it's not included here by default.)
+        public-suffix-lists: []
         # The `scoter: path-lists: dev-containers-search` directories whose
         # containers are reviewed like a project's own: kept in the `store` with
         # each acceptance, built from that copy, and a change to one asks for a
@@ -449,81 +466,127 @@ verification:
         # `${scoter:distribution-dir}/containers` to review the distribution's too.
         verified-containers: []
 
+    # Checks on the files in a project's container directories: everything there
+    # goes into the image, where the container can read it.  Each check has an
+    # `action`, a `reason`, and `patterns`: names of files (and, ending in `/`,
+    # directories), with `*`, `?` and `[...]`, matched against each name.  As with
+    # `host-commands`, the most restrictive action wins, and a check can
+    # `overrides: [verification:NAME]` another for the names it matches.
+    project-files:
+        secret-files:
+            action: warn
+            reason: >-
+                It looks like a secret; the container directory goes into the image,
+                where the container can read it.
+            patterns:
+                - .env
+                - .env.*
+                - '*.pem'
+                - '*.key'
+                - '*.p12'
+                - '*.pfx'
+                - id_*
+                - .netrc
+                - .npmrc
+                - .pypirc
+                - .git-credentials
+                - '*.kdbx'
+                - '*.tfstate'
+                - .aws/
+                - .ssh/
+                - .docker/
+                - .kube/
+
+    # Checks on the hosts a project's egress rules reach, with `hosts`: host names,
+    # or `*.` and a domain for its subdomains.  These hosts take uploads from anyone,
+    # so a rule that reaches one lets the container send data out, whatever the
+    # other rules say; they warn, as several (`github.com`) are often needed.  A
+    # refusal here is one the review's `$override` can set aside for a project.
+    egress-hosts:
+        code-hosts:
+            action: warn
+            reason: >-
+                A code host takes uploads (a push, a gist, an issue), so a rule that
+                reaches it lets the container send data out, whatever the other rules
+                say.
+            hosts:
+                - github.com
+                - '*.github.com'
+                - '*.githubusercontent.com'
+                - gitlab.com
+                - '*.gitlab.com'
+                - bitbucket.org
+                - codeberg.org
+        paste-sites:
+            action: warn
+            reason: >-
+                Anyone can post to a paste site, so a rule that reaches one lets the
+                container send data out.
+            hosts:
+                - pastebin.com
+                - paste.ee
+                - hastebin.com
+                - dpaste.org
+                - rentry.co
+        object-storage:
+            action: warn
+            reason: >-
+                Object storage takes uploads to any bucket the container has a key
+                for, so a rule that reaches it lets the container send data out.
+            hosts:
+                - s3.amazonaws.com
+                - '*.s3.amazonaws.com'
+                - '*.blob.core.windows.net'
+                - storage.googleapis.com
+                - '*.r2.cloudflarestorage.com'
+                - '*.digitaloceanspaces.com'
+        user-content:
+            action: warn
+            reason: >-
+                Anyone can run a tunnel or publish content on these, so a rule that
+                reaches one lets the container send data to a server of anyone's
+                choosing.
+            hosts:
+                - '*.ngrok.io'
+                - '*.ngrok-free.app'
+                - '*.trycloudflare.com'
+                - '*.workers.dev'
+                - '*.pages.dev'
+                - '*.vercel.app'
+                - '*.netlify.app'
+                - '*.herokuapp.com'
+        webhooks:
+            action: warn
+            reason: >-
+                A webhook or chat service takes posts, so a rule that reaches one lets
+                the container send data out.
+            hosts:
+                - webhook.site
+                - '*.requestbin.com'
+                - '*.pipedream.net'
+                - hooks.slack.com
+                - discord.com
+                - '*.discord.com'
+                - api.telegram.org
+        file-sharing:
+            action: warn
+            reason: >-
+                A file sharing service takes uploads, so a rule that reaches one lets
+                the container send data out.
+            hosts:
+                - transfer.sh
+                - file.io
+                - wetransfer.com
+                - '*.dropbox.com'
+                - drive.google.com
+
     value-lists:
-        # Names of files (and, ending in `/`, directories) in a project's container
-        # directories that look like secrets.  The review warns about each: a
-        # container directory goes into the image, where the container can read it.
-        # Patterns use `*`, `?` and `[...]`, matched against each name.
-        secret-file-patterns:
-            - .env
-            - .env.*
-            - '*.pem'
-            - '*.key'
-            - '*.p12'
-            - '*.pfx'
-            - id_*
-            - .netrc
-            - .npmrc
-            - .pypirc
-            - .git-credentials
-            - '*.kdbx'
-            - '*.tfstate'
-            - .aws/
-            - .ssh/
-            - .docker/
-            - .kube/
-        # Hosts anyone can upload to: an egress rule that reaches one lets the
-        # container send data out, whatever the other rules say.  The review warns
-        # about each.  `*.` covers a domain's subdomains.
-        egress-data-out-hosts:
-            # Code hosts.
-            - github.com
-            - '*.github.com'
-            - '*.githubusercontent.com'
-            - gitlab.com
-            - '*.gitlab.com'
-            - bitbucket.org
-            - codeberg.org
-            # Paste sites.
-            - pastebin.com
-            - paste.ee
-            - hastebin.com
-            - dpaste.org
-            - rentry.co
-            # Object storage.
-            - s3.amazonaws.com
-            - '*.s3.amazonaws.com'
-            - '*.blob.core.windows.net'
-            - storage.googleapis.com
-            - '*.r2.cloudflarestorage.com'
-            - '*.digitaloceanspaces.com'
-            # Tunnels and user content.
-            - '*.ngrok.io'
-            - '*.ngrok-free.app'
-            - '*.trycloudflare.com'
-            - '*.workers.dev'
-            - '*.pages.dev'
-            - '*.vercel.app'
-            - '*.netlify.app'
-            - '*.herokuapp.com'
-            # Webhooks and chat.
-            - webhook.site
-            - '*.requestbin.com'
-            - '*.pipedream.net'
-            - hooks.slack.com
-            - discord.com
-            - '*.discord.com'
-            - api.telegram.org
-            # File sharing.
-            - transfer.sh
-            - file.io
-            - wetransfer.com
-            - '*.dropbox.com'
-            - drive.google.com
         # Domains a project's egress rule can't allow every subdomain of
         # (`*.github.io`, say): public suffixes and shared hosting, where anyone
         # can have a name.  A wildcard on a single label (`*.com`) is always
-        # refused.  Add to it in your setup with a copy plus your own entries.
+        # refused.  These are the commonest; `path-lists: public-suffix-lists`
+        # (above) gives the whole Public Suffix List.  Add to it in your setup
+        # with a copy plus your own entries.
         egress-refused-wildcards:
             # Public suffixes with more than one label.
             - co.uk

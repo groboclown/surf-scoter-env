@@ -25,8 +25,10 @@ pub mod environment;
 pub mod host_commands;
 pub mod pattern;
 pub mod project;
+pub mod public_suffix;
 pub mod read;
 pub mod review;
+pub mod simple_checks;
 pub mod system;
 
 use std::fmt;
@@ -135,11 +137,61 @@ fn user_container(
 /// wildcard (`*.`) can't be on.
 pub const EGRESS_REFUSED_WILDCARDS: &str = "egress-refused-wildcards";
 
+/// The `verification` section's `path-lists` key naming the Public Suffix
+/// List files: the domains an egress wildcard can't be on, beyond
+/// `egress-refused-wildcards`.
+pub const PUBLIC_SUFFIX_LISTS: &str = "public-suffix-lists";
+
+/// The domains an egress wildcard (`*.DOMAIN`) can't be on: the setup's
+/// `egress-refused-wildcards`, and the public suffixes in the Public Suffix
+/// List files it names (`public-suffix-lists`).
+#[derive(Debug, Default)]
+pub struct RefusedWildcards {
+    listed: Vec<String>,
+    suffixes: public_suffix::SuffixList,
+}
+
+impl RefusedWildcards {
+    /// The setup's refused domains; a suffix list that can't be read is an error.
+    pub fn load(system: &SystemConfig) -> (Self, Vec<ConfigError>) {
+        let mut errors = Vec::new();
+        let mut suffixes = public_suffix::SuffixList::default();
+        for file in system.path_list(system::VERIFICATION_SECTION, PUBLIC_SUFFIX_LISTS) {
+            match read::read_limited_to(&file, read::MAX_UNIVERSAL_FILE_SIZE) {
+                Ok(text) => suffixes.add(&text),
+                Err(m) => errors.push(ConfigError::new(
+                    Some(&file),
+                    "",
+                    format!(
+                        "{m} (it's in your setup's `verification: path-lists: {PUBLIC_SUFFIX_LISTS}`; the list is at https://publicsuffix.org/list/public_suffix_list.dat)"
+                    ),
+                )),
+            }
+        }
+        let listed = system.value_list(system::VERIFICATION_SECTION, EGRESS_REFUSED_WILDCARDS);
+        (RefusedWildcards { listed, suffixes }, errors)
+    }
+
+    /// Why a wildcard on `domain` is refused, if it is.
+    pub fn reason(&self, domain: &str) -> Option<String> {
+        let domain = domain.to_ascii_lowercase();
+        if self.listed.iter().any(|d| d.eq_ignore_ascii_case(&domain)) {
+            Some(format!(
+                "your setup's `verification: value-lists: {EGRESS_REFUSED_WILDCARDS}`"
+            ))
+        } else if self.suffixes.is_public_suffix(&domain) {
+            Some(format!(
+                "a public suffix, in your setup's `verification: path-lists: {PUBLIC_SUFFIX_LISTS}`"
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 /// The project's egress wildcards on a domain the setup refuses them on.
-fn egress_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
-    project.wildcard_problems(
-        &system.value_list(system::VERIFICATION_SECTION, EGRESS_REFUSED_WILDCARDS),
-    )
+fn egress_problems(project: &ProjectConfig, refused: &RefusedWildcards) -> Vec<ConfigError> {
+    project.wildcard_problems(&|domain| refused.reason(domain))
 }
 
 /// The `scoter` section's `values` key naming the project files directory.
@@ -378,8 +430,13 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         (None, Ok(_)) => {}
         (_, Err(e)) => errors.extend(e),
     }
-    if let (Some(system), Some(project)) = (&system, &project) {
-        errors.extend(egress_problems(project, system));
+    let refused = system.as_ref().map(|system| {
+        let (refused, problems) = RefusedWildcards::load(system);
+        errors.extend(problems);
+        refused
+    });
+    if let (Some(refused), Some(project)) = (&refused, &project) {
+        errors.extend(egress_problems(project, refused));
     }
     let accepted = universal.accepted_settings.and_then(|input| {
         accepted::parse(input.contents, &input.file)
@@ -547,9 +604,16 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         system.set_dev_container_path(&dev.dir);
     }
     // After the dev container, as `env` values can refer to it.
+    let refused = system.as_ref().map(|system| {
+        let (refused, problems) = RefusedWildcards::load(system);
+        errors.extend(problems);
+        refused
+    });
     if let (Some(system), Some(project)) = (&system, &mut project) {
         errors.extend(plan_environments(project, system));
-        errors.extend(egress_problems(project, system));
+    }
+    if let (Some(refused), Some(project)) = (&refused, &project) {
+        errors.extend(egress_problems(project, refused));
     }
     // Checked against the project and the setup in effect.
     let accepted = options.accepted_settings.as_deref().and_then(|file| {
@@ -578,6 +642,29 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
+    // The wildcards a review or an acceptance gives get the same refusal as
+    // the project file's: a user's typed rule, or one accepted before the
+    // setup (or its suffix list) refused it.
+    if let Some(refused) = &refused {
+        let reason = |domain: &str| refused.reason(domain);
+        if let Some(review) = review.as_ref().filter(|r| !r.rejected) {
+            errors.extend(project::wildcard_errors(
+                &review.file,
+                review
+                    .egress
+                    .iter()
+                    .filter_map(|rule| rule["host"].as_str()),
+                &reason,
+            ));
+        }
+        if let Some(accepted) = &accepted {
+            errors.extend(project::wildcard_errors(
+                &accepted.file,
+                accepted.egress.iter().map(|rule| rule.host.as_str()),
+                &reason,
+            ));
+        }
+    }
     // An earlier acceptance's review: it only seeds a new review, and has
     // usually expired, so it isn't checked against the run.
     let previous_review = options.previous_review.as_deref().and_then(|file| {

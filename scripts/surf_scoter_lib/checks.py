@@ -27,8 +27,9 @@ from .err import ConfigErr
 from .user_config import UserConfig
 from .verified import snapshot
 
-SECRET_FILES = "secret-file-patterns"  # nosec: B105  # A setting's name, not a secret.
-DATA_OUT_HOSTS = "egress-data-out-hosts"
+# The setup's simple check groups (see `simple_findings`).
+PROJECT_FILES = "project-files"
+EGRESS_HOSTS = "egress-hosts"
 
 
 class Severity(StrEnum):
@@ -441,6 +442,70 @@ def writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
 # Egress
 
 
+# ---------------------------------------------------------------------
+# The simple checks: `project-files` and `egress-hosts`
+
+
+@dataclass(frozen=True)
+class SimpleCheck:
+    """A `project-files` or `egress-hosts` check, by its `section:key`."""
+
+    id: str
+    action: str
+    reason: str
+    # Its `patterns`, or its `hosts`.
+    matches: tuple[str, ...]
+    overrides: tuple[str, ...]
+
+
+def simple_checks(config: UserConfig, group: str) -> list[SimpleCheck]:
+    """The setup's checks of `group`, as the generator wrote them."""
+    found: list[SimpleCheck] = []
+    for check_id, check in sorted(config.simple_checks(group).items()):
+        field_name = "hosts" if group == EGRESS_HOSTS else "patterns"
+        found.append(SimpleCheck(
+            check_id,
+            jdata.req_str(check, "action"),
+            jdata.req_str(check, "reason"),
+            # As written: an empty field is left out.
+            tuple(jdata.find_str_list(check, field_name)),
+            tuple(jdata.find_str_list(check, "overrides")),
+        ))
+    return found
+
+
+def simple_findings(
+    checks: Sequence[SimpleCheck],
+    key: str,
+    match: Callable[[SimpleCheck], str | None],
+    describe: Callable[[SimpleCheck, str], str],
+) -> list[Finding]:
+    """The findings of the `checks` on one item (a file, a host), as `host-commands` work them out.
+
+    `match` gives what of a check matches the item (a pattern, a host), or
+    None.  The checks without `overrides` that match count; then each override
+    that matches takes the place of the checks it names (only those that
+    matched: an override for nothing does nothing).  Every check that counts
+    is a finding, with its action's severity, so its reason is shown; a
+    refusal names its check, so a review's `$override` can set it aside.
+    """
+    counted = {c.id: (c, m) for c in checks if not c.overrides and (m := match(c)) is not None}
+    for override in checks:
+        if not override.overrides:
+            continue
+        matched = match(override)
+        replaced = [target for target in override.overrides if target in counted]
+        if matched is None or not replaced:
+            continue
+        for target in replaced:
+            del counted[target]
+        counted[override.id] = (override, matched)
+    return [
+        Finding(_ACTIONS.get(check.action, Severity.REFUSE), key, describe(check, matched), (check.id,))
+        for check, matched in sorted(counted.values(), key=lambda cm: _ORDER.get(cm[0].action, 2), reverse=True)
+    ]
+
+
 def _host_covers(rule_host: str, pattern: str) -> bool:
     """Whether a rule for `rule_host` allows a host `pattern` names."""
     if pattern.startswith("*."):
@@ -462,7 +527,7 @@ def check_egress(
         rules = gateway.rules_of(entries if entries is not None else config.project_egress())
     except gateway.RuleErr as err:
         return [Finding(Severity.REFUSE, "egress", str(err))]
-    data_out = config.value_list("verification", DATA_OUT_HOSTS)
+    host_checks = simple_checks(config, EGRESS_HOSTS)
     findings: list[Finding] = []
     for i, rule in enumerate(rules):
         key = f"egress[{i}]"
@@ -472,14 +537,14 @@ def check_egress(
                 f"`{rule.host}` over plain HTTP can be read, and its downloads changed, by "
                 "anyone in between.",
             ))
-        covered = [p for p in data_out if _host_covers(rule.host, p)]
-        if covered:
-            findings.append(Finding(
-                Severity.WARN, key,
-                f"`{rule.host}` lets the container send data out ("
-                + ", ".join(f"`{p}`" for p in covered)
-                + " is a place anyone can upload to), whatever the other rules say.",
-            ))
+
+        def match(check: SimpleCheck, host: str = rule.host) -> str | None:
+            return next((h for h in check.matches if _host_covers(host, h)), None)
+
+        findings.extend(simple_findings(
+            host_checks, key, match,
+            lambda check, matched, host=rule.host: f"`{host}` (`{matched}`): {check.reason}",
+        ))
     return findings
 
 
@@ -547,7 +612,8 @@ def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Findin
     return findings
 
 
-def _secret_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
+def _file_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
+    """The first of `patterns` the file (or directory) at `rel` matches, by its own name."""
     name = rel.rsplit("/", 1)[-1]
     for pattern in patterns:
         if pattern.endswith("/"):
@@ -566,7 +632,7 @@ def check_project_files(config: UserConfig) -> list[Finding]:
     if project is None or files_name is None or file_name is None:
         return []
     files_dir = Path(os.path.realpath(project / files_name))
-    secrets = config.value_list("verification", SECRET_FILES)
+    file_checks = simple_checks(config, PROJECT_FILES)
     builds = config.dev_container_parent_builds() if config.has_dev_container() else []
     local_tags = [tag for tag, _ in builds]
     dirs: list[Path | None] = [config.active_location("dev-container-path")]
@@ -587,12 +653,12 @@ def check_project_files(config: UserConfig) -> list[Finding]:
         real = Path(os.path.realpath(directory))
         if not real.is_relative_to(files_dir) or real == files_dir:
             continue
-        findings.extend(_container_findings(real, real.relative_to(files_dir).as_posix(), secrets, local_tags))
+        findings.extend(_container_findings(real, real.relative_to(files_dir).as_posix(), file_checks, local_tags))
     return findings
 
 
 def _container_findings(
-    directory: Path, rel: str, secrets: Sequence[str], local_tags: Sequence[str],
+    directory: Path, rel: str, file_checks: Sequence[SimpleCheck], local_tags: Sequence[str],
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -602,12 +668,11 @@ def _container_findings(
     for entry in entries:
         child = f"{rel}/{entry.name}"
         is_dir = entry.is_dir(follow_symlinks=False)
-        pattern = _secret_like(child, secrets, is_dir)
-        if pattern and not entry.is_symlink():
-            findings.append(Finding(
-                Severity.WARN, child,
-                f"Looks like a secret (`{pattern}`): everything in a container directory goes "
-                "into the image, where the container can read it.",
+        if not entry.is_symlink():
+            findings.extend(simple_findings(
+                file_checks, child,
+                lambda check, child=child, is_dir=is_dir: _file_like(child, check.matches, is_dir),
+                lambda check, matched: f"{check.reason} (`{matched}`)",
             ))
         if entry.is_symlink():
             findings.append(Finding(
@@ -616,7 +681,7 @@ def _container_findings(
                 "as it could bring in files from outside it.",
             ))
         elif is_dir:
-            findings.extend(_container_findings(Path(entry.path), child, secrets, local_tags))
+            findings.extend(_container_findings(Path(entry.path), child, file_checks, local_tags))
         elif entry.is_file(follow_symlinks=False):
             if entry.stat(follow_symlinks=False).st_nlink > 1:
                 findings.append(Finding(

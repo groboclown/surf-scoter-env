@@ -298,6 +298,32 @@ class PromptTest(DistTest):
         accepted = json.loads(found.accepted_settings.read_text(encoding="utf-8"))
         self.assertEqual([c["command"] for c in accepted["commands"]], ["ls", "sh"])
 
+    def test_egress_override(self) -> None:
+        """An egress rule the setup refuses can be accepted with its `$override`, which is recorded."""
+        setup = self.home / "setup.yaml"
+        setup.write_text(
+            setup.read_text(encoding="utf-8")
+            + "  egress-hosts:\n    npm-here:\n      action: refuse\n      reason: not here\n"
+            "      hosts: [registry.npmjs.org]\n",
+            encoding="utf-8",
+        )
+        # The later runs start from the first one's setup: make it again.
+        self.generate("--distribution-dir", str(self.dist), output=self.tmp / "first.json")
+        self.config = UserConfig(self.project_suc())
+
+        def keep_override(path: Path, _: Path) -> None:
+            text = path.read_text(encoding="ascii")
+            refused = '  # - {host: "registry.npmjs.org", protocol: "tls", port: 443, $override: ["verification:npm-here"]}'
+            assert refused in text, text  # nosec: B101  # the review offers it, commented out
+            path.write_text(text.replace(refused, refused.replace("# ", "", 1)), encoding="ascii")
+
+        self.assertEqual(self.prompt("e", "u", edit=keep_override)[0], 0)
+        found = lookup.find(self.config)
+        assert found.accepted_settings is not None  # nosec: B101  # narrowing for the type checker
+        accepted = json.loads(found.accepted_settings.read_text(encoding="utf-8"))
+        self.assertEqual([r["host"] for r in accepted["egress"]], ["registry.npmjs.org"])
+        self.assertEqual(accepted["overrides"]["egress"], [{"index": 0, "checks": ["verification:npm-here"]}])
+
     def test_replaced_by_a_link(self) -> None:
         """The file swapped for a link while the editor is open: refused, nothing stored."""
         target = self.tmp / "planted.yaml"

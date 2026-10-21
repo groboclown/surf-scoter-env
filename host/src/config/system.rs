@@ -81,6 +81,7 @@ use yaml_serde::Value;
 use super::command::{self, CommandTemplate, Part};
 use super::host_commands::{self, Check, CheckRecord};
 use super::read::{parse_yaml, read_limited, tag_errors};
+use super::simple_checks::{self, EGRESS_HOSTS, PROJECT_FILES, SimpleCheck};
 use super::{ConfigError, child_key, index_key};
 
 pub const SCOTER_SECTION: &str = "scoter";
@@ -265,6 +266,9 @@ enum Entry {
     Value(ScalarValue),
     /// A `host-commands` check; `None` (null) removes a lower priority one.
     HostCommand(Option<CheckRecord>),
+    /// A `project-files` or `egress-hosts` check (the group's name, and the
+    /// check); `None` (null) removes a lower priority one.
+    Simple(&'static str, Option<SimpleCheck>),
 }
 
 impl Entry {
@@ -278,6 +282,7 @@ impl Entry {
             Entry::ValueList(_) => VALUE_LISTS,
             Entry::Value(_) => VALUES,
             Entry::HostCommand(_) => HOST_COMMANDS,
+            Entry::Simple(group, _) => group,
         }
     }
 }
@@ -394,6 +399,10 @@ pub struct SectionRecord {
     pub values: BTreeMap<String, ScalarValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_commands: BTreeMap<String, Option<CheckRecord>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_files: BTreeMap<String, Option<SimpleCheck>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress_hosts: BTreeMap<String, Option<SimpleCheck>>,
 }
 
 /// Where to find the system setup.
@@ -474,6 +483,10 @@ pub struct Section {
     pub values: BTreeMap<String, ScalarValue>,
     /// The `host-commands` checks; removed (null) ones aren't here.
     pub host_commands: BTreeMap<String, Check>,
+    /// The `project-files` and `egress-hosts` checks, as written; removed
+    /// (null) ones aren't here.
+    pub project_files: BTreeMap<String, SimpleCheck>,
+    pub egress_hosts: BTreeMap<String, SimpleCheck>,
     /// The `programs` that aren't there: key -> the program it names.
     pub missing: BTreeMap<String, String>,
 }
@@ -1134,6 +1147,14 @@ impl SetupFile {
                     Entry::HostCommand(check) => {
                         section.host_commands.insert(key, check.clone());
                     }
+                    Entry::Simple(group, check) => {
+                        let checks = if *group == EGRESS_HOSTS {
+                            &mut section.egress_hosts
+                        } else {
+                            &mut section.project_files
+                        };
+                        checks.insert(key, check.clone());
+                    }
                 }
             }
             sections.insert(name.clone(), section);
@@ -1191,12 +1212,36 @@ fn file_from_record(
                     .host_commands
                     .iter()
                     .map(|(k, v)| (k, Entry::HostCommand(v.clone()))),
+            )
+            .chain(
+                groups
+                    .project_files
+                    .iter()
+                    .map(|(k, v)| (k, Entry::Simple(PROJECT_FILES, v.clone()))),
+            )
+            .chain(
+                groups
+                    .egress_hosts
+                    .iter()
+                    .map(|(k, v)| (k, Entry::Simple(EGRESS_HOSTS, v.clone()))),
             );
         for (key, entry) in all {
             let at = format!(
                 "setup.files[{i}].sections.{}",
                 child_key(name, &group_key(entry.group(), key))
             );
+            let problems = match &entry {
+                Entry::Simple(group, Some(check)) => check.problems(group, &at),
+                _ => Vec::new(),
+            };
+            if !problems.is_empty() {
+                errors.extend(
+                    problems
+                        .into_iter()
+                        .map(|(key, message)| ConfigError::new(Some(origin), &key, message)),
+                );
+                continue;
+            }
             if let Entry::HostCommand(Some(check)) = &entry {
                 let problems = check.problems(&at);
                 if !problems.is_empty() {
@@ -1283,7 +1328,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
             _ => {
                 errors.push(error(
                     name,
-                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings"
+                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts` mappings"
                         .to_string(),
                 ));
                 continue;
@@ -1299,13 +1344,15 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                 Some(VALUE_LISTS) => VALUE_LISTS,
                 Some(VALUES) => VALUES,
                 Some(HOST_COMMANDS) => HOST_COMMANDS,
+                Some(PROJECT_FILES) => PROJECT_FILES,
+                Some(EGRESS_HOSTS) => EGRESS_HOSTS,
                 _ => {
                     let shown = group
                         .as_str()
                         .map_or_else(|| format!("{group:?}"), str::to_string);
                     errors.push(error(
                         &child_key(name, &shown),
-                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
+                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`"
                             .to_string(),
                     ));
                     continue;
@@ -1376,6 +1423,19 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                     (VALUE_LISTS, _) => {
                         errors.push(error(&at, "must be a list of values".to_string()));
                         continue;
+                    }
+                    (PROJECT_FILES | EGRESS_HOSTS, _) => {
+                        match simple_checks::parse(value.clone(), group, &at) {
+                            Ok(check) => Entry::Simple(group, check),
+                            Err(problems) => {
+                                errors.extend(
+                                    problems
+                                        .into_iter()
+                                        .map(|(key, message)| error(&key, message)),
+                                );
+                                continue;
+                            }
+                        }
                     }
                     (HOST_COMMANDS, _) => match host_commands::parse(value.clone(), &at) {
                         Ok(check) => Entry::HostCommand(check),
@@ -1631,6 +1691,8 @@ impl SystemConfig {
                             }
                         }
                     }
+                    // Used as written: nothing to expand.
+                    Entry::Simple(..) => {}
                     Entry::HostCommand(None) => {}
                     Entry::HostCommand(Some(check)) => {
                         if let Err(failure) = expander.check_locations(name, key, check)
@@ -1738,6 +1800,11 @@ impl SystemConfig {
         self.setting_file(section, &group_key(HOST_COMMANDS, key))
     }
 
+    /// The file that set the check `section:key` of `group` (such as `egress-hosts`).
+    pub fn check_file(&self, section: &str, group: &str, key: &str) -> Option<&Path> {
+        self.setting_file(section, &group_key(group, key))
+    }
+
     /// The name of the project location `path` is in, once symlinks are
     /// resolved, if it's in one: the project directory, the project files
     /// directory, the dev container's workspace, or the repository holding
@@ -1792,7 +1859,7 @@ impl SystemConfig {
             Some(Entry::Run(_) | Entry::PathList(_) | Entry::ValueList(_)) => {
                 Err(format!("{reference} is a list; it can't be used here"))
             }
-            Some(Entry::HostCommand(_)) => Err(check_reference(section, key)),
+            Some(Entry::HostCommand(_) | Entry::Simple(..)) => Err(check_reference(section, key)),
             Some(Entry::Value(ScalarValue::Null)) => {
                 Err(format!("{reference} is null, so it can't be used here"))
             }
@@ -1995,6 +2062,8 @@ impl SystemConfig {
             value_lists: BTreeMap::new(),
             values: BTreeMap::new(),
             host_commands: BTreeMap::new(),
+            project_files: BTreeMap::new(),
+            egress_hosts: BTreeMap::new(),
             missing: missing_programs,
         };
         for key in &path_keys {
@@ -2043,6 +2112,15 @@ impl SystemConfig {
                 }
                 Entry::Value(value) => {
                     section.values.insert(key.clone(), value.clone());
+                }
+                Entry::Simple(_, None) => {}
+                Entry::Simple(group, Some(check)) => {
+                    let checks = if *group == EGRESS_HOSTS {
+                        &mut section.egress_hosts
+                    } else {
+                        &mut section.project_files
+                    };
+                    checks.insert(key.clone(), check.clone());
                 }
                 Entry::HostCommand(None) => {}
                 Entry::HostCommand(Some(check)) => {
@@ -2256,7 +2334,7 @@ impl Expander<'_> {
                 }),
             },
             Entry::Run(raw) => Ok(Resolved::List(self.words(section, raw, &origin, stack)?)),
-            Entry::HostCommand(_) => Err(Failure {
+            Entry::HostCommand(_) | Entry::Simple(..) => Err(Failure {
                 kind: FailureKind::Error,
                 origin: referrer.clone(),
                 message: check_reference(section, key),
@@ -3212,7 +3290,7 @@ mod tests {
                 "a.paths.map: must be a single value, not a list or mapping",
                 "a.paths.none: has no value",
                 "a.runs: must be a mapping of names to values",
-                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`",
+                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`",
                 "a.path-lists.c: must be a list of paths",
                 "a.path-lists.d[1]: must be a path",
                 "a.path-lists.d[2]: must be a path",
@@ -3220,7 +3298,7 @@ mod tests {
                 "a.values.map: must be a single value: text, a number, true/false or null",
                 "a.values.nan: must be a finite number",
                 "a.values.inf: must be a finite number",
-                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings",
+                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts` mappings",
                 "old-paths: must be a section; put lists of paths in a section's `path-lists`",
             ]
         );
@@ -3230,7 +3308,7 @@ mod tests {
     fn shape_old_flat_sections_are_refused() {
         assert_eq!(
             one_error("ssh:\n  home: ~/.ssh\n"),
-            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
+            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`"
         );
     }
 
