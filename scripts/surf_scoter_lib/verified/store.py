@@ -328,7 +328,7 @@ class VerifiedStore:
         return data
 
     def remove_unused_blobs(self, used: set[str]) -> int:
-        """Remove the blobs not in `used`; how many went."""
+        """Remove the blobs not in `used`, and the prefix directories left empty; how many went."""
         self._require_lock()
         removed = 0
         for prefix in self.list_dir(BLOBS_DIR):
@@ -336,6 +336,8 @@ class VerifiedStore:
                 if digest not in used:
                     self.remove(BLOBS_DIR, prefix, digest)
                     removed += 1
+            if not self.list_dir(BLOBS_DIR, prefix):
+                self.remove(BLOBS_DIR, prefix)
         return removed
 
     def blob_size(self) -> int:

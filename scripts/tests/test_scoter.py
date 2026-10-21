@@ -300,8 +300,8 @@ class HelpTest(unittest.TestCase):
     def test_help_skips_the_project(self) -> None:
         """`help` loads the setup alone; other commands look for the project.
 
-        `verify` loads the project as it suggests, without the user's
-        accepted settings; `run` loads them too.
+        `verify` and `revoke` load the project as it suggests, without the
+        user's accepted settings; `run` loads them too.
         """
         seen: list[tuple[bool, bool]] = []
 
@@ -317,8 +317,10 @@ class HelpTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 scoter.main(["scoter", "help"])
                 scoter.main(["scoter", "verify"])
+                scoter.main(["scoter", "revoke"])
                 scoter.main(["scoter", "run"])
+                scoter.main(["scoter", "list-accepted"])
         finally:
             scoter.load_config = original  # type: ignore[assignment]
-        self.assertEqual([p for p, _ in seen], [False, True, True])
-        self.assertEqual([a for _, a in seen[1:]], [False, True])
+        self.assertEqual([p for p, _ in seen], [False, True, True, True, False])
+        self.assertEqual([a for _, a in seen[1:4]], [False, False, True])

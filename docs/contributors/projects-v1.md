@@ -1326,8 +1326,19 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 ## 20. Put a bow on it
 
 - Allow a timed exemption for working on a project.
-- Allow a user to revoke a project's acceptance.
-- Allow a user to list accepted projects, with their expiration and exemption.
+- ~~Allow a user to revoke a project's acceptance.~~  Done, after step 16: `scoter revoke` ([`main_revoke.py`](../../scripts/main_revoke.py), with [`verified/revoke.py`](../../scripts/surf_scoter_lib/verified/revoke.py)).
+  - Without arguments, it lists the project's acceptances: id, kind, branch, fingerprint (the snapshot id, first 12 characters), expiry and validity.
+  - Positional arguments name acceptance ids (as `scoter list-accepted` shows them), for any project and from anywhere; or, for the current project, branches or fingerprints (the whole id, with or without `sha256:`, or its first 12 hex characters or more, in any case).  `--all` takes every one of the current project's, and can't be given with names.  An acceptance carried forward from a chosen one goes too, as it holds the same settings.
+  - A name that chooses nothing revokes nothing, and shows the list, so a typo can't revoke half of what was meant.
+  - Revoking removes the acceptances from `environment.json` (written first, so it never names a missing acceptance), then their directories, then the blobs nothing uses, all under the store's lock.  A project left with none is taken out of the index, then its directory removed.  The store now also removes blob prefix directories it empties.
+  - `scoter` loads `revoke` without the accepted settings, as it does `verify`: the lookup could otherwise carry an acceptance forward just before it's revoked.
+  - Run inside a project, it still needs a project file the generator can read; outside one, ids work for any project, including one whose directory is gone.
+  - **Tests:** [`test_main_revoke.py`](../../scripts/tests/test_main_revoke.py): nothing accepted, the listing, by branch (several), by fingerprint (whole, short and upper case; too short refused), carried acceptances going too, an unmatched name revoking nothing, `--all` (and the blobs it frees), and `--all` with names.
+- ~~Allow a user to list accepted projects, with their expiration and exemption.~~  Done: `scoter list-accepted` ([`main_list_accepted.py`](../../scripts/main_list_accepted.py)).
+  - Every project in the store's index, by directory (noting one whose directory is gone), and under each its acceptances: id, kind, branch, fingerprint, expiry, validity, exemption, and what it was carried from.  Then how many, and how much the blobs take.
+  - `-q` shows only the acceptance ids, one per line, which `scoter revoke` takes: `scoter revoke $(scoter list-accepted -q)` revokes every acceptance, and empties the store.
+  - It needs no project: `scoter` loads only the setup for it, as for `help`.
+  - **Tests:** in [`test_main_revoke.py`](../../scripts/tests/test_main_revoke.py): the listing of two projects, `-q`, an exemption and a gone directory, nothing accepted, revoking by id across projects from outside one, an unknown id, and the whole clean-out (index and blobs empty afterwards).  By hand, on the scratch distribution: two projects accepted through the prompt, listed, and revoked with `scoter revoke $(scoter list-accepted -q)` from outside both.
 - Add a user cache cleanup step.
 - Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
 - Clean up the code to remove references to steps from this document.

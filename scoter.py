@@ -669,13 +669,16 @@ def main(argv: Sequence[str]) -> int:
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        # `help` lists the sub-commands, which needs the setup, not a project.
+        # `help` lists the sub-commands, which needs the setup, not a project;
+        # `list-accepted` lists every project's acceptances, from the setup's store.
         config = load_config(
             args,
-            with_project=args.cmd not in (None, "help"),
+            with_project=args.cmd not in (None, "help", "list-accepted"),
             # `verify` reviews what the project suggests; accepted settings
             # (a container of the user's, say) would change what it shows.
-            with_acceptance=args.cmd != "verify",
+            # `revoke` works on the store itself, and the lookup could carry
+            # an acceptance forward just before it's revoked.
+            with_acceptance=args.cmd not in ("verify", "revoke"),
         )
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
