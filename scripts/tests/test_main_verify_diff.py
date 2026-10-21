@@ -147,6 +147,11 @@ class ReReviewTest(DistTest):
             "  #scoter: the project removed this since you accepted it; remove the `# ` to keep it anyway.",
             lines,
         )
+        # Its note is listed in the header too, so it isn't lost unnoticed.
+        self.assertTrue(any(
+            line.startswith("#scoter:   your note on an item the project removed (egress;") and line.endswith("for npm")
+            for line in lines
+        ), lines)
 
     def test_base_prefers_the_branch_and_takes_expired(self) -> None:
         """The newest on the branch, though there's a newer one elsewhere, and though it has expired."""

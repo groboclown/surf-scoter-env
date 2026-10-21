@@ -26,9 +26,9 @@ from surf_scoter_lib import (
     setup_check,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, VerifiedStoreErr
+from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr, VerifiedStoreErr
 from surf_scoter_lib.ssh_config import SshConfig
-from surf_scoter_lib.verified import staging
+from surf_scoter_lib.verified import lookup, staging
 
 # The network gateway's configuration, in the resources directory.
 GATEWAY_CONFIG_FILE = "gateway-config"
@@ -39,11 +39,6 @@ SUC_COPY_FILE = "suc.json"
 # The accepted copy of the project's files, staged to build from, beside it.
 BUILD_DIR = "build"
 
-NOT_ACCEPTED = (
-    "You haven't accepted this project's settings.  "
-    "Run `scoter verify` to review them, then run again."
-)
-
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
 
@@ -53,7 +48,8 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Nothing runs from a project the user hasn't accepted: not its host
     # commands, its egress rules, or its container.
     if config.accepted_settings_file() is None:
-        print(NOT_ACCEPTED, file=sys.stderr)
+        print(_why_not_accepted(config), file=sys.stderr)
+        print("Run `scoter verify` to review them, then run again.", file=sys.stderr)
         return 1
     # Nor with a setup program a project, or another user, could supply.
     if not _setup_programs_ok(config):
@@ -263,6 +259,14 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Keep the 'workspace' directory, though.
 
     return 1 if failed else 0
+
+
+def _why_not_accepted(config: UserConfig) -> str:
+    """Why no acceptance holds for the project; the plain reason if that can't be told."""
+    try:
+        return lookup.no_match_reason(config)
+    except (OSError, ValueError, SurfScoterErr):
+        return "You haven't accepted this project's settings."
 
 
 def _setup_programs_ok(config: UserConfig) -> bool:

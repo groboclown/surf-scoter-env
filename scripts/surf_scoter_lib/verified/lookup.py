@@ -11,6 +11,7 @@ newest usable acceptance that matches them.  A match on meaning (the files
 differ only in comments and the like) is carried forward: a new acceptance
 for these files, with the earlier one's settings and expiry.
 """
+import datetime
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +77,57 @@ def find(config: UserConfig) -> Lookup:
     if acceptance.kind != records.Kind.BLANKET:
         accepted = verified_store.root / env_id / records.ACCEPTANCES_DIR / acceptance.id / ACCEPTED_FILE
     return Lookup(found.kind, acceptance.id, accepted, notice)
+
+
+def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) -> str:
+    """Why no acceptance holds for the project, for the user: one sentence.
+
+    Read only, unlike `find` (which carries an acceptance forward): never
+    accepted; the acceptance of these files has expired; the setup changed
+    since (which values); or the files changed since the newest acceptance
+    (which files).
+    """
+    never = "You haven't accepted this project's settings."
+    project = config.active_location("project-dir")
+    verified = config.optional_path("scoter", "verified-dir")
+    if project is None or verified is None or not verified.is_dir():
+        return never
+    project_dir = os.path.realpath(project)
+    verified_store = store.VerifiedStore.open(verified)
+    record = records.load_environment(
+        verified_store, project_dir, store.environment_id(Path(project_dir)),
+    )
+    accepted = [a for a in record.acceptances if a.suggestion is not None] if record else []
+    if not accepted:
+        return never
+    now = now or records.now_utc()
+    current = project_snapshot(config, Path(project_dir))
+    setup = records.SetupRecord(records.setup_values(
+        config, vcs_section(config), verified_containers(config),
+    ))
+    same_files = [
+        a for a in accepted
+        if a.suggestion is not None and a.suggestion.meaning_id == current.manifest.meaning_id
+    ]
+    same_setup = [a for a in same_files if a.setup.id == setup.id]
+    if same_setup:
+        newest = same_setup[0]
+        if newest.validity(now) == records.Validity.EXPIRED:
+            return f"Your acceptance of these files ({newest.id}) expired {newest.expires_at.isoformat()}."
+        return f"Your acceptance of these files ({newest.id}) can't be used ({newest.validity(now)})."
+    if same_files:
+        changes = records.setup_changes(same_files[0].setup.values, setup.values)
+        return (
+            f"Your setup changed since you accepted these files ({same_files[0].id})"
+            + (": " + ", ".join(changes) if changes else "") + "."
+        )
+    newest = accepted[0]
+    assert newest.suggestion is not None  # nosec: B101  # chosen for having one
+    changed = newest.suggestion.changed(current.manifest)
+    return (
+        f"The project's files changed since you last accepted them ({newest.id})"
+        + (": " + ", ".join(changed) if changed else "") + "."
+    )
 
 
 def limits(config: UserConfig) -> snapshot.SnapshotLimits:

@@ -36,7 +36,8 @@ it_expect "${review}" "  #scoter:   env/dev-env.yaml  unchanged since you accept
 
 it_say "the run won't use the old acceptance for the changed files"
 scoter run > "${IT_SANDBOX}/run.log" 2>&1 && it_fail "the run started with the changed files"
-it_expect "${IT_SANDBOX}/run.log" "You haven't accepted this project's settings"
+it_expect "${IT_SANDBOX}/run.log" "The project's files changed since you last accepted them (${id}): env/Dockerfile, project.yaml."
+it_expect "${IT_SANDBOX}/run.log" "Run \`scoter verify\` to review them"
 
 it_say "accepting the re-review as it stands"
 it_accept

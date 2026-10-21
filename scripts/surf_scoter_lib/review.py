@@ -125,6 +125,9 @@ class Context:
     # The earlier acceptance to compare with (step 17), with what the user
     # accepted filled in; None for a full review.
     previous: previous_acceptance.Previous | None = None
+    # What the user should know about their setup's host command checks
+    # (`setup_check.host_command_report`); None to leave it out.
+    setup_notes: Sequence[str] | None = None
 
 
 def _findings_on(findings: Sequence[checks.Finding], at: str) -> list[checks.Finding]:
@@ -233,6 +236,23 @@ def changes(config: UserConfig, context: Context) -> dict[str, int]:
     return counts
 
 
+def _removed_notes(config: UserConfig, context: Context) -> list[tuple[str, str]]:
+    """The user's `$comment`s on items the project removed since: (`egress` or `commands`, the note)."""
+    previous = context.previous
+    if previous is None:
+        return []
+    view = suggested(config, context.report)
+    found: list[tuple[str, str]] = []
+    for section, entry in (("egress", _egress_entry), ("commands", _command_entry)):
+        for change in compare(
+            section, _list(previous.suggested, section),
+            [entry(e) for e in _list(previous.accepted, section)], _list(view, section),
+        ):
+            if change.kind == "removed" and change.mine and isinstance(change.mine.get("$comment"), str):
+                found.append((section, change.mine["$comment"]))
+    return found
+
+
 _CHANGE_WORDS = (
     ("changed", "changed since"), ("added", "new"), ("removed", "removed by the project"),
     ("edited", "your changes kept"), ("yours", "added by you"), ("removed-by-you", "removed by you"),
@@ -264,6 +284,18 @@ def _header(out: Writer, config: UserConfig, context: Context) -> None:
         )
         for change in previous.setup_changes:
             out.note(f"  your setup changed since: {change}")
+        for section, item in _removed_notes(config, context):
+            out.note(
+                f"  your note on an item the project removed ({section}; below, commented out, "
+                f"and it goes with the item unless you keep it): {item}"
+            )
+    if context.setup_notes is not None:
+        out.note()
+        if context.setup_notes:
+            out.note("Your setup's host command checks (as `scoter user-setup` shows them):")
+            out.notes(f"  {note}" for note in context.setup_notes)
+        else:
+            out.note("Your setup's host command checks: none removed, replaced or overridden.")
     out.note()
     counts = {s: sum(1 for f in findings if f.severity == s) for s in checks.Severity}
     out.note(
@@ -532,7 +564,15 @@ def show(change: Change, found: Sequence[checks.Finding]) -> Shown | None:
     if kind == "changed":
         assert new is not None  # nosec: B101
         data = suggestion(new)
-        notes = ["changed since you accepted it:", *differences(change.old, new), *texts, *guide]
+        differ = {
+            k for k in set(_strip(change.old) or {}) | set(_strip(new) or {})
+            if (_strip(change.old) or {}).get(k) != (_strip(new) or {}).get(k)
+        }
+        lead = (
+            "found somewhere else since you accepted it (the project didn't change it):"
+            if differ == {"program"} else "changed since you accepted it:"
+        )
+        notes = [lead, *differences(change.old, new), *texts, *guide]
         if mine is not None and "$comment" in mine:
             data = {**data, "$comment": mine["$comment"]}
             notes.append("its `$comment` is from the earlier version.")
@@ -624,6 +664,104 @@ def _env_block(out: Writer, plan: jdata.DictJsonData, raw: jdata.DictJsonData | 
     _plan_lines(out, plan, raw, indent=2, off=off)
 
 
+_ENV_LISTS = ("allow", "drop", "error")
+_ENV_MAPS = ("set", "default")
+
+
+def _entries(plan: jdata.DictJsonData) -> dict[tuple[str, str], jdata.JsonData]:
+    """An `env` block's entries: each `allow`, `drop` and `error` name (as True),
+    and each `set` and `default` variable's value."""
+    out: dict[tuple[str, str], jdata.JsonData] = {}
+    for part in _ENV_LISTS:
+        for name in plan.get(part) or []:
+            out[(part, str(name))] = True
+    for part in _ENV_MAPS:
+        values = plan.get(part)
+        for name, value in (values.items() if isinstance(values, dict) else ()):
+            out[(part, name)] = value
+    return out
+
+
+def _plan_of(entries: dict[tuple[str, str], jdata.JsonData]) -> jdata.DictJsonData:
+    plan: dict[str, jdata.JsonData] = {}
+    for (part, name), value in entries.items():
+        if part in _ENV_LISTS:
+            plan.setdefault(part, [])
+            plan[part].append(name)  # type: ignore[union-attr]
+        else:
+            plan.setdefault(part, {})
+            plan[part][name] = value  # type: ignore[index]
+    return _plan(plan)
+
+
+def _label(key: tuple[str, str], value: jdata.JsonData) -> str:
+    part, name = key
+    return f"{part}: {name}" if part in _ENV_LISTS else f"{part}: {name} = {flow(value)}"
+
+
+@dataclass
+class EnvMerge:
+    """The top-level `env`, merged variable by variable (step 17)."""
+
+    plan: jdata.DictJsonData
+    # What changed since, what the user changed and kept, and the user's
+    # earlier values the project's change replaces.
+    changed: list[str] = field(default_factory=list)
+    kept: list[str] = field(default_factory=list)
+    earlier: dict[tuple[str, str], jdata.JsonData] = field(default_factory=dict)
+    # The entries whose value is the user's (no `${...}` source to show).
+    mine: set[tuple[str, str]] = field(default_factory=set)
+
+
+def merge_env(
+    old: jdata.DictJsonData, mine: jdata.DictJsonData, new: jdata.DictJsonData,
+    raw_old: jdata.DictJsonData | None, raw_new: jdata.DictJsonData | None,
+) -> EnvMerge:
+    """The three versions of an `env` block, merged by entry, as items are.
+
+    An entry the project didn't change keeps the user's value (or its
+    absence); one it changed takes the project's, with the user's earlier
+    value kept aside when they'd edited it.  `raw_old` and `raw_new` are the
+    project file's `env` as written, to tell a change in the project from a
+    `${...}` the setup now resolves differently.
+    """
+    o, m, n = _entries(old), _entries(mine), _entries(new)
+    raw_o = _entries(raw_old) if raw_old is not None else None
+    raw_n = _entries(raw_new or {})
+    merged: dict[tuple[str, str], jdata.JsonData] = {}
+    result = EnvMerge({})
+    for key in [*n, *(k for k in m if k not in n), *(k for k in o if k not in n and k not in m)]:
+        if key in merged:
+            continue
+        ov, mv, nv = o.get(key), m.get(key), n.get(key)
+        if ov == nv:
+            if mv is not None:
+                merged[key] = mv
+                result.mine.add(key)
+            if mv != ov:
+                result.kept.append(
+                    f"  {_label(key, mv)} (yours)" if mv is not None else f"  {_label(key, ov)} (you removed it)"
+                )
+            continue
+        if nv is not None:
+            merged[key] = nv
+        if ov is None:
+            result.changed.append(f"  {_label(key, nv)} (new)")
+        elif nv is None:
+            result.changed.append(f"  {_label(key, ov)} (the project removed it)")
+        elif raw_o is not None and raw_o.get(key) == raw_n.get(key) and isinstance(raw_n.get(key), str):
+            result.changed.append(
+                f"  {key[0]}: {key[1]}: your setup now gives {flow(nv)} (was {flow(ov)}), "
+                f"from `{raw_n[key]}`"
+            )
+        else:
+            result.changed.append(f"  {key[0]}: {key[1]}: {flow(ov)} -> {flow(nv)}")
+        if mv != ov and mv is not None:
+            result.earlier[key] = mv
+    result.plan = _plan_of(merged)
+    return result
+
+
 def _env(out: Writer, config: UserConfig, context: Context, view: jdata.DictJsonData) -> None:
     new = _plan(view.get("env"))
     raw = jdata.find_dict(config.project_setup(), "env")
@@ -632,22 +770,29 @@ def _env(out: Writer, config: UserConfig, context: Context, view: jdata.DictJson
         _env_block(out, new, raw, False)
         out.data("")
         return
-    old = _plan(previous.suggested.get("env"))
-    mine = _plan(previous.accepted.get("env") if previous.accepted else None)
-    if old != new:
+    merge = merge_env(
+        _plan(previous.suggested.get("env")),
+        _plan(previous.accepted.get("env") if previous.accepted else None),
+        new,
+        jdata.find_dict(previous.project, "env") if previous.project is not None else None,
+        raw,
+    )
+    if merge.changed:
         out.note("changed since you accepted it:")
-        out.notes(differences(old, new))
-        _env_block(out, new, raw, False)
-        if mine != old:
-            out.note("your version before, commented out:")
-            _env_block(out, mine, None, True)
-    elif mine != old:
-        out.note("your change, kept (it's checked again when you use the review):")
-        out.notes(differences(old, mine))
-        _env_block(out, mine, None, False)
-    else:
+        out.notes(merge.changed)
+    if merge.kept:
+        out.note("your changes, kept (they're checked again when you use the review):")
+        out.notes(merge.kept)
+    if not merge.changed and not merge.kept:
         out.note("unchanged since you accepted it.")
-        _env_block(out, mine, None, False)
+    sources = {
+        part: {k: v for k, v in (raw or {}).get(part, {}).items() if (part, k) not in merge.mine}
+        for part in _ENV_MAPS if isinstance((raw or {}).get(part), dict)
+    }
+    _env_block(out, merge.plan, sources, False)
+    if merge.earlier:
+        out.note("your values before, commented out:")
+        _env_block(out, _plan_of(merge.earlier), None, True)
     out.data("")
 
 

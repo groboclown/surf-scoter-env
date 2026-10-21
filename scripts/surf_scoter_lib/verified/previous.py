@@ -27,6 +27,10 @@ class Previous:
     acceptance: records.Acceptance
     # The project's suggestion as that review wrote it (`review.suggested`).
     suggested: jdata.DictJsonData
+    # The project file as it was then (`suggestion.json`'s `project`), with
+    # its `${...}` as written: whether a value changed in the project or in
+    # how the setup resolves it.
+    project: jdata.DictJsonData | None
     # The acceptance's `review.yaml`, for the generator to read.
     review_file: Path
     # Its snapshot's files, read from the store.
@@ -61,7 +65,8 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
     for acceptance in on_branch or candidates:
         where = (env_id, records.ACCEPTANCES_DIR, acceptance.id)
         data = verified_store.read_bytes(*where, accept.SUGGESTION_FILE, max_size=store.MAX_JSON_SIZE)
-        suggested = jdata.find_dict(json.loads(data), REVIEW_VIEW) if data else None
+        stored = json.loads(data) if data else None
+        suggested = jdata.find_dict(stored, REVIEW_VIEW) if stored else None
         if suggested is None:
             continue
         manifest = acceptance.suggestion
@@ -69,9 +74,10 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
         return Previous(
             acceptance=acceptance,
             suggested=suggested,
+            project=jdata.find_dict(stored, "project"),
             review_file=verified_store.root.joinpath(*where, accept.REVIEW_FILE),
             files=_files(verified_store, manifest, lookup.limits(config)),
-            setup_changes=setup_changes(acceptance.setup.values, records.setup_values(
+            setup_changes=records.setup_changes(acceptance.setup.values, records.setup_values(
                 config, lookup.vcs_section(config), lookup.verified_containers(config),
             )),
         )
@@ -86,19 +92,3 @@ def _files(
         if entry.size <= limits.max_file_size:
             files[rel] = verified_store.get_blob(entry.sha256, entry.size)
     return files
-
-
-def setup_changes(before: jdata.DictJsonData, now: jdata.DictJsonData) -> list[str]:
-    """The setup values that differ: each top-level name, or, within a mapping, `name: key`."""
-    changes: list[str] = []
-    for name in sorted(set(before) | set(now)):
-        old, new = before.get(name), now.get(name)
-        if old == new:
-            continue
-        if isinstance(old, dict) and isinstance(new, dict):
-            changes.extend(
-                f"{name}: {key}" for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)
-            )
-        else:
-            changes.append(name)
-    return changes

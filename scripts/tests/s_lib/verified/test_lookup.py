@@ -137,3 +137,26 @@ class LookupTest(TempDirTest):
             found[str(outside)],
             snapshot.snapshot_dir(outside, snapshot.SnapshotLimits()).manifest.id,
         )
+
+    def test_no_match_reason(self) -> None:
+        """Why there's no match: never accepted, expired, the files or the setup changed."""
+        self.assertEqual(
+            lookup.no_match_reason(UserConfig(self.suc())), "You haven't accepted this project's settings.",
+        )
+        acceptance = self.accept()
+        later = acceptance.expires_at + datetime.timedelta(days=1)
+        self.assertEqual(
+            lookup.no_match_reason(UserConfig(self.suc()), later),
+            f"Your acceptance of these files ({acceptance.id}) expired {acceptance.expires_at.isoformat()}.",
+        )
+        changed_setup = self.suc()
+        changed_setup["resolved"]["network-gateway"] = {"values": {"name": "other"}}  # type: ignore[index]
+        self.assertEqual(
+            lookup.no_match_reason(UserConfig(changed_setup)),
+            f"Your setup changed since you accepted these files ({acceptance.id}): gateway: name.",
+        )
+        self.write("proj/.surf-scoter.d/env/Dockerfile", "FROM ubuntu\n")
+        self.assertEqual(
+            lookup.no_match_reason(UserConfig(self.suc())),
+            f"The project's files changed since you last accepted them ({acceptance.id}): env/Dockerfile.",
+        )

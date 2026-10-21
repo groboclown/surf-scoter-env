@@ -77,6 +77,7 @@ class ChooseTest(unittest.TestCase):
         self.assertEqual(self.choose(), "deny")
         self.assertEqual(self.choose("u"), "use")
         self.assertEqual(self.choose(" Edit "), "edit")
+        self.assertEqual(self.choose("v"), "view")
         self.assertEqual(self.choose("yes", "maybe", "u"), "use")
         self.assertEqual(self.choose("yes"), "deny")
 
@@ -85,6 +86,42 @@ class ChooseTest(unittest.TestCase):
         prompt = main_verify.Prompt(UserConfig({}), None, None, ask=interrupted)  # type: ignore[arg-type]
         with quiet():
             self.assertEqual(prompt.choose(), "deny")
+
+
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+class PageTest(_TempDir):
+    """Test showing the review."""
+
+    def test_pager_on_a_terminal(self) -> None:
+        """With `PAGER` set and a terminal, the text goes to the pager, run in the directory given."""
+        got = self.tmp / "got"
+        pager = f"{sys.executable} -c \"import os, sys; open({str(got)!r}, 'w').write(os.getcwd() + '|' + sys.stdin.read())\""
+        old = os.environ.get("PAGER")
+        os.environ["PAGER"] = pager
+        try:
+            with contextlib.redirect_stdout(_Terminal()) as out:
+                main_verify.page("the review\n", self.tmp)
+            self.assertEqual(got.read_text(), f"{self.tmp}|the review\n")
+            self.assertEqual(out.getvalue(), "")
+            # Without a terminal, it's printed.
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                main_verify.page("the review\n", self.tmp)
+            self.assertEqual(out.getvalue(), "the review\n")
+        finally:
+            if old is None:
+                del os.environ["PAGER"]
+            else:
+                os.environ["PAGER"] = old
+
+    def test_split_command(self) -> None:
+        self.assertEqual(main_verify.split_command("less -R", windows=False), ["less", "-R"])
+        self.assertEqual(
+            main_verify.split_command('"C:\\Tools\\less.exe" -R', windows=True), ["C:\\Tools\\less.exe", "-R"],
+        )
 
 
 class EditorCommandTest(unittest.TestCase):
@@ -202,6 +239,20 @@ class PromptTest(DistTest):
         self.assertEqual(suggestion["project"]["commands"][1]["command"], "sh")
         for path in (where / "accepted.json", where / "review.yaml", where / "suggestion.json"):
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_view(self) -> None:
+        """The review is shown first, and again on `view`."""
+        shown: list[str] = []
+        taken = lookup.project_snapshot(self.config, self.project)
+        prompt = main_verify.Prompt(
+            self.config, taken, None, ask=answers("v", "d"), page=lambda text, _: shown.append(text),
+        )
+        text = main_verify.review.build(self.config, main_verify.review.Context(
+            report=main_verify.checks.check_project(self.config), now=prompt.now(), files=taken,
+        ))
+        with quiet():
+            self.assertEqual(prompt.run(text), 1)
+        self.assertEqual(shown, [text, text])
 
     def test_deny(self) -> None:
         """Enter denies; so does the end of the input."""

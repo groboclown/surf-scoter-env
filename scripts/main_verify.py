@@ -26,6 +26,7 @@ from surf_scoter_lib import (
     generator,
     jdata,
     review,
+    setup_check,
 )
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import accept, lookup, snapshot
@@ -34,11 +35,21 @@ from surf_scoter_lib.verified import previous as previous_acceptance
 # The generator refuses a review file larger than this, too.
 MAX_REVIEW_SIZE = 2 * 1024 * 1024
 REVIEW_FILE_NAME = "review.yaml"
-PROMPT = "Use these settings, edit them, or deny them? [u]se / [e]dit / [D]eny: "
+PROMPT = "Use these settings, edit them, or deny them? [u]se / [e]dit / [v]iew / [D]eny: "
 
 
-def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | None = None) -> int:
-    """Write the review file to `output`; or, without one, ask about it at the terminal."""
+def run_verify(
+    config: UserConfig,
+    output: Path | None,
+    *,
+    interactive: bool | None = None,
+    setup_review: bool = True,
+) -> int:
+    """Write the review file to `output`; or, without one, ask about it at the terminal.
+
+    With `setup_review`, the review lists what the user should know about
+    their setup's host command checks, as `scoter user-setup` does.
+    """
     if config.project_setup() is None:
         print("No project here: run this in a project, or give --project-dir.", file=sys.stderr)
         return 1
@@ -67,6 +78,7 @@ def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | N
     context = review.Context(
         report=report, now=now, files=taken, branch=branch, accepted_note=accepted_note(config),
         previous=find_previous(config, branch),
+        setup_notes=setup_check.host_command_report(config) if setup_review else None,
     )
     text = review.build(config, context)
     if output is not None:
@@ -129,6 +141,8 @@ class Prompt:
     ask: Callable[[str], str] = input
     # Runs the editor on the review file: (file, the directory to start in).
     edit: Callable[[Path, Path], None] | None = None
+    # Shows the review file's text: (the text, the directory to start in).
+    page: Callable[[str, Path], None] | None = None
     # Parses a review file: (the file, a private directory) -> the generator's
     # universal file with its `review`, or its complaints.
     parse: Callable[[Path, Path], tuple[jdata.DictJsonData | None, list[str]]] | None = None
@@ -151,13 +165,16 @@ class Prompt:
         path = Path(name)
         data = text.encode("ascii")
         checked = self.check(data, directory, path)
-        sys.stdout.write(text)
+        self.show_review(data, directory)
         while True:
             self.show(checked)
             choice = self.choose()
             if choice == "deny":
                 print("Denied: nothing was accepted.", file=sys.stderr)
                 return 1
+            if choice == "view":
+                self.show_review(data, directory)
+                continue
             if choice == "edit":
                 try:
                     self.run_editor(path, directory)
@@ -188,8 +205,16 @@ class Prompt:
             )
             return 0
 
+    def show_review(self, data: bytes, directory: Path) -> None:
+        """Show the review file as it is now: through the pager, or printed."""
+        text = data.decode("utf-8", errors="replace")
+        if self.page is not None:
+            self.page(text, directory)
+        else:
+            page(text, directory)
+
     def choose(self) -> str:
-        """`use`, `edit` or `deny`; Enter, end of input or Ctrl-C deny."""
+        """`use`, `edit`, `view` or `deny`; Enter, end of input or Ctrl-C deny."""
         while True:
             try:
                 answer = self.ask(PROMPT).strip().lower()
@@ -202,6 +227,8 @@ class Prompt:
                 return "use"
             if answer in ("e", "edit"):
                 return "edit"
+            if answer in ("v", "view"):
+                return "view"
 
     def show(self, checked: Checked) -> None:
         """What stops the file being used, or what's worth knowing about it."""
@@ -253,17 +280,40 @@ class Prompt:
         return Checked(report=report, accepted=parsed.review_accepted())
 
 
+def split_command(command: str, windows: bool) -> list[str]:
+    """A command from the environment (`EDITOR`, `PAGER`), split as its shell would."""
+    if not windows:
+        return shlex.split(command)
+    # Windows paths are full of backslashes, which POSIX splitting would eat.
+    return [
+        part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
+        for part in shlex.split(command, posix=False)
+    ]
+
+
+def page(text: str, directory: Path) -> None:
+    """Show `text` through `PAGER` when it's set and the output is a terminal; else print it.
+
+    The pager starts in `directory` (the review's private one), as the editor does.
+    """
+    command = os.environ.get("PAGER")
+    if command and sys.stdout.isatty():
+        args = split_command(command, sys.platform == "win32")
+        try:
+            subprocess.run(  # nosec: B603  # Your own pager, from your environment.
+                args, input=text.encode("utf-8"), cwd=directory, check=False, shell=False,
+            )
+            return
+        except OSError as err:
+            print(f"Couldn't run your pager ({args[0]}): {err}", file=sys.stderr)
+    sys.stdout.write(text)
+
+
 def editor_command(environ: Mapping[str, str], windows: bool) -> list[str]:
     """The editor to run: `VISUAL`, or else `EDITOR`; on Windows, or else Notepad."""
     command = environ.get("VISUAL") or environ.get("EDITOR")
     if command:
-        if not windows:
-            return shlex.split(command)
-        # Windows paths are full of backslashes, which POSIX splitting would eat.
-        return [
-            part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
-            for part in shlex.split(command, posix=False)
-        ]
+        return split_command(command, windows)
     if windows:
         # By its full path, so nothing named `notepad` elsewhere is picked up.
         return [os.path.join(environ.get("SystemRoot", "C:\\Windows"), "System32", "notepad.exe")]
@@ -416,8 +466,20 @@ def main(argv: Sequence[str]) -> int:
         default=None,
         help="Only write the review file here, without asking about it or accepting anything.",
     )
+    parser.add_argument(
+        "--skip-setup-review",
+        action="store_false",
+        dest="setup_review",
+        default=True,
+        help=(
+            "Leave out of the review what your setup changes about the host command checks "
+            "(the checks it removes or replaces, and its overrides), which `scoter user-setup` shows."
+        ),
+    )
     args = parser.parse_args(argv)
-    return run_verify(config, Path(args.output) if args.output else None)
+    return run_verify(
+        config, Path(args.output) if args.output else None, setup_review=args.setup_review,
+    )
 
 
 if __name__ == "__main__":

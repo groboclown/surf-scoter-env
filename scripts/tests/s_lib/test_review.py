@@ -147,6 +147,18 @@ class BuildTest(unittest.TestCase):
         self.assertIn('  use: "project"', lines)
         self.assertIn('    "debian:bookworm": "debian:bookworm"', lines)
 
+    def test_setup_notes(self) -> None:
+        """What the setup changes about the checks, or that it changes nothing; or left out."""
+        config = UserConfig(self.suc())
+        report = checks.check_project(config, str(self.bin))
+        def build(notes: list[str] | None) -> list[str]:
+            return review.build(config, review.Context(report=report, now=NOW, setup_notes=notes)).splitlines()
+        lines = build(["`x:y` overrides `host-bridge:shells` for `sh`, with `warn`"])
+        self.assertIn("#scoter: Your setup's host command checks (as `scoter user-setup` shows them):", lines)
+        self.assertIn("#scoter:   `x:y` overrides `host-bridge:shells` for `sh`, with `warn`", lines)
+        self.assertIn("#scoter: Your setup's host command checks: none removed, replaced or overridden.", build([]))
+        self.assertFalse(any("host command checks" in line for line in build(None)))
+
     def test_values_cant_pose_as_comments(self) -> None:
         """A newline in a value stays inside its quotes, on one line."""
         text = self.build()
@@ -240,7 +252,50 @@ class SetupChangesTest(unittest.TestCase):
     """Test listing the setup values that changed."""
 
     def test_changes(self) -> None:
-        from ...surf_scoter_lib.verified import previous
+        from ...surf_scoter_lib.verified import records
         before = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 2}, "vcs": "git-vcs"}
         now = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 3, "c": 4}, "vcs": None}
-        self.assertEqual(previous.setup_changes(before, now), ["checks: b", "checks: c", "vcs"])
+        self.assertEqual(records.setup_changes(before, now), ["checks: b", "checks: c", "vcs"])
+
+
+class MergeEnvTest(unittest.TestCase):
+    """Test merging the top-level `env` by variable (step 17)."""
+
+    def test_merge(self) -> None:
+        old = {"allow": ["LANG", "TZ"], "set": {"A": "1", "B": "2", "C": "/h/.ssh/config", "D": "4"}}
+        mine = {"allow": ["LANG"], "set": {"A": "1", "B": "mine", "C": "/h/.ssh/config", "D": "my-d"}}
+        new = {"allow": ["LANG", "TZ", "PAGER"], "set": {"A": "1", "B": "2", "C": "/other/config", "D": "40"}}
+        raw_old = {"set": {"C": "${ssh:config-file}", "D": "4"}}
+        raw_new = {"set": {"C": "${ssh:config-file}", "D": "40"}}
+        merge = review.merge_env(old, mine, new, raw_old, raw_new)
+        # Unchanged by the project: the user's (B), and their removal (TZ), kept.
+        self.assertEqual(merge.plan["set"]["B"], "mine")
+        self.assertNotIn("TZ", merge.plan["allow"])
+        self.assertIn("  set: B = \"mine\" (yours)", merge.kept)
+        self.assertIn("  allow: TZ (you removed it)", merge.kept)
+        # New from the project.
+        self.assertIn("PAGER", merge.plan["allow"])
+        self.assertIn("  allow: PAGER (new)", merge.changed)
+        # Changed by the setup's resolution, not the project: said so.
+        self.assertEqual(merge.plan["set"]["C"], "/other/config")
+        self.assertIn(
+            '  set: C: your setup now gives "/other/config" (was "/h/.ssh/config"), from `${ssh:config-file}`',
+            merge.changed,
+        )
+        # Changed by the project, after the user's edit: the project's, the user's kept aside.
+        self.assertEqual(merge.plan["set"]["D"], "40")
+        self.assertIn('  set: D: "4" -> "40"', merge.changed)
+        self.assertEqual(merge.earlier, {("set", "D"): "my-d"})
+
+    def test_removed_by_the_project(self) -> None:
+        merge = review.merge_env({"set": {"A": "1"}}, {"set": {"A": "1"}}, {}, None, None)
+        self.assertEqual(merge.plan, {})
+        self.assertEqual(merge.changed, ['  set: A = "1" (the project removed it)'])
+
+    def test_program_moved(self) -> None:
+        """Only where the program is found changed: not the project's change."""
+        old = {"command": "ls", "program": "/usr/bin/ls", "args": []}
+        new = {**old, "program": "/opt/bin/ls"}
+        shown = review.show(review.Change("changed", old, old, new, 0), [])
+        assert shown is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(shown.notes[0].startswith("found somewhere else since you accepted it"))

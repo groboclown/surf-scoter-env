@@ -418,3 +418,19 @@ def _hidden_checks(config: UserConfig) -> jdata.DictJsonData:
                     {"file": file, "check": jdata.find(setup, *key_path)}
                 )
     return {key: found[1:] for key, found in sorted(versions.items()) if len(found) > 1}
+
+
+def setup_changes(before: jdata.DictJsonData, now: jdata.DictJsonData) -> list[str]:
+    """The setup values that differ: each top-level name, or, within a mapping, `name: key`."""
+    changes: list[str] = []
+    for name in sorted(set(before) | set(now)):
+        old, new = before.get(name), now.get(name)
+        if old == new:
+            continue
+        if isinstance(old, dict) and isinstance(new, dict):
+            changes.extend(
+                f"{name}: {key}" for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)
+            )
+        else:
+            changes.append(name)
+    return changes
