@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from . import gateway, jdata
+from . import fileutil, gateway, jdata
 from .err import ConfigErr
 from .user_config import UserConfig
 from .verified import snapshot
@@ -316,10 +316,7 @@ def _hits(
         env = _texts(check, "env")
         paths = _texts(check, "paths")
         if paths:
-            if real and any(
-                real == os.path.realpath(p) or real.startswith(os.path.realpath(p) + os.sep)
-                for p in paths
-            ):
+            if real and _under(real, paths):
                 yield _Hit(check_id, check, f"{at}.program")
             continue
         if _has_names(check) and not _matches_name(check, name, real):
@@ -362,13 +359,42 @@ def check_program_paths(
                     "a host command never runs a program from the project.",
                 ))
                 break
-        findings.extend(_writable_by_others(key, r.name, Path(r.executable)))
+        findings.extend(writable_by_others(key, r.name, Path(r.executable)))
     return findings
 
 
-def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
+def _under(real: str, paths: Sequence[str]) -> bool:
+    """Whether the program at `real` (its real path) is one of `paths`, or under one."""
+    return any(
+        real == os.path.realpath(p) or real.startswith(os.path.realpath(p) + os.sep) for p in paths
+    )
+
+
+def path_findings(config: UserConfig, key: str, program: str) -> list[Finding]:
+    """The setup's `host-commands` checks that match `program` by where it is (`paths`).
+
+    Version manager shims, say: where a program is matters for any program
+    the tools run, the setup's own too, unlike checks by name or option.
+    Overrides are for the project's commands, so they don't apply.
+    """
+    real = os.path.realpath(program)
+    return [
+        Finding(
+            _ACTIONS.get(jdata.req_str(check, "action"), Severity.REFUSE), key,
+            jdata.req_str(check, "reason"), (check_id,),
+        )
+        for check_id, check in config.host_command_checks().items()
+        if not _texts(check, "overrides") and _under(real, _texts(check, "paths"))
+        and jdata.req_str(check, "action") != "allow"
+    ]
+
+
+_ROOT_UID = 0
+
+
+def writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
     """Whether another user could change the program, or replace it."""
-    if sys.platform == "win32":
+    if fileutil.is_windows():
         return []
     found: list[Finding] = []
     uid = os.getuid()
@@ -389,7 +415,7 @@ def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
                 continue
             is_dir = stat.S_ISDIR(mode)
             what = "directory" if is_dir else "file"
-            if st.st_uid not in (0, uid):
+            if st.st_uid not in (_ROOT_UID, uid):
                 found.append(Finding(
                     Severity.REFUSE, key,
                     f"`{name}`'s {what} {current} belongs to another user, who could change "
@@ -727,4 +753,3 @@ def apply_overrides(
             for f in ret
         ]
     return ret
-

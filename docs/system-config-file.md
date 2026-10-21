@@ -183,7 +183,7 @@ The tools use these sections:
 * `python`: the interpreter that runs the tool's sub-commands (the distribution's `bin/main_*.py` scripts).
     * `programs: exec`: the interpreter, normally `python3`.  Point it at a virtual environment's interpreter, such as `${scoter:distribution-dir}/.venv/bin/python`, to give the scripts installed libraries.  It runs on your computer with your privileges, so never point it into a project.
     * `runs: sub-command`: how the tool starts a sub-command script: normally `${exec} -E -s {x:script}`.  `{x:script}` is the script, and the tool adds the universal configuration file, the sub-command name and its arguments after it.  It must start with the interpreter; `-E` ignores the `PYTHON*` environment variables (which a project could set when you enter its directory) and `-s` your user site-packages.
-* `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  Its `host-commands` map a project's `git` command to `${exec}`, and warn about it, and about the options that set Git configuration.
+* `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  Its `host-commands` map a project's `git` command to `${exec}`, and warn about it, and about the options that set Git configuration.  Its `value-lists: drop-env` is `GIT_*`, so the Git commands the tools run (`local-clone`, `fetch-changes-into`, `merge-changes`) don't get Git's environment variables, which a project could set as you enter its directory to point Git at another repository, configuration or program.  Set what you need in your Git configuration instead (`core.sshCommand` in place of `GIT_SSH_COMMAND`).
 * `network-gateway`: the network gateway, the only way out of the development container.
     * `values: name`: the gateway's name (`squid`).  Your acceptance of a project's egress rules is for this gateway; a different one asks for a new review.
     * `values: config-mount`: where the gateway container reads the configuration `write-config` makes.
@@ -240,6 +240,35 @@ scoter:
 ```
 
 As with `path-lists`, a higher priority file's list replaces the whole list.
+
+Any section can have a `value-lists: drop-env`: the environment variables its `runs` commands don't get, each a name, or a prefix ending in `*` (`GIT_*`).  On Windows, names match ignoring case.
+
+To change a section's `drop-env`, set it in your own setup file.  Your list replaces the distribution's whole, and the rest of the section (its `runs`, `values` and so on) stays as the distribution has it, so you only write the list:
+
+```yaml
+# Drop more: copy the distribution's entries, and add yours.
+git-vcs:
+    value-lists:
+        drop-env:
+            - GIT_*
+            - PAGER
+```
+
+```yaml
+# Drop less: list only what you want dropped.  (`drop-env: []` drops nothing.)
+git-vcs:
+    value-lists:
+        drop-env:
+            - GIT_DIR
+            - GIT_WORK_TREE
+            - GIT_CONFIG_*
+```
+
+A list can't refer to the distribution's copy of itself, so adding means copying its entries; check them again when you update Surf Scoter, as yours won't pick up a new one.  Dropping less lets a project's environment reach those commands again: keep at least the variables that point Git at another repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), another configuration (`GIT_CONFIG*`), or another program (`GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_EXEC_PATH`, `GIT_EDITOR`, `GIT_PAGER`, `GIT_EXTERNAL_DIFF`).
+
+The `docker` section has no `drop-env`.  A project could set `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` as you enter its directory, to point the tools' Docker commands at another daemon, or at a configuration whose credential helpers run programs.  But `DOCKER_HOST` is also how Podman, and remote Docker daemons, are commonly set up, so dropping it by default would break those setups.  If your setup doesn't rely on them, consider adding one in your setup file, such as `docker: value-lists: drop-env: [DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, DOCKER_CERT_PATH, DOCKER_TLS_VERIFY]`, and setting what you need in the section's `runs` instead (`--host`, `--config`).
+
+The programs your setup runs are checked before `scoter run` starts anything, and by `scoter user-setup`: a program can't be written relative to the project (`./`), refer to a project location, or be found inside the project, the workspace or the repository; nor can another user own it, or anyone write to it or a directory above it (one its group can write to is warned about); nor can it be under a `host-commands` check's `paths`, such as the version manager shims.  A relative `PATH` entry is warned about: the tools skip it when finding programs.
 
 ## Plain Values
 

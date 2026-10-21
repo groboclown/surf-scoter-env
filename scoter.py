@@ -150,6 +150,7 @@ def find_vcs_root(settings: DictJsonData, start: Path) -> tuple[Path, str] | Non
             check=False,
             shell=False,
             timeout=60,
+            env=command_env(settings, name + VCS_SECTION_SUFFIX),
         )
         if res.returncode != 0:
             raise ConfigErr(f"Couldn't find the {name} repository root (`find-root` failed).")
@@ -364,6 +365,29 @@ def find_bin_dir(bin_dir: str | None, dist_dir: Path) -> Path:
             raise ConfigErr(f"Could not find bin directory '{bin_dir}'")
         return Path(bin_dir)
     return dist_dir / DISTRIBUTION_BIN_DIR
+
+
+def command_env(settings: DictJsonData, section: str) -> dict[str, str]:
+    """The environment for a section's `runs` commands: this one, less its `value-lists: drop-env`.
+
+    Each entry is a name, or a prefix ending in `*`; names match ignoring
+    case on Windows.  The library's `user_config.drop_env` does the same for
+    the sub-commands.
+    """
+    patterns = _opt_lookup(settings, "resolved", section, "value-lists", "drop-env")
+    if not isinstance(patterns, list):
+        return dict(os.environ)
+
+    def fold(name: str) -> str:
+        return name.upper() if sys.platform == "win32" else name
+
+    texts = [p for p in patterns if isinstance(p, str)]
+    exact = {fold(p) for p in texts if not p.endswith("*")}
+    prefixes = tuple(fold(p[:-1]) for p in texts if p.endswith("*"))
+    return {
+        name: value for name, value in os.environ.items()
+        if fold(name) not in exact and not (prefixes and fold(name).startswith(prefixes))
+    }
 
 
 def _opt_lookup(data: DictJsonData, *parts: str) -> JsonData:

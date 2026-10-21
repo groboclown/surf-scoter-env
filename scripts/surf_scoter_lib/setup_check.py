@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
 
+from . import checks
 from .user_config import UserConfig
 
 # The tool's locations that depend on the project, or on where the tool runs.
@@ -90,6 +91,37 @@ def check_programs(
             "the tool runs in, which is usually the project",
         ))
     return problems
+
+
+def program_findings(config: UserConfig, path_env: str | None = None) -> list[checks.Finding]:
+    """Everything wrong with the setup's programs, as the checks library's findings.
+
+    `check_programs`' problems refuse, but a relative `PATH` entry, which
+    the tools skip, only warns.  Then, for each program as found: whether
+    another user could change it (step 11's check), and the setup's
+    `host-commands` checks that match by where a program is (`paths`: version
+    manager shims, which pick the real program from a file in the directory
+    they run in).  `scoter user-setup` reports them; `scoter run` refuses to
+    start on a refusal.
+    """
+    findings = [
+        checks.Finding(
+            checks.Severity.WARN if problem.key == "PATH" else checks.Severity.REFUSE,
+            problem.key,
+            (f"{problem.file}: " if problem.file else "") + f"{problem.value!r} {problem.reason}",
+        )
+        for problem in check_programs(config, path_env)
+    ]
+    seen: set[str] = set()
+    for _, section, key, _ in config.setup_programs():
+        where = f"{section}.programs.{key}"
+        found = config.resolved_program(section, key)
+        if where in seen or not found:
+            continue
+        seen.add(where)
+        findings.extend(checks.writable_by_others(where, key, Path(found)))
+        findings.extend(checks.path_findings(config, where, found))
+    return findings
 
 
 def _written_problem(value: str) -> str | None:

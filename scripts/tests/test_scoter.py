@@ -138,6 +138,34 @@ class FindVcsRootTest(unittest.TestCase):
                 scoter.find_vcs_root(_vcs_settings(git=command), self.dir / "a")
 
 
+class CommandEnvTest(unittest.TestCase):
+    """The VCS's `find-root` runs without the section's `drop-env` variables."""
+
+    def test_find_root_without_git_variables(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(os.path.realpath(tmp.name))
+        # Prints GIT_DIR when it's there, else the root: either way, a root.
+        script = (
+            "import os, sys; print(os.environ.get('GIT_DIR') or sys.argv[1])"
+        )
+        settings: scoter.DictJsonData = {"resolved": {"git-vcs": {
+            "runs": {"find-root": [sys.executable, "-c", script, "{x:start}"]},
+            "value-lists": {"drop-env": ["GIT_*"]},
+        }}}
+        old = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = "/elsewhere"
+        try:
+            self.assertEqual(scoter.find_vcs_root(settings, root), (root, "git"))
+            self.assertNotIn("GIT_DIR", scoter.command_env(settings, "git-vcs"))
+            self.assertIn("GIT_DIR", scoter.command_env(settings, "file-vcs"))
+        finally:
+            if old is None:
+                del os.environ["GIT_DIR"]
+            else:
+                os.environ["GIT_DIR"] = old
+
+
 class FindProjectDirTest(unittest.TestCase):
     """Test the project search, from the start up to the VCS root."""
 

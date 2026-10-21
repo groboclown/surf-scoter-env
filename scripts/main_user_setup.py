@@ -9,6 +9,7 @@ from pathlib import Path
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
     UserConfig,
+    checks,
     defaults,
     fileutil,
     gen_parser,
@@ -44,20 +45,28 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
 
 
 def check_setup(config: UserConfig) -> bool:
-    """Report setup file values that could run a project's code on the host."""
+    """Report setup values that could run a project's code, or another user's, on the host.
+
+    `scoter run` refuses to start on the same refusals.
+    """
     # Step 1: the setup files' programs.
-    problems = setup_check.check_programs(config)
-    if not problems:
-        print("Good.  None of your setup's programs can come from a project.")
-        return True
-    print(
-        "Some of your setup's programs could run a project's code on your computer, "
-        "with your privileges.  Fix these in your setup files:",
-        file=sys.stderr,
-    )
-    for problem in problems:
-        print(f"  * {problem}", file=sys.stderr)
-    return False
+    findings = setup_check.program_findings(config)
+    refused = [f for f in findings if f.severity == checks.Severity.REFUSE]
+    warned = [f for f in findings if f.severity == checks.Severity.WARN]
+    if refused:
+        print(
+            "Some of your setup's programs could run a project's code, or another user's, "
+            "on your computer, with your privileges.  `scoter run` won't start until you "
+            "fix these in your setup files:",
+            file=sys.stderr,
+        )
+        for finding in refused:
+            print(f"  * {finding.key}: {finding.message}", file=sys.stderr)
+    for finding in warned:
+        print(f"Warning: {finding.key}: {finding.message}", file=sys.stderr)
+    if not refused:
+        print("Good.  None of your setup's programs can come from a project, or be changed by another user.")
+    return not refused
 
 
 def report_host_command_checks(config: UserConfig) -> None:

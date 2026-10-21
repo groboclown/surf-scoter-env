@@ -1,6 +1,9 @@
 #SPDX:MIT
 """Test the suc module."""
+import contextlib
+import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,3 +49,36 @@ class UserConfigTest(unittest.TestCase):
         self.assertIsNone(empty.project_str("vcs"))
         self.assertEqual(empty.project_bridge_commands(), [])
 
+
+
+class DropEnvTest(unittest.TestCase):
+    """Test the environment a section's commands get."""
+
+    def test_drop_env(self) -> None:
+        """Names drop exactly; a `*` drops a prefix."""
+        environ = {"GIT_DIR": "x", "GIT_CONFIG_KEY_0": "y", "GITHUB_USER": "u", "HOME": "/h", "PATH": "/b"}
+        self.assertEqual(
+            user_config.drop_env(environ, ["GIT_*", "HOME"]), {"GITHUB_USER": "u", "PATH": "/b"},
+        )
+        self.assertEqual(user_config.drop_env(environ, []), environ)
+
+    def test_run_command(self) -> None:
+        """A section's `runs` commands run without its `drop-env` variables; others' keep them."""
+        show = [sys.executable, "-c", "import os; print(os.environ.get('GIT_DIR', '-'))"]
+        config = user_config.UserConfig({"resolved": {
+            "git-vcs": {"runs": {"show": show}, "value-lists": {"drop-env": ["GIT_*"]}},
+            "other": {"runs": {"show": show}},
+        }})
+        old = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = "/elsewhere/.git"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                dropped = config.run_command("git-vcs", "show").stdout
+                kept = config.run_command("other", "show").stdout
+        finally:
+            if old is None:
+                del os.environ["GIT_DIR"]
+            else:
+                os.environ["GIT_DIR"] = old
+        self.assertEqual(dropped.strip(), b"-")
+        self.assertEqual(kept.strip(), b"/elsewhere/.git")

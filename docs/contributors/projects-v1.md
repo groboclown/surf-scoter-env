@@ -1328,60 +1328,48 @@ Completed:
 
 ## 18. Wrap up previous steps
 
-Things left dangling because of dependency ordering.  These may be tackled earlier, but this tracks unfinished work.  Some of these may end up as future tasks.
+Things left dangling because of dependency ordering, grouped into batches by what they touch.  Some may end up as future tasks.
 
-- Step 2:
-  - The `./` path resolution on program files remains a check the user runs, not one the tools enforce.  `scoter run` should run the same check before it starts anything, and step 11's path checks for host commands (directories others can write to, version manager shims) should cover the setup's programs too.
-- Step 3:
-  - The container's starting directory in the workspace should be the project directory's path relative to the VCS root.
-  * The VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with.  A project can set `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*` when you enter its directory (say, through a `.envrc`), which would redirect them.  Run them without the VCS's own environment variables; the VCS section could list the ones to drop.
-- Step 4:
-  - The checks are only validated and combined.  Nothing applies them to the project's commands yet: that's step 11, and `host-brokered` still finds each command's `program` on the `PATH` rather than through the checks' `command-map` (steps 7, 8 and 10).
-  - The project files (secret-looking files) and egress host lists are drafted above, as kinds of their own, for steps 11 and 9.
-  - On Windows, matching `name-patterns` against the real file's name drops its extension, whatever it is, rather than only a `PATHEXT` one.  Revisit with step 10's Windows name decisions.
-  - `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
-  - The notices only show in `scoter user-setup`.  Decide whether the review (step 14) shows them too.
-- Step 5:
-  - `active_env.py`'s lock checks and then writes, which two runs can interleave, and a crashed run leaves it held.  Move it to `fileutil.exclusive_lock`.
-  - ~~Step 17 decides when a match on meaning carries an acceptance forward (`EnvironmentRecord.carry_forward`), and how the user is told.~~  Step 17 kept it automatic, with its one-line notice.
-  - On Windows, the store's owner and mode checks are skipped; the design's "under the user's profile" check isn't written yet.
-  - Case-insensitive file systems: the environment id doesn't fold the path's case.
-  - Any change to the setup values asks for a new review.  Some don't affect a project's security; telling them apart is for step 19.
-- Step 7:
-  - The review (steps 12 to 14) freezes `${section:key}` values at acceptance, and records the `@NAME@` names each command uses (not their values), asking again when a project starts using a new one.
-  - `protocol: https` needs a gateway that looks inside TLS; step 9 refuses it, and `methods`, on the Squid gateway.
-- Step 8:
-  - A blanket acceptance has no `accepted.json`; `scoter.py` treats a blanket match as no match until step 11's checks can work the settings out from the project's files.
-  - `scoter kill` isn't implemented; when it is, it removes `${scoter:state-dir}/environments/HOST`, as `scoter run`'s teardown does.
-  - The running environments file (`running-env.json`) keeps a copy of the whole SUC for teardown; it's in `state-dir` now, but not written private.
-- Step 9:
-  - The Squid gateway enforces only `tls` on 443.  `http` (with `methods`) needs port 80 in the firewall's rules and Squid's HTTP handling; other ports need firewall changes (N4); `https` needs a gateway that looks inside TLS.
-  - Accepted settings with `"gateway": null` are accepted by any gateway; step 13 always writes the gateway the review was made for.
-  - A test that runs the gateway containers, for the checks made by hand above.
-- Step 11:
-  - The path checks only cover the project's commands; step 2's note that they should cover the setup's own `programs` too still stands.
-  - On Windows, the owner and mode checks are skipped.
-  - A blanket acceptance (step 8) can now be checked on each run with `check_project`; the run (step 16) wires that in.
-- Step 13:
-  - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
-- Step 14:
-  - ~~The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet.~~  Done in step 17.
+### Closed
+
+Done by later steps, or only notes:
+
+- ~~Step 4: the checks are only validated and combined; `host-brokered` finds each `program` on the `PATH` rather than through `command-map`.~~  Steps 11 and 14 apply the checks, the review resolves programs through `command-map`, and `host-brokered` comes only from the accepted settings (steps 8 and 15).
+- ~~Step 4: the project files (secret-looking files) and egress host lists, for steps 11 and 9.~~  Step 11's `check_project_files` and `egress-data-out-hosts`; making them check kinds is a future task (below).
+- ~~Step 7: the review freezes `${section:key}` values at acceptance, and records the `@NAME@` names each command uses.~~  The review writes each `${...}` resolved (step 14), and keeps `@NAME@` as written; a project that starts using a new name changes its files, which asks for a new review.
+- ~~Step 9: accepted settings with `"gateway": null` are accepted by any gateway.~~  A note: step 13 always writes the gateway.
+- ~~Step 15: `scoter verify` snapshots the files after the generator parsed them.~~  Step 16's check that the staged copy parses the same catches a change in between.
+- ~~Step 17: acceptances made before step 17 have no stored suggestion.~~  A note: they get a full review.
+- ~~Step 2 and step 11: the `./` path resolution on program files is a check the user runs, not one the tools enforce, and step 11's path checks (relative `PATH` entries, directories others can write to, version manager shims) cover only the project's commands.~~  Done in batch B: `setup_check.program_findings` gives step 2's checks (`check_programs`: `./` values, project locations, programs found in the project) as refusals, and a relative `PATH` entry as a warning (the tools skip those); then, for each program as found, step 11's owner and mode checks (`checks.writable_by_others`), and the `host-commands` checks that match by `paths` (`checks.path_findings`: the version manager shims; checks by name or option are for the project's commands, so they don't apply, and nor do overrides).  `scoter user-setup` reports them with their severity; `scoter run` checks them first, and won't start on a refusal.  **Tests:** in `test_setup_check.py`: refusals and the `PATH` warning, programs anyone or the group can write to, a shim (and a check by name not applying).
+- ~~Step 3: the VCS commands (`local-clone`, `fetch-changes-into`, `merge-changes` and so on) run with the environment `scoter` was started with, which a project's `.envrc` could set (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`).~~  Done in batch B: any section's `value-lists: drop-env` names the variables its `runs` commands don't get (a name, or a prefix ending in `*`; case-insensitive on Windows).  `UserConfig.run_command` (the run's clone, fetch and merge), `scoter verify`'s `current-branch` and `scoter.py`'s `find-root` use it.  The distribution's `git-vcs` drops `GIT_*`; [the system configuration file](../system-config-file.md#value-lists) says how to add to it or drop less, and why `docker` has none (a future task, below).  **Tests:** in `test_user_config.py`: `drop_env`, and `run_command` without a dropped variable, another section's command with it.  In `test_scoter.py`: `find-root` without `GIT_DIR`.
+
+### C. The run and its state
+
+- Step 5: `active_env.py`'s lock checks and then writes, which two runs can interleave, and a crashed run leaves it held.  Move it to `fileutil.exclusive_lock`.
+- Step 8: the running environments file (`running-env.json`) keeps a copy of the whole SUC for teardown; it's in `state-dir` now, but not written private.
+- Step 8: `scoter kill` isn't implemented; when it is, it removes `${scoter:state-dir}/environments/HOST`, as `scoter run`'s teardown does.
+- Step 3: the container's starting directory in the workspace should be the project directory's path relative to the VCS root.
+- Step 16 and step 9: a full `scoter run` against the staged copy hasn't been tried end to end (it needs `scoter user-setup` and the container tools), and no test runs the gateway containers, for the checks made by hand in step 9.
+
+### D. The review
+
+- Step 15: the whole review is printed before the prompt; with long Dockerfiles it scrolls away.  Use `PAGER` (if set) when showing it, or show only the summary and open the file on request.
+- Step 4: the setup's notices only show in `scoter user-setup`.  Decide whether the review shows them too.
+- Step 16: without an acceptance, the run doesn't say why (never accepted, expired, the files or the setup changed).
 - Step 17:
-  - Acceptances made before step 17 have no `review` in their `suggestion.json`, so they're passed over as a base (a full review).
-  - The top-level `env` is compared as one item, not per variable, as the draft had it; a change to any variable shows the block's differences.
-  - A `$comment` the user put on an item that's gone from both the project and their acceptance is lost; one on an item the project removed is kept with the item, commented out.
-  - The comparison finds what changed in the project and the user's choices, but not why a resolved value changed: a `${...}` that resolves differently on the host shows as "changed since", as a project change does.
+  - The top-level `env` is compared as one item, not per variable; a change to any variable shows the block's differences.
+  - A `$comment` on an item gone from both the project and the user's acceptance is lost.
+  - A `${...}` that resolves differently on the host shows as "changed since", as a project change does.
+
+### E. What can be accepted
+
+- Step 8 and step 11: a blanket acceptance has no `accepted.json`, and `scoter.py` treats a blanket match as no match.  It could be checked on each run with `check_project`, but the run (step 16) also needs files to build from.
+- Step 15: automation passing an already accepted file (the design's `--accept-file`) isn't written.
 - Step 16:
-  - The message without an acceptance doesn't say why (never accepted, expired, the files or the setup changed).
   - Containers in `dev-containers-verified`, and the user's own (`use: {name}`), build from their live directories: the lookup checked the verified ones' manifests a moment earlier, which leaves a short window.
   - `images` only applies to the project's container; with `use: {name}`, the user's container builds as it is.  A `FROM` naming an image through an `ARG` isn't matched.
-  - A full `scoter run` against the staged copy hasn't been tried end to end (it needs `scoter user-setup` and the container tools).
-- Step 15:
-  - The whole review is printed before the prompt; with long Dockerfiles it scrolls away.  A pager, or only the summary with the file opened on request, may read better.
-  - `scoter verify` snapshots the project's files when it starts, after `scoter.py`'s generator run parsed them.  A change in between gives a snapshot that doesn't match the parsed suggestion.  Step 16's check that the staged copy parses to the same `project` and `dev-container` catches it at run time.
-  - Automation passing an already accepted file (the design's `--accept-file`) isn't written.
-  - On Windows, `read_once` has no `O_NOFOLLOW` and skips the owner check.
-  - Use the `PAGER` env (if set) when showing the output.
+
+Moved to the future tasks: the gateway's other protocols and ports (steps 7 and 9), Windows (steps 4, 5, 11 and 15), matching `env` patterns against patterns (step 4), egress `$override`s (step 13).  Which setup changes need a new review (step 5) is step 19's.
 
 ## 19. Review the settings format
 
@@ -1410,6 +1398,12 @@ The user-setup sub-command can provide capabilities for exploring and disecting 
 - Add a user cache cleanup step.
 - Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
 - Clean up the code to remove references to steps from this document.
+- Clean up the code to follow good coding practices.
+    - Reuse existing helper functions that make clear what's happening, even if it's just a one-liner.
+        - example: Python `sys.platform == "win32"` vs. `fileutils.is_windows()`.
+        - example: use the `jdata` library for handling JSON-like lookups with type safety.
+    - Eliminate magic numbers and strings (except where it makes sense).  Static string keys are generally okay.
+    - Python data-driven tests use 'subTest' to distinguish which ones fail, and to keep running when any one fails.
 
 
 # Future Tasks
@@ -1450,10 +1444,33 @@ Egress hosts (all warn; several, like `github.com`, are often needed, which is w
 
 These should go into a similar "checks" structure as the host-bridge items.  Step 11 added both as `scoter: value-lists` (`secret-file-patterns`, `egress-data-out-hosts`), which only warn; check kinds would let a user make one refuse, or override one.
 
+Egress `$override`s (step 13) depend on this: they're read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
+
+## The gateway's other protocols and ports
+
+From steps 7 and 9: the Squid gateway enforces only `tls` on 443.  `http` (with `methods`) needs port 80 in the firewall's rules and Squid's HTTP handling; other ports need firewall changes (N4); `protocol: https`, and `methods` on it, need a gateway that looks inside TLS.  Each is refused until then.  A test that runs the gateway containers belongs with this work too (step 18's batch C has the first one).
+
+## Windows
+
+Left from steps 4, 5, 11 and 15, for a pass with a Windows machine to test on:
+
+* Matching `name-patterns` against the real file's name drops its extension, whatever it is, rather than only a `PATHEXT` one.
+* The verified store's owner and mode checks, and the path checks' owner and mode checks, are skipped; the store design's "under the user's profile" check isn't written.
+* Case-insensitive file systems: the environment id doesn't fold the path's case.
+* The review prompt's `read_once` has no `O_NOFOLLOW`, and skips the owner check.
+
+## A `drop-env` for Docker
+
+Step 18 (batch B) added `value-lists: drop-env` and gave `git-vcs` one (`GIT_*`), but not `docker`.  A project's `.envrc` could set `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` (whose credential helpers run programs) for the tools' Docker commands.  Dropping them by default would break Podman and remote-daemon setups, which set `DOCKER_HOST` themselves; [the system configuration file](../system-config-file.md#value-lists) suggests one for setups that don't.  Consider a default that keeps working for them: say, the `docker` section's `runs` passing the daemon explicitly (`--host ${docker:host}`, from a `values: host` the user sets once), so `DOCKER_HOST` can be dropped.
+
+## Matching `env` patterns against patterns
+
+From step 4: `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
+
 ## Remove the `--bin-dir` and `--sub-cmd-dir` arguments
 
 With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.
 
-# Compare the "egress-refused-wildcards" setting with Browser cookie domains
+## Compare the "egress-refused-wildcards" setting with Browser cookie domains
 
-The handling of the "egress-refused-wildcards" setting aligns closely with how a browser allows for registering cookie domains (default domain sharing rules).
+The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).

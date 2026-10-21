@@ -16,11 +16,13 @@ from pathlib import Path
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
     UserConfig,
+    checks,
     defaults,
     fileutil,
     gen_parser,
     generator,
     jdata,
+    setup_check,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import ConfigErr, VerifiedStoreErr
@@ -51,6 +53,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # commands, its egress rules, or its container.
     if config.accepted_settings_file() is None:
         print(NOT_ACCEPTED, file=sys.stderr)
+        return 1
+    # Nor with a setup program a project, or another user, could supply.
+    if not _setup_programs_ok(config):
         return 1
     vcs_section = config.get_vcs_section()
 
@@ -268,11 +273,32 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     fileutil.rm(universal_config_file.parent)
 
     # Clean up the setup and resource directories.
-    #_rm(setup_dir)
-    #_rm(resources_dir)
+    # ... currently kept to help debugging.
+    #fileutil.rm(setup_dir)
+    #fileutil.rm(resources_dir)
     # Keep the 'workspace' directory, though.
 
     return 0
+
+
+def _setup_programs_ok(config: UserConfig) -> bool:
+    """Check the setup's programs as `scoter user-setup` does; False, having said why, on a refusal."""
+    findings = setup_check.program_findings(config)
+    for finding in findings:
+        if finding.severity == checks.Severity.WARN:
+            print(f"Warning: {finding.key}: {finding.message}", file=sys.stderr)
+    refused = [f for f in findings if f.severity == checks.Severity.REFUSE]
+    if not refused:
+        return True
+    print(
+        "Your setup's programs could run a project's code, or another user's, on your "
+        "computer, so the environment won't start.  Fix these in your setup files "
+        "(`scoter user-setup` checks them):",
+        file=sys.stderr,
+    )
+    for finding in refused:
+        print(f"  * {finding.key}: {finding.message}", file=sys.stderr)
+    return False
 
 
 def _environment_dir(config: UserConfig, host: str) -> Path:

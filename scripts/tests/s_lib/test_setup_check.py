@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Test the setup_check module."""
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +116,82 @@ class CheckProgramsTest(unittest.TestCase):
         self.assertEqual(self.check(_config({}), path_env), [
             "PATH: is relative",
             "PATH: is relative",
+        ])
+
+
+@unittest.skipIf(sys.platform == "win32", "modes")
+class ProgramFindingsTest(unittest.TestCase):
+    """Test program_findings: the setup's programs as found, as `scoter run` checks them."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(os.path.realpath(self._tmp.name))
+        os.chmod(self.dir, 0o755)  # nosec: B103  # The usual modes, so only the test's are found.
+        self.bin = self.dir / "bin"
+        self.bin.mkdir(mode=0o755)
+        os.chmod(self.bin, 0o755)  # nosec: B103  # As above.
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def tool(self, name: str, directory: Path | None = None) -> str:
+        path = (directory or self.bin) / name
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(path, 0o755)  # nosec: B103  # As above.
+        return str(path)
+
+    def findings(
+        self, config: user_config.UserConfig, path_env: str = "/usr/bin",
+    ) -> list[tuple[str, str, str]]:
+        """Each finding about this test's programs (the machine's own directories aside)."""
+        return [
+            (str(f.severity), f.key, f.message)
+            for f in setup_check.program_findings(config, path_env)
+            if f.key == "PATH" or str(self.dir) in f.message or not f.message.startswith(("Other", "Anyone"))
+        ]
+
+    def test_fine(self) -> None:
+        config = _config({"a": "${x:a}"}, {"a": self.tool("a")})
+        self.assertEqual(self.findings(config), [])
+
+    def test_check_programs_refuse_and_path_warns(self) -> None:
+        """`check_programs`' problems refuse; a relative PATH entry only warns."""
+        config = _config({"a": "./venv/bin/python"})
+        found = self.findings(config, os.pathsep.join(["/usr/bin", "bin"]))
+        self.assertEqual([(s, k) for s, k, _ in found], [("refuse", "t.programs.a"), ("warn", "PATH")])
+        self.assertIn("/home/me/.config/surf-scoter.d/setup.yaml: './venv/bin/python' starts with './'", found[0][2])
+
+    def test_writable_by_others(self) -> None:
+        """A program anyone can write to refuses; one its group can, warns."""
+        anyone = self.tool("anyone")
+        os.chmod(anyone, 0o757)  # nosec: B103  # What the test checks for.
+        group = self.tool("group")
+        os.chmod(group, 0o775)  # nosec: B103  # What the test checks for.
+        config = _config({"a": "${x:a}", "b": "${x:b}"}, {"a": anyone, "b": group})
+        found = self.findings(config)
+        self.assertIn(("refuse", "t.programs.a", f"Anyone can write to `a`'s file {anyone}, and change what runs."), found)
+        self.assertIn(("warn", "t.programs.b", f"Other members of its group can write to `b`'s file {group}."), found)
+
+    def test_version_manager_shim(self) -> None:
+        """A setup program that's a shim is refused, as a project command's would be."""
+        shims = self.dir / "shims"
+        shims.mkdir(mode=0o755)
+        os.chmod(shims, 0o755)  # nosec: B103  # As above.
+        config = _config({"git": "${x:git}"}, {"git": self.tool("git", shims)})
+        config.raw()["host-command-checks"] = {"checks": {
+            "host-bridge:version-manager-shims": {
+                "action": "refuse", "reason": "A shim picks the real program.", "paths": [str(shims)],
+                "files": [], "commands": {}, "name-patterns": [], "options": [], "env": [], "overrides": [],
+            },
+            # Checks by name don't apply to the setup's programs.
+            "host-bridge:vcs": {
+                "action": "refuse", "reason": "Not for the setup.", "paths": [],
+                "files": [], "commands": {"git": None}, "name-patterns": ["git"], "options": [], "env": [],
+                "overrides": [],
+            },
+        }, "command-map": {}}
+        self.assertEqual(self.findings(config), [
+            ("refuse", "t.programs.git", "A shim picks the real program."),
         ])
 
 

@@ -9,9 +9,10 @@ from typing import NoReturn
 class Found(StrEnum):
     """The result of finding an element in the structure."""
     OK = "ok"  # It was found.
-    EMPTY = "empty"  # Nothing was there (different than 'null')
-    WRONG_PATH = "wrong_path"  # Path didn't match up with the data.
-    WRONG_TYPE = "wrong_type"  # Expected the path to have one type, found a different one.
+    EMPTY = "empty"                # Nothing was there (different than 'null')
+    MISSING_PATH = "missing_path"  # Path didn't match up with the data.
+    WRONG_TYPE = "wrong_type"      # Expected the path to have one type, found a different one.
+    SCALAR_TYPE = "scalar"         # Asked for a path element within a scalar type.
 
     def __bool__(self) -> bool:
         return self == Found.OK
@@ -338,19 +339,12 @@ def optional(data: JsonData, *path: JsonPathPart) -> JsonData:
 
 def find(data: JsonData, *path: JsonPathPart) -> JsonData:
     """The value at the path; None when any part of it is missing or null."""
-    curr: JsonData = data
-    followed: list[JsonPathPart] = []
-    for part in path:
-        followed.append(part)
-        if curr is None:
-            return None
-        if isinstance(curr, dict) and isinstance(part, str):
-            curr = curr.get(part)
-        elif isinstance(curr, list) and isinstance(part, int):
-            curr = curr[part] if 0 <= part < len(curr) else None
-        else:
-            raise _type_err(curr, followed[:-1], "map" if isinstance(part, str) else "list")
-    return curr
+    val, res, fp = get_at(data, *path)
+    if res in (Found.EMPTY, Found.MISSING_PATH):
+        return None
+    if res in (Found.SCALAR_TYPE, Found.WRONG_TYPE):
+        raise _type_err(val, fp, "map or list")
+    return val
 
 
 def find_str(data: JsonData, *path: JsonPathPart) -> str | None:
@@ -427,18 +421,25 @@ def get_at(data: JsonData, *path: JsonPathPart) -> OptJsonPath:
     curr: JsonData = data
     followed: list[JsonPathPart] = []
     for part in path:
+        if curr is None:
+            # Return empty before the part is added to followed.
+            return (curr, Found.EMPTY, followed)
         followed.append(part)
         if isinstance(curr, list):
-            if isinstance(part, int) and 0 <= part < len(curr):
-                curr = curr[part]
-                continue
-            return (None, Found.WRONG_PATH, followed)
+            if isinstance(part, int):
+                if 0 <= part < len(curr):
+                    curr = curr[part]
+                    continue
+                return (None, Found.MISSING_PATH, followed)
+            return (None, Found.WRONG_TYPE, followed)
         if isinstance(curr, dict):
-            if isinstance(part, str) and part in curr:
-                curr = curr[part]
-                continue
-            return (None, Found.WRONG_PATH, followed)
-        return (curr, Found.EMPTY, followed)
+            if isinstance(part, str):
+                if part in curr:
+                    curr = curr[part]
+                    continue
+                return (None, Found.MISSING_PATH, followed)
+            return (None, Found.WRONG_TYPE, followed)
+        return (curr, Found.SCALAR_TYPE, followed)
     return (curr, Found.OK, followed)
 
 
@@ -455,9 +456,11 @@ def _as_optional[T: JsonData](val: T, ok: Found, fp: JsonPath, expected: str) ->
         return val
     if ok == Found.EMPTY:
         return None
+    if ok == Found.SCALAR_TYPE:
+        raise _type_err(val, fp, "map or list")
     if ok == Found.WRONG_TYPE:
         raise _type_err(val, fp, expected)
-    if ok == Found.WRONG_PATH:
+    if ok == Found.MISSING_PATH:
         raise _key_err(fp)
     raise RuntimeError(f"unknown Found type {ok}")
 
@@ -465,8 +468,10 @@ def _as_optional[T: JsonData](val: T, ok: Found, fp: JsonPath, expected: str) ->
 def _as_required(val: JsonData, ok: Found, fp: JsonPath, expected: str) -> NoReturn:
     if ok == Found.EMPTY:
         raise ValueError(f"{path_expr_to_str(fp)}: required a {expected}")
+    if ok == Found.SCALAR_TYPE:
+        raise _type_err(val, fp, "map or list")
     if ok == Found.WRONG_TYPE:
         raise _type_err(val, fp, expected)
-    if ok == Found.WRONG_PATH:
+    if ok == Found.MISSING_PATH:
         raise _key_err(fp)
     raise RuntimeError(f"unknown Found type {ok}")

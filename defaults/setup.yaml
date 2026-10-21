@@ -89,7 +89,7 @@ host-bridge:
             reason: >-
                 A shell runs whatever command it's given, so the container could run
                 anything on your computer.
-            commands: [sh, bash, dash, zsh, ksh, mksh, csh, tcsh, fish, nu, cmd, powershell, pwsh]
+            commands: [sh, bash, dash, zsh, ksh, mksh, csh, tcsh, fish, presh, nu, cmd, powershell, pwsh]
         command-runners:
             action: refuse
             reason: >-
@@ -254,6 +254,15 @@ host-bridge:
                 - AWS_CONFIG_FILE
                 - NPM_CONFIG_*
                 - NPM_CONFIG_USERCONFIG
+        version-manager:
+            action: warn
+            reason: >-
+                Dealing with version commits should stay within the workspace, and
+                not call out to the host for performing these actions.  It could cause
+                the container to force the workspace to add a new remote repository,
+                promote changes in your name to the parent repository, or even run
+                arbitrary commands like commit hooks.
+            commands: [git, hg, svn, cvs, p4]
         version-manager-shims:
             action: refuse
             reason: >-
@@ -377,6 +386,16 @@ git-vcs:
             - '{x:root}'
     values:
         ignore-file: .gitignore
+    value-lists:
+        # The environment variables these commands don't get.  A project can set
+        # them as you enter its directory (a `.envrc`, say), and Git's own point
+        # it at another repository (`GIT_DIR`), configuration (`GIT_CONFIG_*`)
+        # or program (`GIT_SSH_COMMAND`).  Set them in your Git configuration
+        # instead; `core.sshCommand` takes the place of `GIT_SSH_COMMAND`.
+        # Note, though, that scoter shouldn't be performing remote pulls or
+        # pushes, so dropping that value shouldn't cause issues.
+        drop-env:
+            - GIT_*
     host-commands:
         # A project's `git` command runs this section's program.
         git:

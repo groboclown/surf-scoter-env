@@ -53,17 +53,18 @@ class FindTest(unittest.TestCase):
         self.assertEqual(jdata.find_list_keys(self.DATA, "nope"), [])
 
     def test_wrong_type(self) -> None:
-        for call in (
-            lambda: jdata.find_str(self.DATA, "a", "n"),
-            lambda: jdata.find_int(self.DATA, "a", "t"),
-            lambda: jdata.find_bool(self.DATA, "a", "n"),
-            lambda: jdata.find_dict(self.DATA, "a", "l"),
-            lambda: jdata.find_list(self.DATA, "a", "m"),
-            lambda: jdata.find_str_list(self.DATA, "a", "m"),
-            lambda: jdata.find_str_list({"l": ["x", 1]}, "l"),
+        for call, data, path in (
+            (jdata.find_str, self.DATA, ("a", "n")),
+            (jdata.find_int, self.DATA, ("a", "t")),
+            (jdata.find_bool, self.DATA, ("a", "n")),
+            (jdata.find_dict, self.DATA, ("a", "l")),
+            (jdata.find_list, self.DATA, ("a", "m")),
+            (jdata.find_str_list, self.DATA, ("a", "m")),
+            (jdata.find_str_list, {"l": ["x", 1]}, ("l",)),
             # A path through text, or a key into a list.
-            lambda: jdata.find(self.DATA, "a", "b", "c"),
-            lambda: jdata.find(self.DATA, "list", "v"),
+            (jdata.find, self.DATA, ("a", "b", "c")),
+            (jdata.find, self.DATA, ("list", "v")),
         ):
-            with self.assertRaises(TypeError):
-                call()
+            with self.subTest(str(path)):
+                with self.assertRaises(TypeError):
+                    call(data, *path)

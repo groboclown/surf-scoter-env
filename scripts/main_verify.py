@@ -337,6 +337,7 @@ def current_branch(config: UserConfig) -> str | None:
         args = config.require_run(section, "current-branch", {"root": str(root)})
         res = subprocess.run(  # nosec: B603  # The command comes from the user's setup.
             args, capture_output=True, check=False, shell=False, timeout=30,
+            env=config.command_env(section),
         )
     except (OSError, subprocess.SubprocessError, SurfScoterErr):
         return None

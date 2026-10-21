@@ -3,7 +3,8 @@
 import json
 import os
 import subprocess  # nosec: B404  # We know the potential issues with subprocess.
-from collections.abc import Callable, Sequence
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from . import jdata
@@ -128,6 +129,17 @@ class UserConfig:
             args.append(arg)
         return args
 
+    def command_env(self, section: str) -> dict[str, str]:
+        """The environment for the section's `runs` commands: this one, less its `drop-env`.
+
+        A section's `value-lists: drop-env` names the variables its commands
+        don't get, each a name, or a prefix ending in `*`: the VCS's own
+        variables, say (`GIT_*`), which a project can set as you enter its
+        directory (a `.envrc`), and which would point the VCS at another
+        repository, configuration or program.
+        """
+        return drop_env(os.environ, self.value_list(section, "drop-env"))
+
     def run_command(
         self,
         section: str,
@@ -154,6 +166,7 @@ class UserConfig:
             check=check,
             cwd=cwd,
             shell=False,
+            env=self.command_env(section),
         )
 
     def dev_container_sshd_port_env(self) -> str | None:
@@ -395,3 +408,19 @@ class UserConfig:
             return call()
         except Exception as err:
             raise ConfigErr(f"bad universal configuration file: {err}") from err
+
+
+def drop_env(environ: Mapping[str, str], patterns: Sequence[str]) -> dict[str, str]:
+    """`environ` without the variables `patterns` name: each a name, or a prefix ending in `*`.
+
+    Names match as the platform's environment does: ignoring case on Windows.
+    """
+    def fold(name: str) -> str:
+        return name.upper() if sys.platform == "win32" else name
+
+    exact = {fold(p) for p in patterns if not p.endswith("*")}
+    prefixes = tuple(fold(p[:-1]) for p in patterns if p.endswith("*"))
+    return {
+        name: value for name, value in environ.items()
+        if fold(name) not in exact and not (prefixes and fold(name).startswith(prefixes))
+    }
