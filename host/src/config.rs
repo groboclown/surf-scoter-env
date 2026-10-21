@@ -590,18 +590,17 @@ fn plan_environments(project: &mut ProjectConfig, system: &SystemConfig) -> Vec<
             .unwrap_or_default()
     };
     let common = resolve(&project.env, "env");
-    let plans: Vec<EnvPlan> = project
+    let own: Vec<EnvPlan> = project
         .commands
         .iter()
         .enumerate()
-        .map(|(i, rule)| {
-            let key = child_key(&index_key("commands", i), "env");
-            common.merged(&resolve(&rule.env, &key))
-        })
+        .map(|(i, rule)| resolve(&rule.env, &child_key(&index_key("commands", i), "env")))
         .collect();
-    for (rule, plan) in project.commands.iter_mut().zip(plans) {
-        rule.env_plan = plan;
+    for (rule, own) in project.commands.iter_mut().zip(own) {
+        rule.env_plan = common.merged(&own);
+        rule.env_resolved = own;
     }
+    project.env_resolved = common;
     errors
 }
 

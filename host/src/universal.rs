@@ -46,6 +46,10 @@ pub struct Universal {
     /// The project configuration file, as written: only a record of the
     /// project's suggestion, which the review is made from.
     pub current_project_setup: Option<Json>,
+    /// The project file's `env` blocks worked out against the setup, each on
+    /// its own (not merged): `{"env": PLAN, "commands": [{"env": PLAN}]}`,
+    /// `${section:key}` expanded and `@NAME@` left.  The review shows them.
+    pub current_project_resolved: Option<Json>,
     /// The commands `scoter-host` runs.  Until the accepted settings feed it
     /// (step 8 of `docs/contributors/projects-v1.md`), it's empty unless
     /// `BuildOptions::unreviewed_project_commands` builds it from the
@@ -259,6 +263,19 @@ pub fn build(config: &FullConfig, options: &BuildOptions) -> Result<Universal, C
         resolved,
         host_command_checks,
         current_project_setup,
+        current_project_resolved: config.project.as_ref().map(|project| {
+            let plan = |plan: &crate::config::environment::EnvPlan| {
+                serde_json::to_value(plan).expect("only text is stored")
+            };
+            serde_json::json!({
+                "env": plan(&project.env_resolved),
+                "commands": project
+                    .commands
+                    .iter()
+                    .map(|rule| serde_json::json!({"env": plan(&rule.env_resolved)}))
+                    .collect::<Vec<_>>(),
+            })
+        }),
         host_brokered,
         accepted_settings: config.accepted.as_ref().map(|a| a.to_universal()),
         egress: config.accepted.as_ref().map(|a| a.egress_universal()),
@@ -611,6 +628,16 @@ mod tests {
         );
         // The project file, as written, `vcs` included.
         assert_eq!(json["current-project-setup"]["vcs"], "git");
+        // Each `env` block resolved on its own: `${...}` expanded, `@NAME@` left.
+        let resolved = &json["current-project-resolved"];
+        assert_eq!(resolved["env"]["set"]["CONF"], ssh_config);
+        assert_eq!(resolved["env"]["set"]["HOME"], "@HOME@");
+        assert_eq!(resolved["commands"][0]["env"]["allow"][0], "AWS_*");
+        assert_eq!(
+            resolved["commands"][0]["env"]["default"]["AWS_REGION"],
+            "us-east-1"
+        );
+        assert_eq!(resolved["commands"][1]["env"]["allow"], Json::Array(vec![]));
         assert_eq!(
             json["current-project-setup"]["container"]["dev-container-path"],
             "./env"

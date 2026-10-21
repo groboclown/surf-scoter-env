@@ -112,6 +112,8 @@ Both stop below your home directory (so a home directory kept in a repository do
 
 The project directory is then looked for in the search's start, and each directory above it up to the repository root, never above it: a project planted above the repository isn't found.  Outside any repository, only the start is searched.  A project directory is one holding `values: project-files-dir`, with `values: project-file-name` in it.  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (such as `file`) can be anywhere.
 
+A VCS section can also have a `runs: current-branch`: given `{x:root}`, the repository's root, it prints the branch checked out, or nothing when it can't tell.  `scoter verify` shows it in the review file.  Like `find-root`, it should read the repository's files rather than run the VCS.  The distribution's `vcs_git_branch.py ROOT` does this for Git: it reads `.git/HEAD` (following a `.git` file's `gitdir:`, for worktrees and submodules), and prints the branch, or `detached at COMMIT`.
+
 All of them are absolute paths.
 
 `distribution-dir` is the only one of these that you can set in a setup file.  The tool needs the others to find the configuration, so changing them afterwards would be a lie.  Setting one is an error (such as `scoter.paths.user-dir: is set by the tool; remove it`).

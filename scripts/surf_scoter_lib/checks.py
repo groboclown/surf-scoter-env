@@ -395,7 +395,10 @@ def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
                     f"`{name}`'s {what} {current} belongs to another user, who could change "
                     "what runs.",
                 ))
-            elif mode & stat.S_IWOTH and not (is_dir and mode & stat.S_ISVTX):
+            elif is_dir and mode & stat.S_ISVTX:
+                # Sticky (like /tmp): others can add files, but not replace yours.
+                continue
+            elif mode & stat.S_IWOTH:
                 found.append(Finding(
                     Severity.REFUSE, key,
                     f"Anyone can write to `{name}`'s {what} {current}, and change what runs.",
@@ -478,11 +481,12 @@ def _logical_lines(text: str) -> list[str]:
     return lines
 
 
-def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Finding]:
-    """`FROM` lines without a digest: a tag can point at new content any time."""
+def from_images(text: str, local_tags: Iterable[str]) -> list[str]:
+    """The images a Dockerfile builds from: each `FROM`, but `scratch`, a local
+    parent's tag, or an earlier stage, in order, each once."""
     local = set(local_tags) | {"scratch"}
     stages: set[str] = set()
-    findings: list[Finding] = []
+    images: list[str] = []
     for line in _logical_lines(text):
         match = _FROM.match(line.strip())
         if not match:
@@ -493,9 +497,18 @@ def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Findin
             rest = rest[: stage.start()]
         words = [w for w in rest.split() if not w.startswith("--")]
         image = words[0] if words else ""
+        if image and image not in local and image.lower() not in stages and image not in images:
+            images.append(image)
         if stage:
             stages.add(stage.group(1).lower())
-        if not image or image in local or image.lower() in stages or "@sha256:" in image:
+    return images
+
+
+def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Finding]:
+    """`FROM` lines without a digest: a tag can point at new content any time."""
+    findings: list[Finding] = []
+    for image in from_images(text, local_tags):
+        if "@sha256:" in image:
             continue
         if "$" in image:
             message = f"`FROM {image}` comes from a build argument, so what it builds on can't be told."

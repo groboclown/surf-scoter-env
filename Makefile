@@ -57,11 +57,7 @@ dev-install:
 ## dev-prep                  Prepare this directory for running the scoter tool from here.
 ##                           Set the --distribution-dir= argument to this current directory.
 .PHONY: dev-prep
-dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug
-	mkdir -p bin
-	cd bin && ln -s ../build-scripts/cargo-gen-scoter-uc.sh gen-scoter-uc
-	cd bin && ln -s ../build-scripts/cargo-scoter-host.sh scoter-host
-	cd bin && ln -s ../scripts/*.py ../scripts/surf_scoter_lib/ .
+dev-prep: dev-env-image firewall-router-image network-gateway-image host-build-debug self-host-install
 
 # ---------------------------------------------------------------------
 # Running Surf Scoter on itself.  See CONTRIBUTORS.md.

@@ -367,6 +367,14 @@ git-vcs:
             - ${scoter:distribution-bin-dir}/vcs_root_nearest.py
             - .git
             - '{x:start}'
+        # The branch checked out at `{x:root}`, for the review, read from the
+        # repository's files (Git isn't run).  Prints nothing when it can't tell.
+        current-branch:
+            - ${python:exec}
+            - -E
+            - -s
+            - ${scoter:distribution-bin-dir}/vcs_git_branch.py
+            - '{x:root}'
     values:
         ignore-file: .gitignore
     host-commands:

@@ -1157,6 +1157,17 @@ The code that constructs the pieces for verification should go into a library fo
 
 **Tests:** a value containing a newline and `# reviewed: safe`; bidirectional override and zero-width characters; terminal escape sequences.
 
+Completed:
+
+* **`scoter verify [--output FILE]`** ([`main_verify.py`](../../scripts/main_verify.py)) writes the review file for the project (to standard output, or to a file only the user can read, not following a symlink), and says how many items are refused and warned about.  Step 15 adds the editor and the prompt.
+* **The library**, [`review.py`](../../scripts/surf_scoter_lib/review.py): `build(config, context)` lays the file out as step 12 says: the header (the project, its snapshot, its branch, the gateway, any acceptance that already matches, and a summary of the refusals and warnings); `result: reject` commented out; `project-dir`; `expires-at` (`verified-expiry-days` from now); the egress rules (ports filled in); the top-level `env` and each command's own, resolved, with each `${...}` source as a comment; the commands, each with its findings, how its program was found, and its absolute program; refused commands commented out, with `$override` naming the refusing checks when every refusal is a setup check's, and without when any isn't; and `dev-container`, listing the project's container files (Dockerfiles in full), its parents, `use: "project"` and `images` (each `FROM`, mapped to itself).
+* **Writing it safely:** strings as JSON writes them with `ensure_ascii`; keys plain only when they're simple names; `clean` takes terminal escape sequences and other control characters out of every comment, and escapes anything outside ASCII, so the whole file is ASCII.
+* **The resolved `env`.**  The generator now gives `current-project-resolved`: the project file's `env` blocks, each worked out against the setup on its own, not merged (step 13's carry-over).
+* **The branch.**  The setup's `git-vcs: runs: current-branch`, running the new [`vcs_git_branch.py`](../../scripts/vcs_git_branch.py) (with [`vcs_branch.py`](../../scripts/surf_scoter_lib/vcs_branch.py)), reads `.git/HEAD` without running Git.
+* **Found on the way:** a sticky directory (like `/tmp`) no longer draws a group-writable warning in the path checks, as it already didn't draw the refusal; `checks.from_images` lists a Dockerfile's base images, for both the `FROM` check and the review's `images`.
+
+**Tests:** in [`test_review.py`](../../scripts/tests/s_lib/test_review.py): the step's three (a value with a newline and `# reviewed: safe` stays one quoted line; bidirectional, zero-width and look-alike characters show as escapes; terminal escape sequences go, from a setup check's reason and from a Dockerfile), the YAML pieces, the layout (refused items with and without `$override`, `${...}` sources, `images`), and the branch (a branch, detached, unreadable, a worktree's `.git` file).  In `universal.rs`: `current-project-resolved`.  By hand, on a scratch project: `scoter verify` writes a review that the generator's `--review` reads back as written, and again with the refused shell uncommented, where the checks turn the refusal into "You overrode `host-bridge:shells`".
+
 ## 15. Add the use / deny / edit prompt
 
 With this step, an acceptance can be made, so remove `gen-scoter-uc --unreviewed-project-commands` and `scoter.py`'s warning (step 7's stand-in, kept by step 8).
@@ -1226,8 +1237,10 @@ Things left dangling because of dependency ordering.  These may be tackled earli
   - On Windows, the owner and mode checks are skipped.
   - A blanket acceptance (step 8) can now be checked on each run with `check_project`; the run (step 16) wires that in.
 - Step 13:
-  - Step 14 writes the review with each `${section:key}` frozen, and its source in a comment; the SUC has the project file as written and the merged plans, but not the split, resolved `env` the review shows.  The generator needs to give that (say, the project file with its `env` values resolved).
+  - ~~Step 14 needs the generator to give the project's split `env`, resolved.~~  Done: `current-project-resolved`.
   - Egress `$override`s are read and stored, but nothing refuses an egress rule through a setup check yet, so any is refused as naming a check that doesn't refuse it.
+- Step 14:
+  - The user's `$comment`s and `$override`s from the last accepted review aren't carried into a new review yet: that needs the stored `review.yaml` (step 15) and the matching of items (step 17).
 
 ## 19. Review the settings format
 

@@ -135,6 +135,9 @@ pub struct ProjectConfig {
     pub egress: Vec<EgressRule>,
     /// The environment rules for every command.
     pub env: EnvRules,
+    /// `env` worked out against the system configuration (`${section:key}`
+    /// expanded, `@NAME@` left), by `config::load_all`; empty until then.
+    pub env_resolved: EnvPlan,
     /// The allowed forms of commands, in match order.  Anything not listed is refused.
     pub commands: Commands,
     /// Each of `commands` as written in the file.
@@ -200,6 +203,10 @@ pub struct CommandRule {
     /// nothing comes through.
     #[serde(skip)]
     pub env_plan: EnvPlan,
+    /// This command's own `env`, worked out as the project's `env_resolved`
+    /// is, before it's merged into `env_plan`.
+    #[serde(skip)]
+    pub env_resolved: EnvPlan,
     /// The program wasn't found when the universal configuration file was
     /// made (its `host-brokered` `program` is `null`): requests for it are
     /// refused.
@@ -431,6 +438,7 @@ fn parse_checked(
             vcs,
             egress: egress_rules,
             env,
+            env_resolved: EnvPlan::default(),
             commands,
             raw_commands,
             raw,
@@ -761,6 +769,7 @@ mod tests {
                 vcs: None,
                 egress: Vec::new(),
                 env: EnvRules::default(),
+                env_resolved: EnvPlan::default(),
                 commands: Commands::new(),
                 raw_commands: Vec::new(),
                 raw: parse_yaml(CONTAINER).unwrap(),
@@ -1019,6 +1028,7 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    env_resolved: EnvPlan::default(),
                     unavailable: false,
                 },
                 CommandRule {
@@ -1033,6 +1043,7 @@ mod tests {
                     cwd: None,
                     env: EnvRules::default(),
                     env_plan: EnvPlan::default(),
+                    env_resolved: EnvPlan::default(),
                     unavailable: false,
                 },
             ]
