@@ -161,15 +161,17 @@ class UserConfig:
         capture_stdout: bool = True,
         capture_stderr: bool = False,
         template: dict[str, str] | None = None,
+        quiet: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run the given command.
         
         This will return the completed process with stdout captured.  stderr will
-        forward to the user.
+        forward to the user.  With `quiet`, it doesn't say what it runs.
         """
         cmd = self.require_run(section, run, template)
-        print(f"Running {cmd[0]}")
-        print(f"DEBUG {cmd}")
+        if not quiet:
+            print(f"Running {cmd[0]}")
+            print(f"DEBUG {cmd}")
         return subprocess.run(  # nosec: B603  # Input validated on the call.
             cmd,
             stdout=subprocess.PIPE if capture_stdout else None,

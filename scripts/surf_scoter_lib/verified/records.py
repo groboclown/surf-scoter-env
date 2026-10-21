@@ -300,20 +300,6 @@ class EnvironmentRecord:
         )
         return carried, self.add(carried)
 
-    def prune(self, keep: int, now: datetime.datetime) -> list[Acceptance]:
-        """Remove the expired (or invalid) acceptances beyond the newest `keep`; those removed."""
-        kept: list[Acceptance] = []
-        removed: list[Acceptance] = []
-        unusable = 0
-        for acceptance in self.acceptances:
-            if acceptance.usable(now):
-                kept.append(acceptance)
-                continue
-            unusable += 1
-            (kept if unusable <= keep else removed).append(acceptance)
-        self.acceptances = kept
-        return removed
-
     def blobs(self) -> set[str]:
         """The blobs its acceptances' suggestions refer to."""
         return {
@@ -386,8 +372,8 @@ def save_environment(store: VerifiedStore, record: EnvironmentRecord) -> None:
     """Write the environment's record, and list it in the index.
 
     The store must be locked.  Nothing is pruned: an expired acceptance is
-    still what the next review compares with (step 17), so removing them is
-    for the user to ask for (`prune_environment`).
+    still what the next review compares with (step 17), so it stays until
+    it's replaced or revoked.
     """
     store.register(record.project_dir, record.id)
     store.write_json(record.id, ENVIRONMENT_FILE, data=record.to_json())
@@ -402,21 +388,6 @@ def remove_replaced(store: VerifiedStore, record: EnvironmentRecord, replaced: l
         store.remove(record.id, ACCEPTANCES_DIR, acceptance.id)
     if replaced:
         remove_unused_blobs(store)
-
-
-def prune_environment(store: VerifiedStore, record: EnvironmentRecord, keep: int) -> list[Acceptance]:
-    """Remove the environment's expired acceptances beyond the newest `keep`; those removed.
-
-    The store must be locked.  The record is written, the pruned
-    acceptances' files go, and so do the blobs nothing refers to any more.
-    """
-    removed = record.prune(keep, now_utc())
-    save_environment(store, record)
-    for acceptance in removed:
-        store.remove(record.id, ACCEPTANCES_DIR, acceptance.id)
-    if removed:
-        remove_unused_blobs(store)
-    return removed
 
 
 def remove_unused_blobs(store: VerifiedStore) -> int:

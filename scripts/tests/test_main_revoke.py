@@ -83,6 +83,16 @@ class StoreTest(unittest.TestCase):
             {"expires-at": expires, "commands": []}, branch, now,
         )
 
+    def remaining(self, project: Path | None = None) -> list[str]:
+        verified_store = store.VerifiedStore.open(self.verified)
+        env = revoke.environment(self.config(project), verified_store)
+        assert env is not None  # nosec: B101  # narrowing for the type checker
+        record = env.record()
+        return [] if record is None else [a.id for a in record.acceptances]
+
+    def acceptance_dir(self, acceptance: records.Acceptance) -> Path:
+        env_id = store.environment_id(self.project)
+        return self.verified / env_id / records.ACCEPTANCES_DIR / acceptance.id
 
 
 @unittest.skipUnless(POSIX, "owner and mode checks")
@@ -102,17 +112,6 @@ class RevokeTest(StoreTest):
         with contextlib.redirect_stdout(out):
             code = main_list_accepted.run_list(self.config(outside=True), quiet=quiet)
         return code, out.getvalue()
-
-    def remaining(self, project: Path | None = None) -> list[str]:
-        verified_store = store.VerifiedStore.open(self.verified)
-        env = revoke.environment(self.config(project), verified_store)
-        assert env is not None  # nosec: B101  # narrowing for the type checker
-        record = env.record()
-        return [] if record is None else [a.id for a in record.acceptances]
-
-    def acceptance_dir(self, acceptance: records.Acceptance) -> Path:
-        env_id = store.environment_id(self.project)
-        return self.verified / env_id / records.ACCEPTANCES_DIR / acceptance.id
 
     def test_nothing_accepted(self) -> None:
         """No store, or nothing in it: nothing to revoke."""

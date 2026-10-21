@@ -205,7 +205,6 @@ The tools use these sections:
     * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
     * `value-lists: guarded` and `guarded-removals`: the settings that keep the tools' protections in place; see [Guarded settings](#guarded-settings).
     * `values: expiry-days`: how long an acceptance lasts, in days.  The default is 30.
-    * `values: keep`: how many expired acceptances to keep for each project when you ask for a cleanup; nothing removes them on its own.  The default is 10.
     * `values: max-file-size` and `max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
     * `values: exempt-days` and `max-exempt-days`: how long `scoter exempt` lasts without `--for`, and the longest it can be given, in days.  The defaults are 1 and 7.  `max-exempt-days` is guarded (see "Guarded Settings").  See "Exemptions".
 * `ssh`: the SSH client used to connect to the development container.

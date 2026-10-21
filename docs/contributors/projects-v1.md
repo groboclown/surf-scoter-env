@@ -1534,11 +1534,63 @@ Every project in the store's index, by directory (noting one whose directory is 
 
 It needs no project: `scoter` loads only the setup for it, as for `help`.
 
+This needs user documentation in the `docs` directory for guidance on how to deal with old runs and cached files.  Part of this is covered under `new-project-setup.md`, but an end-user needs the information, too.
+
+### Completed
+
+* **User documentation**: [`docs/cleaning-up.md`](../cleaning-up.md), for end users: what Surf Scoter keeps (the running environments' records and configuration, each project's workspace directory, the verified store, the images, the ssh entries), where by default, and how to clear each: `scoter kill` (with `--host`, `--fetch`, `--force-clean`), `scoter run --clean-workspace` or deleting a workspace by hand, `scoter list-accepted` and `scoter revoke` (one acceptance per branch, expired ones kept), the container tool's `image` and `builder` commands, and the ssh entries.  It says there's no single cleanup command yet (step 23).  Linked from the user guide's index, the README's "Starting a Developer Environment", and `new-project-setup.md`.
+
 **Tests:** in [`test_main_revoke.py`](../../scripts/tests/test_main_revoke.py): the listing of two projects, `-q`, an exemption and a gone directory, nothing accepted, revoking by id across projects from outside one, an unknown id, and the whole clean-out (index and blobs empty afterwards).  By hand, on the scratch distribution: two projects accepted through the prompt, listed, and revoked with `scoter revoke $(scoter list-accepted -q)` from outside both.
 
 ## 23. Add a user cache cleanup program
 
 The `kill` and `revoke` allow for cleaning up parts of the system, but the user should also have a method to sweep up all the caches.  If these sub-commands already cover the bases, then ignore this step.
+
+### Draft: what's left behind that nothing removes
+
+`kill` and `revoke` work on one environment or acceptance the user names.  What neither finds (see [`docs/cleaning-up.md`](../cleaning-up.md)):
+
+1. **Stale run records.**  An entry in `running-env.json` whose run's process (`pid`) is gone: a crash, a closed terminal, a reboot.  `kill` handles one, if the user knows its host.
+2. **Orphaned state.**  `state/environments/HOST/` without a run record; `state/exempt-*` directories from a run that crashed while adopting (step 21).
+3. **Workspaces of projects that are gone.**  `state/workspaces/PROJECT-ID/`, for a project directory that was moved or deleted.  Nothing records which project a workspace is for, so today the user has to guess from the name.  A workspace can hold work not yet fetched back.
+4. **The verified store's leftovers.**  Projects whose directory is gone (`list-accepted` marks them; `revoke ID` removes them one id at a time), blobs nothing uses (normally removed as acceptances go, but not after a crash between the record and the blobs), and the store's own temporary files.
+5. **Images.**  `local-surf-scoter/*` images, their replaced layers, and the build cache.  The tags are reused; what they replace isn't.
+6. **SSH entries.**  `Host scoter-USER-PORT-*` blocks and `known_hosts` lines.  Harmless while unused.
+
+### Draft: `scoter cleanup`
+
+Needs no project (like `list-accepted`).  It lists everything it finds, by kind, with sizes, then removes it on confirmation:
+
+* **Always offered**, as nothing in them can be lost: stale run records (1: their containers stopped through the recorded configuration, as `kill` does, the workspace kept), orphaned state (2), unused blobs and temporary files (4).
+* **Gone projects** (4): their acceptances.
+* **Opt-in**: `--workspaces` (every workspace not in use by a running environment: they can hold unfetched work), `--images` (the `local-surf-scoter/` images not used by a running environment, through `docker: runs:` commands the setup adds, then the container tool's prune).
+* **Not touched**: expired acceptances (kept for the next review's comparison, step 17; `revoke` removes them), SSH entries (left to `user-setup`).
+* `--dry-run` only lists; `--yes` skips the confirmation, for scripts.  Without a terminal and without `--yes`, it only lists.
+
+`records.prune`, `prune_environment` and `verification: values: keep` (for expired acceptances beyond a count) have no caller now that each branch keeps one acceptance (step 21).  Proposed: remove them.
+
+### Design decisions
+
+* **Confirmation**: it lists what it found, then asks; `--dry-run` never asks, and removes nothing; `--force` never asks, and removes it all.  Without a terminal, and neither, it only lists.
+* **Workspaces** only with `--workspaces`: every workspace no running environment uses.  No marker file: the run doesn't record a workspace's project.
+* **Images** with `--images`, through new `docker: runs:` commands.
+* **`prune` and `keep` go.**
+
+### Completed
+
+* **`scoter cleanup [--workspaces] [--images] [--dry-run | --force]`** ([`main_cleanup.py`](../../scripts/main_cleanup.py), with [`cleanup.py`](../../scripts/surf_scoter_lib/cleanup.py)).  `scoter` loads it without a project.  It finds everything, lists it by kind (with sizes), then asks `Remove these? [y/N]`; `--dry-run` only lists, `--force` doesn't ask, and without a terminal it only lists.  Each `find_*` only reads; each removal looks again under the lock that guards it (the running environments' lock for the state and the workspaces, the store's for its leftovers), and removes only what's still as it was found.
+* **What it finds**: run records whose `scoter run` process is gone (`process_alive`: `os.kill(pid, 0)` on POSIX; on Windows, or with no `pid`, it can't tell, and leaves them), stopped through `main_kill.run_kill` after checking again that they're still stale; `state/environments/HOST` directories with no record, and `state/exempt-*` directories over an hour old; projects whose directory is gone (`revoke.revoke` of all their acceptances); the store's leftovers (environment directories the index doesn't name, acceptance directories a record doesn't, unused blobs, `.tmp-*` files: `VerifiedStore.temp_files`); with `--workspaces`, `state/workspaces/*` that no record's workspace, setup or resources directory is in, and that no starting run (a reservation's project id) is for; with `--images`, the `dev-env-image-prefix` images no record uses (its dev container, and the network's while any runs).
+* **Defaults**: `docker: runs: list-images`, `remove-image` and `prune-images`.  `run_command` takes `quiet`, so the listing isn't mixed with "Running ..." lines.
+* **Removed**: `records.prune`, `prune_environment`, and `verification: values: keep`.
+* **Docs**: [`docs/cleaning-up.md`](../cleaning-up.md) has "The Cleanup Command", and each section says what it covers; the README mentions it.
+
+**Tests:** [`test_main_cleanup.py`](../../scripts/tests/test_main_cleanup.py): `process_alive`; nothing to clean; a stale reservation stopped and a running one kept, orphaned state (and a fresh `exempt-*` kept), with `--dry-run` first; a gone project revoked and another kept; the store's leftovers found and removed, the record's acceptance kept; asking (no, and no terminal); workspaces only with the flag, keeping one in use and one starting; images only with the flag, keeping the running one's and the network's.  [`integration-tests/05-cleanup`](../../integration-tests/05-cleanup/run.sh): the real command, end to end, with a stand-in container tool.
+
+**Carried over:**
+
+* Workspaces outside `state/workspaces` (a setup that moves `workspace: paths: workspace-parent-dir`) aren't found.
+* A run record from another computer sharing the home directory (an NFS home) looks stale here: its `pid` is checked on this one.
+* SSH entries, and the container tool's build cache, are left to the user (the docs say how).
 
 ## 24. Clean up the code to follow good coding practices.
 

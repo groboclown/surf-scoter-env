@@ -351,6 +351,27 @@ class VerifiedStore:
                 self.remove(BLOBS_DIR, prefix)
         return removed
 
+    def temp_files(self) -> list[Path]:
+        """The temporary files writes leave behind when they're stopped part way (`.tmp-*`).
+
+        Only a crash leaves one: while the store is locked, none is being written.
+        """
+        found: list[Path] = []
+        for directory, dirs, files in os.walk(self.root):
+            # `os.walk` doesn't follow directory symlinks; the store has none.
+            found.extend(Path(directory) / name for name in files if name.startswith(".tmp-"))
+            dirs.sort()
+        return sorted(found)
+
+    def remove_temp_files(self) -> int:
+        """Remove the temporary files writes left behind; how many went."""
+        self._require_lock()
+        found = self.temp_files()
+        for path in found:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+        return len(found)
+
     def blob_size(self) -> int:
         """How much the blobs take, in bytes."""
         total = 0

@@ -96,6 +96,8 @@ This will process the project files and start up containers.  It will report the
 
 If you want to set up your project to define a Surf Scoter development environment, then [the fine documentation can help](docs/new-project-setup.md).
 
+When a run ends, it stops its containers, but keeps the project's workspace for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
+
 ## Connecting to a Developer Environment
 
 The following commands assume you use `podman`.  If you use `docker`, then switch the command execution to instead be `docker`.

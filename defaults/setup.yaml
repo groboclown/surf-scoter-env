@@ -40,6 +40,12 @@ docker:
         inspect-container: ${exec} inspect --format json {x:name}
         image-logs: ${exec} logs {x:name}
         kill-container: ${exec} kill {x:container}
+        # For `scoter cleanup --images`: the images whose name matches
+        # `{x:pattern}` (such as `local-surf-scoter/*`), one `REPOSITORY:TAG` a
+        # line; removing one; and removing the layers no image uses any more.
+        list-images: ${exec} image ls --filter reference={x:pattern} --format {{.Repository}}:{{.Tag}}
+        remove-image: ${exec} image rm {x:name}
+        prune-images: ${exec} image prune -f
 
 # The Python interpreter that runs the sub-command scripts (the distribution's
 # `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
@@ -694,10 +700,6 @@ verification:
     values:
         # How long an acceptance of a project's settings lasts, in days.
         expiry-days: 30
-        # How many expired acceptances to keep for each project when you ask
-        # for a cleanup.  Nothing removes them on its own: the newest is what
-        # the next review compares with.
-        keep: 10
         # The largest project file, and the most for all of a project's files,
         # kept in the `store` with each acceptance, in bytes.
         max-file-size: 16777216

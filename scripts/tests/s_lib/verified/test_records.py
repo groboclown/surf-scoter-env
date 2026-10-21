@@ -125,16 +125,6 @@ class RecordsTest(TempDirTest):
         self.assertEqual(env.add(latest), [none])
         self.assertEqual(env.acceptances, [latest, newer, other])
 
-    def test_prune(self) -> None:
-        """Expired acceptances beyond the newest `keep` go; usable ones stay."""
-        env = records.EnvironmentRecord("e", "/p", [])
-        for i, age in enumerate((100, 90, 80, 0)):
-            env.add(replace(self.acceptance(_manifest(str(age % 10)), age=age), branch=f"b{i}"))
-        removed = env.prune(2, self.NOW)
-        self.assertEqual(len(removed), 1)
-        self.assertEqual(removed[0].accepted_at, self.NOW - datetime.timedelta(days=100))
-        self.assertEqual(len(env.acceptances), 3)
-
     def test_json(self) -> None:
         """Records, and their exemption, survive JSON; an acceptance must have its suggestion."""
         accepted = self.acceptance(_manifest("0"))
@@ -155,7 +145,7 @@ class RecordsTest(TempDirTest):
 
     @unittest.skipUnless(POSIX, "owner and mode checks")
     def test_in_the_store(self) -> None:
-        """Saving registers, prunes, and removes unused blobs; loading cross-checks."""
+        """Saving registers, and removes unused blobs; loading cross-checks."""
         verified = self.new_store()
         files = self.tmp / "proj"
         self.write("proj/project.yaml", "a: 1\n")
@@ -174,8 +164,8 @@ class RecordsTest(TempDirTest):
             records.load_environment(verified, "/q", "e")
         self.assertEqual(verified.blob_size(), 5)
         with verified.locked():
-            removed = records.prune_environment(verified, env, keep=0)
-        self.assertEqual(removed, [old])
+            records.save_environment(verified, records.EnvironmentRecord("e", "/p", []))
+            self.assertEqual(records.remove_unused_blobs(verified), 1)
         self.assertEqual(verified.blob_size(), 0)
 
     def test_setup_values(self) -> None:

@@ -52,3 +52,5 @@ scoter verify          # Review what you ended up with.
 `scoter list-accepted` shows your acceptances, and any exemption, with its end and branch.  `scoter revoke` removes an acceptance (which ends an exemption that uses it).  Each branch keeps one acceptance: a new one replaces the branch's last.
 
 For automation, such as a script that rebuilds the environment after each change, start the exemption once, then run `scoter verify --with-exemption` before each `scoter run`.  See [Exemptions](system-config-file.md#exemptions) for the details.
+
+While you work on a setup, each run's images, and the acceptances for each branch you try it on, are kept.  See [Cleaning up after Surf Scoter](cleaning-up.md) to clear them out.

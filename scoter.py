@@ -728,11 +728,12 @@ def main(argv: Sequence[str]) -> int:
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        # `help` lists the sub-commands, which needs the setup, not a project;
-        # `list-accepted` lists every project's acceptances, from the setup's store.
         config = load_config(
             args,
-            with_project=args.cmd not in (None, "help", "list-accepted"),
+            # `help` lists the sub-commands, which needs the setup, not a project;
+            # `list-accepted` lists every project's acceptances, from the setup's store,
+            # and `cleanup` works on all of them.
+            with_project=args.cmd not in (None, "help", "list-accepted", "cleanup"),
             # `verify` reviews what the project suggests; accepted settings
             # (a container of the user's, say) would change what it shows.
             # `revoke` works on the store itself, and the lookup could carry
