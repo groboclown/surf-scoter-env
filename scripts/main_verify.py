@@ -3,10 +3,10 @@
 
 Writes the review file for the project: its suggested settings, resolved,
 with the checks' findings as comments, and asks you to use it, edit it or
-deny it.  Using it stores your acceptance, which later runs use.  See
-steps 12 and 15 of docs/contributors/projects-v1.md.
+deny it.  Using it stores your acceptance, which later runs use.
 """
 import datetime
+import enum
 import os
 import shlex
 import shutil
@@ -21,30 +21,91 @@ from pathlib import Path
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
     UserConfig,
+    argutil,
     checks,
+    fileutil,
     gen_parser,
     generator,
     jdata,
     review,
+    setup_check,
 )
 from surf_scoter_lib.err import SurfScoterErr
-from surf_scoter_lib.verified import accept, lookup, snapshot
+from surf_scoter_lib.verified import accept, exempt, lookup, records, snapshot
 from surf_scoter_lib.verified import previous as previous_acceptance
 
 # The generator refuses a review file larger than this, too.
-MAX_REVIEW_SIZE = 2 * 1024 * 1024
+MAX_REVIEW_BYTES = 2 * 1024 * 1024
 REVIEW_FILE_NAME = "review.yaml"
-PROMPT = "Use these settings, edit them, or deny them? [u]se / [e]dit / [D]eny: "
+PROMPT = "Use these settings, edit them, or deny them? [u]se / [e]dit / [v]iew / [D]eny: "
+# How long the setup's `runs: current-branch` may take.
+BRANCH_TIMEOUT_SECONDS = 30
 
 
-def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | None = None) -> int:
-    """Write the review file to `output`; or, without one, ask about it at the terminal."""
+class Terminal(enum.Enum):
+    """Whether `run_verify` can ask the user about the review at a terminal."""
+
+    # It can when both the input and the output are a terminal.
+    DETECT = "detect"
+    AVAILABLE = "available"
+    ABSENT = "absent"
+
+
+class SetupNotes(enum.Enum):
+    """Whether the review lists how the user's setup changes the defaults' protections."""
+
+    INCLUDE = "include"
+    # Leave them out (`--skip-setup-review`).
+    SKIP = "skip"
+
+
+class AcceptVia(enum.Enum):
+    """How `run_verify` comes to an acceptance."""
+
+    # The user reviews the project's settings.
+    REVIEW = "review"
+    # The suggestion is accepted as it stands, under the branch's exemption
+    # (`--with-exemption`).
+    EXEMPTION = "exemption"
+
+
+class Platform(enum.Enum):
+    """How the platform's shell splits a command line."""
+
+    POSIX = "posix"
+    WINDOWS = "windows"
+
+    @staticmethod
+    def current() -> "Platform":
+        """This computer's."""
+        return Platform.WINDOWS if fileutil.is_windows() else Platform.POSIX
+
+
+def run_verify(
+    config: UserConfig,
+    output: Path | None,
+    *,
+    terminal: Terminal = Terminal.DETECT,
+    setup_notes: SetupNotes = SetupNotes.INCLUDE,
+    via: AcceptVia = AcceptVia.REVIEW,
+) -> int:
+    """Write the review file to `output`; or, without one, ask about it at the terminal.
+
+    With `SetupNotes.INCLUDE`, the review lists what the user should know
+    about their setup's host command checks, as `scoter user-setup` does.
+    With `AcceptVia.EXEMPTION`, the project's suggestion is accepted as it
+    stands, without asking, under the exemption that holds for the branch
+    (see `accept_with_exemption`).
+    """
     if config.project_setup() is None:
         print("No project here: run this in a project, or give --project-dir.", file=sys.stderr)
         return 1
+    if via == AcceptVia.EXEMPTION:
+        return accept_with_exemption(config)
     if output is None:
-        if interactive is None:
-            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        interactive = (
+            argutil.can_ask() if terminal == Terminal.DETECT else terminal == Terminal.AVAILABLE
+        )
         if not interactive:
             print(
                 "The review needs a terminal to ask you about it; nothing was accepted.  "
@@ -67,6 +128,7 @@ def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | N
     context = review.Context(
         report=report, now=now, files=taken, branch=branch, accepted_note=accepted_note(config),
         previous=find_previous(config, branch),
+        setup_notes=setup_check.setup_report(config) if setup_notes == SetupNotes.INCLUDE else None,
     )
     text = review.build(config, context)
     if output is not None:
@@ -76,6 +138,71 @@ def run_verify(config: UserConfig, output: Path | None, *, interactive: bool | N
         return 0
     assert taken is not None  # nosec: B101  # narrowing for the type checker
     return Prompt(config, taken, branch, suggested=review.suggested(config, report)).run(text)
+
+
+def accept_with_exemption(config: UserConfig, now: datetime.datetime | None = None) -> int:
+    """Accept the project's suggestion as it stands, under its exemption, without a prompt.
+
+    Only while an exemption (`scoter exempt`) holds for the branch, and only
+    when the checks refuse nothing: the user doesn't see the review, so
+    nothing they'd have to fix can be in it.  The new acceptance (kind
+    `exempted`) has the review's usual expiry; the exemption moves to it,
+    with the same end, so the run picks up the project file and
+    `dev-env.yaml` changes it ignored.
+    """
+    now = now or records.now_utc()
+    try:
+        exemption = exempt.current(config, now)
+    except (OSError, ValueError, SurfScoterErr) as err:
+        print(f"Couldn't read your exemption: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    if exemption is None:
+        print(
+            "No exemption holds for this project here: start one with `scoter exempt`, "
+            "or review the settings with `scoter verify`.",
+            file=sys.stderr,
+        )
+        return 1
+    branch = current_branch(config)
+    try:
+        taken = lookup.project_snapshot(config, Path(os.path.realpath(project_dir(config))))
+    except (OSError, SurfScoterErr) as err:
+        print(f"Couldn't read the project's files: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    report = checks.check_project(config)
+    text = review.build(config, review.Context(report=report, now=now, files=taken, branch=branch))
+    prompt = Prompt(config, taken, branch, suggested=review.suggested(config, report))
+    directory = Path(tempfile.mkdtemp(prefix="scoter-review-"))
+    try:
+        data = text.encode("ascii")
+        checked = prompt.check(data, directory, directory / REVIEW_FILE_NAME)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    # The review leaves out what the checks refuse; the suggestion must have nothing refused.
+    if report.refused or not checked.usable:
+        prompt.show(checked if not report.refused else Checked(report=report))
+        print(
+            "The project's settings can't be accepted without a review; nothing was accepted.  "
+            "Run `scoter verify` to review them.",
+            file=sys.stderr,
+        )
+        return 1
+    assert checked.accepted is not None  # nosec: B101  # narrowing for the type checker
+    try:
+        acceptance = accept.store_acceptance(
+            config, taken, data, checked.accepted, branch, now,
+            suggested=prompt.suggested, exemption=exemption,
+        )
+    except (OSError, SurfScoterErr, KeyError, TypeError, ValueError) as err:
+        print(f"Couldn't store your acceptance: {review.clean(str(err))}", file=sys.stderr)
+        return 1
+    print(summary(checked.report), file=sys.stderr)
+    print(
+        f"Accepted the project's settings as they stand ({acceptance.id}), under your exemption "
+        f"until {exemption.until.isoformat()}.",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def project_dir(config: UserConfig) -> Path:
@@ -129,12 +256,12 @@ class Prompt:
     ask: Callable[[str], str] = input
     # Runs the editor on the review file: (file, the directory to start in).
     edit: Callable[[Path, Path], None] | None = None
+    # Shows the review file's text: (the text, the directory to start in).
+    page: Callable[[str, Path], None] | None = None
     # Parses a review file: (the file, a private directory) -> the generator's
     # universal file with its `review`, or its complaints.
     parse: Callable[[Path, Path], tuple[jdata.DictJsonData | None, list[str]]] | None = None
-    now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.UTC).replace(
-        microsecond=0,
-    )
+    now: Callable[[], datetime.datetime] = records.now_utc
 
     def run(self, text: str) -> int:
         """Ask about `text`; 0 when the user used it and it's stored."""
@@ -151,13 +278,16 @@ class Prompt:
         path = Path(name)
         data = text.encode("ascii")
         checked = self.check(data, directory, path)
-        sys.stdout.write(text)
+        self.show_review(data, directory)
         while True:
             self.show(checked)
             choice = self.choose()
             if choice == "deny":
                 print("Denied: nothing was accepted.", file=sys.stderr)
                 return 1
+            if choice == "view":
+                self.show_review(data, directory)
+                continue
             if choice == "edit":
                 try:
                     self.run_editor(path, directory)
@@ -188,8 +318,16 @@ class Prompt:
             )
             return 0
 
+    def show_review(self, data: bytes, directory: Path) -> None:
+        """Show the review file as it is now: through the pager, or printed."""
+        text = data.decode("utf-8", errors="replace")
+        if self.page is not None:
+            self.page(text, directory)
+        else:
+            page(text, directory)
+
     def choose(self) -> str:
-        """`use`, `edit` or `deny`; Enter, end of input or Ctrl-C deny."""
+        """`use`, `edit`, `view` or `deny`; Enter, end of input or Ctrl-C deny."""
         while True:
             try:
                 answer = self.ask(PROMPT).strip().lower()
@@ -202,6 +340,8 @@ class Prompt:
                 return "use"
             if answer in ("e", "edit"):
                 return "edit"
+            if answer in ("v", "view"):
+                return "view"
 
     def show(self, checked: Checked) -> None:
         """What stops the file being used, or what's worth knowing about it."""
@@ -253,18 +393,41 @@ class Prompt:
         return Checked(report=report, accepted=parsed.review_accepted())
 
 
-def editor_command(environ: Mapping[str, str], windows: bool) -> list[str]:
+def split_command(command: str, platform: Platform) -> list[str]:
+    """A command from the environment (`EDITOR`, `PAGER`), split as its shell would."""
+    if platform == Platform.POSIX:
+        return shlex.split(command)
+    # Windows paths are full of backslashes, which POSIX splitting would eat.
+    return [
+        part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
+        for part in shlex.split(command, posix=False)
+    ]
+
+
+def page(text: str, directory: Path) -> None:
+    """Show `text` through `PAGER` when it's set and the output is a terminal; else print it.
+
+    The pager starts in `directory` (the review's private one), as the editor does.
+    """
+    command = os.environ.get("PAGER")
+    if command and sys.stdout.isatty():
+        args = split_command(command, Platform.current())
+        try:
+            subprocess.run(  # nosec: B603  # Your own pager, from your environment.
+                args, input=text.encode("utf-8"), cwd=directory, check=False, shell=False,
+            )
+            return
+        except OSError as err:
+            print(f"Couldn't run your pager ({args[0]}): {err}", file=sys.stderr)
+    sys.stdout.write(text)
+
+
+def editor_command(environ: Mapping[str, str], platform: Platform) -> list[str]:
     """The editor to run: `VISUAL`, or else `EDITOR`; on Windows, or else Notepad."""
     command = environ.get("VISUAL") or environ.get("EDITOR")
     if command:
-        if not windows:
-            return shlex.split(command)
-        # Windows paths are full of backslashes, which POSIX splitting would eat.
-        return [
-            part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
-            for part in shlex.split(command, posix=False)
-        ]
-    if windows:
+        return split_command(command, platform)
+    if platform == Platform.WINDOWS:
         # By its full path, so nothing named `notepad` elsewhere is picked up.
         return [os.path.join(environ.get("SystemRoot", "C:\\Windows"), "System32", "notepad.exe")]
     raise ReviewFileErr("Set VISUAL or EDITOR to edit the review")
@@ -276,7 +439,7 @@ def run_editor(path: Path, directory: Path) -> None:
     Editors read configuration from the directory they start in (vim's
     `.exrc`, an editor's workspace settings), so not the project's.
     """
-    args = [*editor_command(os.environ, sys.platform == "win32"), str(path)]
+    args = [*editor_command(os.environ, Platform.current()), str(path)]
     try:
         subprocess.run(  # nosec: B603  # Your own editor, from your environment.
             args, cwd=directory, check=False, shell=False,
@@ -287,7 +450,7 @@ def run_editor(path: Path, directory: Path) -> None:
 
 def read_once(path: Path) -> bytes:
     """The review file's bytes, read once, refusing a link or anything but your own regular file."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | fileutil.O_NOFOLLOW | fileutil.O_NONBLOCK
     try:
         fd = os.open(path, flags)
     except OSError as err:
@@ -302,9 +465,9 @@ def read_once(path: Path) -> bytes:
             raise ReviewFileErr(f"{path}: belongs to someone else now")
         if st.st_nlink != 1:
             raise ReviewFileErr(f"{path}: has other links to it now")
-        data = inp.read(MAX_REVIEW_SIZE + 1)
-    if len(data) > MAX_REVIEW_SIZE:
-        raise ReviewFileErr(f"{path}: larger than {MAX_REVIEW_SIZE} bytes")
+        data = inp.read(MAX_REVIEW_BYTES + 1)
+    if len(data) > MAX_REVIEW_BYTES:
+        raise ReviewFileErr(f"{path}: larger than {MAX_REVIEW_BYTES} bytes")
     return data
 
 
@@ -336,7 +499,8 @@ def current_branch(config: UserConfig) -> str | None:
     try:
         args = config.require_run(section, "current-branch", {"root": str(root)})
         res = subprocess.run(  # nosec: B603  # The command comes from the user's setup.
-            args, capture_output=True, check=False, shell=False, timeout=30,
+            args, capture_output=True, check=False, shell=False, timeout=BRANCH_TIMEOUT_SECONDS,
+            env=config.command_env(section),
         )
     except (OSError, subprocess.SubprocessError, SurfScoterErr):
         return None
@@ -393,8 +557,8 @@ def accepted_note(config: UserConfig) -> str | None:
 
 def write_private(path: Path, text: str) -> None:
     """Write `text` to `path`, readable only by you, not following a symlink."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | fileutil.O_NOFOLLOW
+    fd = os.open(path, flags, fileutil.MODE_USER_RW)
     with os.fdopen(fd, "w", encoding="ascii") as out:
         out.write(text)
 
@@ -415,8 +579,34 @@ def main(argv: Sequence[str]) -> int:
         default=None,
         help="Only write the review file here, without asking about it or accepting anything.",
     )
+    parser.add_argument(
+        "--skip-setup-review",
+        action="store_false",
+        dest="setup_review",
+        default=True,
+        help=(
+            "Leave out of the review what your setup changes about the host command checks "
+            "(the checks it removes or replaces, and its overrides), which `scoter user-setup` shows."
+        ),
+    )
+    parser.add_argument(
+        "--with-exemption",
+        action="store_true",
+        dest="with_exemption",
+        help=(
+            "Under the exemption that holds for this branch (`scoter exempt`), accept the project's "
+            "settings as they stand, without asking, when the checks refuse nothing.  Runs then "
+            "pick up your changes to the project file and the `dev-env.yaml` files."
+        ),
+    )
     args = parser.parse_args(argv)
-    return run_verify(config, Path(args.output) if args.output else None)
+    if args.with_exemption and args.output:
+        parser.error("--with-exemption accepts the settings; it can't be given with --output")
+    return run_verify(
+        config, Path(args.output) if args.output else None,
+        setup_notes=SetupNotes.INCLUDE if args.setup_review else SetupNotes.SKIP,
+        via=AcceptVia.EXEMPTION if args.with_exemption else AcceptVia.REVIEW,
+    )
 
 
 if __name__ == "__main__":

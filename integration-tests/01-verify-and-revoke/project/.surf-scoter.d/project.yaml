@@ -1,0 +1,9 @@
+# A sample project for the review: one plain command, one the setup refuses
+# (a shell), and one egress rule.
+container:
+  dev-container-path: ./env
+egress:
+  - {host: registry.npmjs.org, protocol: tls}
+commands:
+  - {command: ls, args: [{any: {}}]}
+  - {command: sh, args: ["-c", {any: {}}]}

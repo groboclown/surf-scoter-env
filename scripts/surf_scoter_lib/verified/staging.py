@@ -3,8 +3,7 @@
 
 `main_run.py` builds the dev container from the files the user accepted,
 restored from the verified store, never from the live `.surf-scoter.d`,
-which can change between the check and the build.  See
-docs/contributors/projects-v1.md, step 16.
+which can change between the check and the build.
 
 * `find_accepted` finds the acceptance whose `accepted.json` the generator
   loaded, from the environment's record, not by looking at the live files:
@@ -13,19 +12,25 @@ docs/contributors/projects-v1.md, step 16.
 * `stage` restores its snapshot, laid out like a project.
 * `build_plan` checks that the generator's view of the copy is what the
   universal file holds, and says what to build from.
+* Under an exemption (`exempt.py`), when the run's acceptance is
+  the exemption's, `adopt_accepted` first gives the run the accepted
+  project file's and `dev-env.yaml` files' settings in place of the live
+  ones, and `stage` lays the live container files over the accepted copy:
+  they're used as they are, once the setup's `project-files` checks pass.
 * `rewrite_images` applies the acceptance's `images` to a staged Dockerfile.
 """
 import datetime
 import os
 import re
+import shutil
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import jdata
+from .. import checks, fileutil, jdata
 from ..err import VerifiedStoreErr
 from ..user_config import CURRENT_PROJECT_SETUP, UserConfig
-from . import lookup, records, snapshot, store
+from . import accept, lookup, records, snapshot, store
 
 STAGED_PROJECT = "project"
 DOCKERFILE = "Dockerfile"
@@ -53,6 +58,9 @@ class Accepted:
     store: store.VerifiedStore
     acceptance: records.Acceptance
     manifest: snapshot.Manifest
+    env_id: str = ""
+    # The exemption the run is under, when the acceptance is its own.
+    exemption: records.Exemption | None = None
 
 
 @dataclass(frozen=True)
@@ -70,11 +78,11 @@ def find_accepted(config: UserConfig, now: datetime.datetime) -> Accepted | None
     if file is None:
         return None
     project = config.active_location("project-dir")
-    verified = config.optional_path("scoter", "verified-dir")
+    verified = config.optional_path("verification", "store")
     if project is None or verified is None:
-        raise StagingErr("accepted settings, but no project or `verified-dir` to find them in")
+        raise StagingErr("accepted settings, but no project or `verification: paths: store` to find them in")
     project_dir = os.path.realpath(project)
-    env_id = store.environment_id(Path(project_dir))
+    env_id = store.project_id(config, project_dir)
     verified_store = store.VerifiedStore.open(verified)
     real = Path(os.path.realpath(file))
     acceptances = Path(os.path.realpath(verified_store.root / env_id / records.ACCEPTANCES_DIR))
@@ -88,24 +96,138 @@ def find_accepted(config: UserConfig, now: datetime.datetime) -> Accepted | None
         raise StagingErr(f"{file}: its acceptance isn't in your verified store any more")
     if not found.usable(now):
         raise StagingErr(f"your acceptance of this project's settings ({found.id}) has expired")
-    if found.suggestion is None:
-        raise StagingErr(f"your acceptance ({found.id}) has no copy of the project's files to build from")
-    return Accepted(verified_store, found, found.suggestion)
+    assert record is not None  # nosec: B101  # it holds `found`
+    exempt = record.exempt_acceptance(lookup.project_branch(config), now)
+    exemption = record.exemption if exempt is not None and exempt.id == found.id else None
+    return Accepted(verified_store, found, found.suggestion, env_id, exemption)
 
 
 def stage(config: UserConfig, accepted: Accepted, dest: Path) -> Path:
     """Restore the accepted files under `dest` (empty, private), laid out like a project.
 
     Returns the staged project directory: `dest/project`, holding the
-    project files directory.
+    project files directory.  Under an exemption (`accepted.exemption`),
+    and once `adopt_accepted` has run, the container files are the live
+    ones, in the containers the accepted settings name; the project file
+    and the `dev-env.yaml` files are as accepted.
     """
     files_dir = _files_dir(config)
     project = dest / STAGED_PROJECT
-    project.mkdir(mode=0o700)
+    project.mkdir(mode=fileutil.MODE_USER_RWX)
     target = project / files_dir
-    target.mkdir(mode=0o700)
-    snapshot.restore(accepted.store, accepted.manifest, target, lookup.limits(config))
+    target.mkdir(mode=fileutil.MODE_USER_RWX)
+    limits = lookup.limits(config)
+    if accepted.exemption is None or config.accepted_container_name() is not None:
+        snapshot.restore(accepted.store, accepted.manifest, target, limits)
+        return project
+    live = _live_files(config, accepted)
+    kept = {
+        rel: entry for rel, entry in accepted.manifest.files.items() if lookup.is_settings_file(config, rel)
+    }
+    files = {
+        **{rel: entry for rel, entry in live.manifest.files.items() if not lookup.is_settings_file(config, rel)},
+        **kept,
+    }
+
+    def read(rel: str, entry: snapshot.FileEntry) -> bytes:
+        if rel in kept:
+            return accepted.store.get_blob(entry.sha256, entry.size)
+        return live.contents[rel]
+
+    snapshot.write_files(snapshot.Manifest(files), target, limits, read)
     return project
+
+
+def _live_files(config: UserConfig, accepted: Accepted) -> snapshot.Snapshot:
+    """The live files of the containers the run's settings name (the accepted ones, adopted)."""
+    files_dir = _files_dir(config)
+    file_name = config.optional_value("scoter", "project-file-name")
+    if file_name is None:
+        raise StagingErr("the setup names no `scoter: values: project-file-name`")
+    project = Path(os.path.realpath(config.require_active_location("project-dir")))
+    try:
+        return snapshot.snapshot_project(
+            project / files_dir, file_name, lookup.container_dirs(config),
+            snapshot.ParsedFiles(), lookup.limits(config),
+        )
+    except VerifiedStoreErr as err:
+        raise StagingErr(
+            f"under your exemption ({accepted.acceptance.id}), the container files can't be used: {err}",
+            reverify=False,
+        ) from err
+
+
+def adopt_accepted(
+    config: UserConfig,
+    dest: Path,
+    generate: Callable[[UserConfig, list[str], Path], tuple[jdata.DictJsonData | None, list[str]]],
+    now: datetime.datetime,
+) -> bool:
+    """Under an exemption, have the run use the accepted project file and `dev-env.yaml` files.
+
+    The generator read the run's `current-project-setup` and `dev-container`
+    from the live files, which an exemption lets change; only their accepted
+    versions count.  This replaces them in `config` with the accepted
+    copy's, its paths as the live project's, so the sshd port, the user,
+    the mounts and the build use what was accepted.  It runs before the
+    run reads any of them.  False, with `config` as it was, when the run's
+    acceptance isn't its exemption's.  `dest`: empty, private.
+    """
+    accepted = find_accepted(config, now)
+    if accepted is None or accepted.exemption is None:
+        return False
+    staged_project = stage(config, replace(accepted, exemption=None), dest)
+    staged = _generate(config, staged_project, dest, generate)
+    project_setup = staged.project_setup()
+    if project_setup is None:
+        raise StagingErr("The accepted copy of the project's files has no project file.")
+    if config.accepted_container_name() is not None:
+        # The dev container is the user's own, read from where it is.
+        config.use_accepted_files(project_setup, None)
+        return True
+    dev = staged.dev_container()
+    if dev is None:
+        raise StagingErr("The accepted copy of the project's files has no dev container.")
+    live = _to_live(config, staged_project)
+    config.use_accepted_files(project_setup, {
+        **dev,
+        "parent-builds": [{"dir": live(d), "tag": tag} for tag, d in staged.dev_container_parent_builds()],
+    })
+    config.set_active_location(
+        "dev-container-path", Path(live(staged.require_active_location("dev-container-path"))),
+    )
+    return True
+
+
+def _generate(
+    config: UserConfig,
+    staged_project: Path,
+    dest: Path,
+    generate: Callable[[UserConfig, list[str], Path], tuple[jdata.DictJsonData | None, list[str]]],
+) -> UserConfig:
+    work = dest / "generator"
+    work.mkdir(mode=fileutil.MODE_USER_RWX)
+    staged, problems = generate(config, ["--project-dir", str(staged_project)], work)
+    if staged is None:
+        raise StagingErr(
+            "The accepted copy of the project's files can't be read: " + "; ".join(problems)
+        )
+    return UserConfig(staged)
+
+
+def _to_live(config: UserConfig, staged_project: Path) -> Callable[[Path], str]:
+    """A path in the staged copy, as the live project's; others, as they are."""
+    files_dir = _files_dir(config)
+    live_files = Path(os.path.realpath(config.require_active_location("project-dir"))) / files_dir
+    staged_files = Path(os.path.realpath(staged_project)) / files_dir
+
+    def live(path: Path) -> str:
+        real = Path(os.path.realpath(path))
+        if real.is_relative_to(staged_files):
+            return str(live_files / real.relative_to(staged_files))
+        return str(real)
+
+    return live
 
 
 def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> BuildPlan:
@@ -125,16 +247,7 @@ def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> 
             config.require_active_location("dev-container-path"),
             config.dev_container_parent_builds(),
         )
-    files_dir = _files_dir(config)
-    live_files = Path(os.path.realpath(config.require_active_location("project-dir"))) / files_dir
-    staged_files = Path(os.path.realpath(staged_project)) / files_dir
-
-    def live(path: Path) -> str:
-        real = Path(os.path.realpath(path))
-        if real.is_relative_to(staged_files):
-            return str(live_files / real.relative_to(staged_files))
-        return str(real)
-
+    live = _to_live(config, staged_project)
     dev_path = staged.require_active_location("dev-container-path")
     staged_dev = staged.dev_container()
     run_dev = config.dev_container()
@@ -149,6 +262,10 @@ def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> 
         {"dir": str(Path(os.path.realpath(d))), "tag": tag}
         for tag, d in config.dev_container_parent_builds()
     ]
+    if staged_dev.get("sshd-port") is None:
+        # The files leave the port to the run, which chose it before staging.
+        mapped.pop("sshd-port", None)
+        run_dev = {k: v for k, v in run_dev.items() if k != "sshd-port"}
     if (
         live(dev_path) != os.path.realpath(config.require_active_location("dev-container-path"))
         or mapped != {**run_dev, "parent-builds": run_parents}
@@ -157,13 +274,67 @@ def build_plan(config: UserConfig, staged: UserConfig, staged_project: Path) -> 
     return BuildPlan(dev_path, parents)
 
 
-def apply_images(plan: BuildPlan, staged_project: Path, images: Mapping[str, str]) -> list[Path]:
+def stage_containers(
+    config: UserConfig, accepted: Accepted, plan: BuildPlan, dest: Path,
+) -> BuildPlan:
+    """The build's other containers, staged in `dest` where they need to be.
+
+    * Each `verification: verified-containers` container the build uses is restored
+      from the copy kept with the acceptance (`accept.CONTAINERS_FILE`), so
+      it's built as it was accepted, not as it is now.
+    * The user's own container (`use: {name}`), trusted as their setup is,
+      builds from where it is, unless the acceptance's `images` change a
+      `FROM`: then from a copy, which they're applied to.
+    """
+    roots = lookup.verified_roots(config)
+    stored: dict[str, snapshot.Manifest] | None = None
+    count = 0
+
+    def place(directory: Path) -> Path:
+        nonlocal stored, count
+        real = Path(os.path.realpath(directory))
+        if not any(real.is_relative_to(root) for root in roots):
+            return directory
+        if stored is None:
+            data = accepted.store.read_json(
+                accepted.env_id, records.ACCEPTANCES_DIR, accepted.acceptance.id, accept.CONTAINERS_FILE,
+                schema=accept.CONTAINERS_SCHEMA,
+            )
+            if data is None:
+                raise StagingErr(
+                    f"your acceptance ({accepted.acceptance.id}) was made before the containers in "
+                    "`verification: verified-containers` were kept with it"
+                )
+            stored = {
+                str(key[-1]): snapshot.Manifest.from_json(jdata.req_dict(data, *key))
+                for key in jdata.find_dict_keys(data, "containers")
+            }
+        manifest = stored.get(str(real))
+        if manifest is None:
+            raise StagingErr(f"{real}: isn't among the containers your acceptance kept")
+        count += 1
+        target = dest / "containers" / str(count)
+        target.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
+        snapshot.restore(accepted.store, manifest, target, lookup.limits(config))
+        return target
+
+    parents = [(tag, place(directory)) for tag, directory in plan.parents]
+    dev_container = place(plan.dev_container)
+    images = {k: v for k, v in config.accepted_images().items() if k != v}
+    if config.accepted_container_name() is not None and dev_container == plan.dev_container and images:
+        copy = dest / "user-container"
+        shutil.copytree(plan.dev_container, copy, symlinks=True)
+        dev_container = copy
+    return BuildPlan(dev_container, parents)
+
+
+def apply_images(plan: BuildPlan, staged_root: Path, images: Mapping[str, str]) -> list[Path]:
     """Rewrite the staged Dockerfiles' `FROM`s with `images`; the Dockerfiles changed.
 
-    Only the copy's are rewritten: a directory outside it (the user's own
-    container) is left as it is.
+    Only the staged copies (under `staged_root`) are rewritten: a directory
+    built from where it is is left as it is.
     """
-    staged = Path(os.path.realpath(staged_project))
+    staged = Path(os.path.realpath(staged_root))
     local = [tag for tag, _ in plan.parents]
     changed: list[Path] = []
     for directory in [*(d for _, d in plan.parents), plan.dev_container]:
@@ -257,15 +428,23 @@ def prepare(
     accepted = find_accepted(config, now)
     if accepted is None:
         return None
+    # Under an exemption, the review's checks on the container files haven't
+    # seen them: they run here, on the live files (for what a copy can't
+    # show, such as links) and on the copy (for what's built from).
+    live_findings = checks.check_project_files(config) if accepted.exemption is not None else []
     staged_project = stage(config, accepted, dest)
-    work = dest / "generator"
-    work.mkdir(mode=0o700)
-    staged, problems = generate(config, ["--project-dir", str(staged_project)], work)
-    if staged is None:
-        raise StagingErr(
-            "The accepted copy of the project's files can't be read: " + "; ".join(problems)
-        )
-    plan = build_plan(config, UserConfig(staged), staged_project)
-    if config.accepted_container_name() is None:
-        apply_images(plan, staged_project, config.accepted_images())
+    staged = _generate(config, staged_project, dest, generate)
+    if accepted.exemption is not None:
+        refused = list({
+            (f.key, f.message): f for f in [*live_findings, *checks.check_project_files(staged)]
+            if f.severity == checks.Severity.REFUSE
+        }.values())
+        if refused:
+            raise StagingErr(
+                "Under your exemption, the container files are used as they are, but the setup's "
+                "checks refuse them:\n" + "\n".join(f"  {f.key}: {f.message}" for f in refused),
+                reverify=False,
+            )
+    plan = stage_containers(config, accepted, build_plan(config, staged, staged_project), dest)
+    apply_images(plan, dest, config.accepted_images())
     return plan

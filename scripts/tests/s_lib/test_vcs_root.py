@@ -70,4 +70,5 @@ class VcsRootTest(unittest.TestCase):
         """A marker is a single name."""
         self.assertIsNone(vcs_root.check_marker(".git"))
         for bad in ["", ".", "..", "a/b", "a\\b"]:
-            self.assertIsNotNone(vcs_root.check_marker(bad), bad)
+            with self.subTest(bad=bad):
+                self.assertIsNotNone(vcs_root.check_marker(bad), bad)

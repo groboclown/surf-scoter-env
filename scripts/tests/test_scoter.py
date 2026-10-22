@@ -10,6 +10,8 @@ from pathlib import Path
 
 import scoter
 
+from ..surf_scoter_lib import fileutil
+
 
 def _config(sub_command: object) -> scoter.DictJsonData:
     """A universal configuration with the python sub-command run as given."""
@@ -138,6 +140,57 @@ class FindVcsRootTest(unittest.TestCase):
                 scoter.find_vcs_root(_vcs_settings(git=command), self.dir / "a")
 
 
+class CommandEnvTest(unittest.TestCase):
+    """The VCS's `find-root` runs without the section's `drop-env` variables."""
+
+    def test_find_root_drops_git_vars(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(os.path.realpath(tmp.name))
+        # Prints GIT_DIR when it's there, else the root: either way, a root.
+        script = (
+            "import os, sys; print(os.environ.get('GIT_DIR') or sys.argv[1])"
+        )
+        settings: scoter.DictJsonData = {"resolved": {"git-vcs": {
+            "runs": {"find-root": [sys.executable, "-c", script, "{x:start}"]},
+            "value-lists": {"drop-env": ["GIT_*"]},
+        }}}
+        old = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = "/elsewhere"
+        try:
+            self.assertEqual(scoter.find_vcs_root(settings, root), (root, "git"))
+            self.assertNotIn("GIT_DIR", scoter.command_env(settings, "git-vcs"))
+            self.assertIn("GIT_DIR", scoter.command_env(settings, "file-vcs"))
+        finally:
+            if old is None:
+                del os.environ["GIT_DIR"]
+            else:
+                os.environ["GIT_DIR"] = old
+
+
+class CurrentBranchTest(unittest.TestCase):
+    """The branch, for `${scoter:project-branch}`, from the VCS section's `current-branch`."""
+
+    def settings(self, command: list[str] | None) -> scoter.DictJsonData:
+        runs: dict[str, object] = {} if command is None else {"current-branch": command}
+        return {"resolved": {"git-vcs": {"runs": runs}}}
+
+    def test_branch(self) -> None:
+        root = (Path(tempfile.gettempdir()), "git")
+        printing = [sys.executable, "-c", "import sys; print('feature/' + sys.argv[1][-1:])", "{x:root}"]
+        self.assertEqual(
+            scoter.vcs_current_branch(self.settings(printing), root), "feature/" + str(root[0])[-1:],
+        )
+        # None without the command, or when it says nothing or fails.
+        self.assertIsNone(scoter.vcs_current_branch(self.settings(None), root))
+        self.assertIsNone(scoter.vcs_current_branch(
+            self.settings([sys.executable, "-c", "pass", "{x:root}"]), root,
+        ))
+        self.assertIsNone(scoter.vcs_current_branch(
+            self.settings([sys.executable, "-c", "print('x'); raise SystemExit(1)", "{x:root}"]), root,
+        ))
+
+
 class FindProjectDirTest(unittest.TestCase):
     """Test the project search, from the start up to the VCS root."""
 
@@ -223,7 +276,7 @@ class CheckProjectVcsTest(unittest.TestCase):
 class TempFileTest(unittest.TestCase):
     """Test the private temporary configuration files."""
 
-    @unittest.skipIf(sys.platform == "win32", "modes")
+    @unittest.skipIf(fileutil.is_windows(), "modes")
     def test_private(self) -> None:
         """In a directory of its own, only the user's; removed with it."""
         file = scoter.save_to_tmp({"a": 1})
@@ -240,7 +293,7 @@ class FindAcceptanceTest(unittest.TestCase):
     """Test asking the setup's `find-acceptance` for the acceptance."""
 
     def settings(self, script: str) -> scoter.DictJsonData:
-        return {"resolved": {"verified": {"runs": {"find-acceptance": [
+        return {"resolved": {"scoter": {"runs": {"find-acceptance": [
             sys.executable, "-c", script, "{x:universal}",
         ]}}}}
 
@@ -303,12 +356,12 @@ class HelpTest(unittest.TestCase):
         `verify` and `revoke` load the project as it suggests, without the
         user's accepted settings; `run` loads them too.
         """
-        seen: list[tuple[bool, bool]] = []
+        seen: list[scoter.ConfigScope] = []
 
         def fake_load(
-            args: object, *, with_project: bool = True, with_acceptance: bool = True,
+            args: object, *, scope: scoter.ConfigScope = scoter.ConfigScope.ACCEPTED,
         ) -> scoter.DictJsonData:
-            seen.append((with_project, with_acceptance))
+            seen.append(scope)
             raise scoter.ConfigErr("stop here")
 
         original = scoter.load_config
@@ -322,5 +375,8 @@ class HelpTest(unittest.TestCase):
                 scoter.main(["scoter", "list-accepted"])
         finally:
             scoter.load_config = original  # type: ignore[assignment]
-        self.assertEqual([p for p, _ in seen], [False, True, True, True, False])
-        self.assertEqual([a for _, a in seen[1:4]], [False, False, True])
+        scope = scoter.ConfigScope
+        self.assertEqual(
+            seen,
+            [scope.SETUP, scope.SUGGESTED, scope.SUGGESTED, scope.ACCEPTED, scope.SETUP],
+        )

@@ -4,7 +4,7 @@
 //! Any section can have `host-commands`.  Each key is one check:
 //!
 //! ```yaml
-//! host-bridge:
+//! verification:
 //!   host-commands:
 //!     shells:
 //!       action: refuse
@@ -830,15 +830,16 @@ pub fn combine(system: &SystemConfig, sections: &[Section]) -> Result<Combined, 
         });
         for o in overrides {
             for target in &o.check.overrides {
-                if let Some(at) = applying.iter().position(|(id, _)| id == target) {
-                    applying.remove(at);
-                    overridden.push(Overridden {
-                        check: target.clone(),
-                        by: o.id.clone(),
-                    });
-                    if !applying.iter().any(|(id, _)| *id == o.id) {
-                        applying.push((&o.id, o.check.action));
-                    }
+                let Some(at) = applying.iter().position(|(id, _)| id == target) else {
+                    continue;
+                };
+                applying.remove(at);
+                overridden.push(Overridden {
+                    check: target.clone(),
+                    by: o.id.clone(),
+                });
+                if !applying.iter().any(|(id, _)| *id == o.id) {
+                    applying.push((&o.id, o.check.action));
                 }
             }
         }

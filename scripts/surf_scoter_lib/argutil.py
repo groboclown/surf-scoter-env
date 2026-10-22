@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -10,6 +11,15 @@ from . import log
 from .user_config import UserConfig
 
 BAD_EXECUTION_ARGS_CODE = 124
+
+
+def can_ask() -> bool:
+    """Whether the user can be asked a question: both the input and the output are a terminal.
+
+    `input` writes its prompt to the output, so with the output going to a
+    file the user wouldn't see the question, and the command would wait.
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def gen_parser(
@@ -69,7 +79,8 @@ class LogAction(argparse.Action):
             choices=None, required=False, help=help, metavar=None, deprecated=False
         )
 
-    def format_usage(self):
+    def format_usage(self) -> str:
+        """The usage text: each option, separated by `|`."""
         return ' | '.join(self.option_strings)
 
     def __call__(

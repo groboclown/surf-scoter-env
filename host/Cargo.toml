@@ -19,6 +19,9 @@ path = "src/bin/gen-scoter-uc.rs"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The project id (`scoter:project-id`): the same SHA-256 the verified store
+# names a project's directory by.
+sha2 = "0.10"
 yaml_serde = "0.10"
 # The communication library shared with the container's client and broker.
 surf-scoter-env-launcher = { path = "../containers/dev-env" }

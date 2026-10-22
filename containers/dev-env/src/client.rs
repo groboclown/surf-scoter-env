@@ -19,11 +19,14 @@ use std::thread;
 use surf_scoter_env_launcher::comm::client_broker;
 use surf_scoter_env_launcher::comm::client_host::{self, Command, Invocation};
 
+/// Prefix for the client's diagnostics on stderr.
+const LOG_PREFIX: &str = "scoter-client";
+
 /// Exit code used when the host's exit code can't be determined.
 const EXIT_TRANSPORT_FAILURE: i32 = 255;
 
 /// Maximum number of stdin bytes sent per message.
-const STDIN_CHUNK: usize = 64 * 1024;
+const STDIN_CHUNK_BYTES: usize = 64 * 1024;
 
 fn main() {
     std::process::exit(run());
@@ -33,7 +36,7 @@ fn run() -> i32 {
     let invocation = match Invocation::new_current() {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("scoter-client: cannot read the current invocation: {e}");
+            eprintln!("{LOG_PREFIX}: cannot read the current invocation: {e}");
             return EXIT_TRANSPORT_FAILURE;
         }
     };
@@ -41,7 +44,7 @@ fn run() -> i32 {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "scoter-client: cannot connect to broker at {}: {e}",
+                "{LOG_PREFIX}: cannot connect to broker at {}: {e}",
                 client_broker::UNIX_SOCKET
             );
             return EXIT_TRANSPORT_FAILURE;
@@ -50,7 +53,7 @@ fn run() -> i32 {
     let signals = match signals::install() {
         Ok(pipe) => Some(pipe),
         Err(e) => {
-            eprintln!("scoter-client: signals will not be forwarded: {e}");
+            eprintln!("{LOG_PREFIX}: signals will not be forwarded: {e}");
             None
         }
     };
@@ -86,7 +89,7 @@ where
     match result {
         Ok(code) => code,
         Err(e) => {
-            let _ = writeln!(err, "scoter-client: {e}");
+            let _ = writeln!(err, "{LOG_PREFIX}: {e}");
             let _ = err.flush();
             EXIT_TRANSPORT_FAILURE
         }
@@ -141,7 +144,7 @@ fn send_locked<W: Write>(
 
 /// Send all of `input` to the host as stdin messages, followed by an empty message for EOF.
 fn pump_stdin<R: Read, W: Write>(mut input: R, out: &Mutex<W>) -> io::Result<()> {
-    let mut buf = vec![0u8; STDIN_CHUNK];
+    let mut buf = vec![0u8; STDIN_CHUNK_BYTES];
     loop {
         let n = match input.read(&mut buf) {
             Ok(n) => n,
@@ -375,7 +378,7 @@ mod tests {
 
     #[test]
     fn pump_stdin_chunks_and_eof() {
-        let data: Vec<u8> = (0..(STDIN_CHUNK * 2 + 123))
+        let data: Vec<u8> = (0..(STDIN_CHUNK_BYTES * 2 + 123))
             .map(|i| (i % 251) as u8)
             .collect();
         let out = Mutex::new(Vec::new());
@@ -387,7 +390,7 @@ mod tests {
         for cmd in &cmds[..3] {
             match cmd {
                 Command::Stdin(d) => {
-                    assert!(!d.is_empty() && d.len() <= STDIN_CHUNK);
+                    assert!(!d.is_empty() && d.len() <= STDIN_CHUNK_BYTES);
                     joined.extend_from_slice(d);
                 }
                 other => panic!("unexpected {other:?}"),
@@ -398,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_stdin_empty_input_sends_only_eof() {
+    fn pump_stdin_empty_sends_eof() {
         let out = Mutex::new(Vec::new());
         pump_stdin(Cursor::new(Vec::new()), &out).unwrap();
         assert_eq!(
@@ -408,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_stdin_retries_interrupted() {
+    fn pump_stdin_interrupted() {
         let input = InterruptingReader {
             pieces: vec![b"ab", b"cd"],
             interrupt_next: true,
@@ -449,7 +452,7 @@ mod tests {
     // ---- pump_output ----
 
     #[test]
-    fn pump_output_routes_streams_and_returns_exit_code() {
+    fn pump_output_routes_streams() {
         for code in [0, 1, -3, 255] {
             let input = encode(|b| {
                 client_host::send_stdout(b, b"out1 ")?;
@@ -470,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_stops_at_exit_code() {
+    fn pump_output_stops_at_exit() {
         let input = encode(|b| {
             client_host::send_exit_code(b, 7)?;
             client_host::send_stdout(b, b"after")
@@ -484,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_eof_before_exit_code() {
+    fn pump_output_early_eof() {
         let input = encode(|b| client_host::send_stdout(b, b"partial"));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let e = pump_output(Cursor::new(input), &mut out, &mut err).unwrap_err();
@@ -493,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_connection_reset_before_exit_code() {
+    fn pump_output_early_reset() {
         struct ResetReader;
         impl Read for ResetReader {
             fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
@@ -507,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_other_read_errors_pass_through() {
+    fn pump_output_passes_errors() {
         struct DeniedReader;
         impl Read for DeniedReader {
             fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
@@ -529,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_rejects_client_bound_messages() {
+    fn pump_output_bad_message() {
         let stdin_msg = encode(|b| client_host::send_stdin(b, b"x"));
         let signal_msg = encode(|b| client_host::send_signal(b, client_host::SIGNAL_INT));
         for input in [stdin_msg, signal_msg, vec![99]] {
@@ -540,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_survives_failing_stdout() {
+    fn pump_output_bad_stdout() {
         let input = encode(|b| {
             client_host::send_stdout(b, b"lost")?;
             client_host::send_stderr(b, b"kept")?;
@@ -556,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_output_survives_failing_stderr() {
+    fn pump_output_bad_stderr() {
         let input = encode(|b| {
             client_host::send_stderr(b, b"lost")?;
             client_host::send_stdout(b, b"kept")?;
@@ -573,7 +576,7 @@ mod tests {
     // ---- signals ----
 
     #[test]
-    fn signal_to_wire_maps_forwarded_signals() {
+    fn signal_to_wire_maps_all() {
         let expected = [
             (libc::SIGHUP, client_host::SIGNAL_HUP),
             (libc::SIGINT, client_host::SIGNAL_INT),
@@ -605,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_signals_sends_mapped_values() {
+    fn forward_signals_maps() {
         let (reader, mut writer) = io::pipe().unwrap();
         writer
             .write_all(&[
@@ -630,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_signals_stops_on_write_error() {
+    fn forward_signals_write_error() {
         let (reader, mut writer) = io::pipe().unwrap();
         writer.write_all(&[libc::SIGINT as u8]).unwrap();
         // Writer intentionally kept open: forward_signals must return due to the
@@ -641,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn install_catches_and_reports_signals() {
+    fn install_reports_signals() {
         let mut reader = signals::install().unwrap();
         // SAFETY: raise is safe to call; SIGUSR1 / SIGUSR2 are now handled.
         unsafe {
@@ -737,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn run_session_host_closes_without_exit_code() {
+    fn run_session_no_exit_code() {
         let (client, mut host) = UnixStream::pair().unwrap();
         let fake_host = thread::spawn(move || {
             Invocation::read(&mut host).unwrap();
@@ -789,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn run_session_broker_already_closed() {
+    fn run_session_broker_closed() {
         let (client, host) = UnixStream::pair().unwrap();
         drop(host);
         let (mut out, mut err) = (Vec::new(), Vec::new());

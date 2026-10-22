@@ -1,5 +1,5 @@
 //! The review file: the user's answer to a project's suggestion, as they
-//! left it in their editor.  See step 12 of `docs/contributors/projects-v1.md`.
+//! left it in their editor.
 //!
 //! ```yaml
 //! review: "surf-scoter-review-1"
@@ -15,14 +15,14 @@
 //!     program: "/usr/local/bin/aws"
 //!     args: ["s3", "ls"]
 //!     $comment: "A note the user keeps."
-//!     $override: ["host-bridge:shells"]
+//!     $override: ["verification:shells"]
 //! dev-container:
 //!   use: "project"
 //!   images: {"debian:bookworm": "debian@sha256:..."}
 //! ```
 //!
-//! It's parsed as the project file is (step 7's rules: no tags, merge keys,
-//! duplicate keys or control characters), and its `egress`, `env` and
+//! It's parsed as the project file is (no tags, merge keys, duplicate keys or
+//! control characters), and its `egress`, `env` and
 //! `commands` are checked as the project file's are, with these differences:
 //! each `program` is the absolute executable the user accepts; values are
 //! as accepted (a `${...}` isn't expanded, and is refused, so nothing is
@@ -96,7 +96,7 @@ pub struct Review {
     /// Each image the build starts from, and what to build from instead.
     pub images: BTreeMap<String, String>,
     /// The file's data as the user left it, `$comment`s and `$override`s
-    /// included: what a later review starts from (step 17).
+    /// included: what a later review starts from.
     pub as_written: Json,
 }
 
@@ -203,7 +203,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Review, Vec<ConfigError>> {
         _ => {
             problems.push((
                 "expires-at".to_string(),
-                "must be a time such as 2026-11-19T15:04:05+00:00".to_string(),
+                format!("must be a time such as {}", accepted::TIME_EXAMPLE),
             ));
             None
         }
@@ -543,7 +543,7 @@ mod tests {
             "commands:\n",
             "  - command: \"sh\"\n    program: \"/usr/bin/sh\"\n    args: [\"-c\", {any: {}}]\n",
             "    env: {allow: [\"AWS_*\"]}\n",
-            "    $override: [\"host-bridge:shells\"]\n",
+            "    $override: [\"verification:shells\"]\n",
             "dev-container:\n  use: {name: \"my-env\"}\n  images: {\"debian:bookworm\": \"debian@sha256:abc\"}\n",
         ))
         .unwrap();
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(review.commands[0].env_plan.set["HOME"], "@HOME@");
         assert_eq!(
             review.command_overrides,
-            BTreeMap::from([(0, vec!["host-bridge:shells".to_string()])])
+            BTreeMap::from([(0, vec!["verification:shells".to_string()])])
         );
         assert_eq!(
             review.container_use,
@@ -570,7 +570,7 @@ mod tests {
         assert!(accepted["commands"][0].get("$override").is_none());
         assert_eq!(
             accepted["overrides"]["commands"][0]["checks"][0],
-            "host-bridge:shells"
+            "verification:shells"
         );
         assert_eq!(accepted["dev-container"]["use"]["name"], "my-env");
         // What it gives is what the generator reads back.
@@ -619,7 +619,7 @@ mod tests {
                 "dev-container.images.a: must map an image to the image to build from instead, both without spaces",
             ]
         );
-        // Step 7's rules: merge keys, duplicate keys, control characters.
+        // The project file's rules: merge keys, duplicate keys, control characters.
         let errors = review("env:\n  set:\n    <<: {A: b}\n").unwrap_err();
         assert!(errors[0].contains("merge key"), "{errors:?}");
         let errors = review("expires-at: \"2031-01-01T00:00:00Z\"\n").unwrap_err();

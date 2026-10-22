@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_program_is_refused() {
+    fn unavailable_program_refused() {
         let mut commands = parse_commands("  - command: aws\n    args: [s3, ls]\n");
         commands[0].unavailable = true;
         assert_eq!(
@@ -445,7 +445,7 @@ mod tests {
     // ---- the example rules ----
 
     #[test]
-    fn s3_copy_from_bucket_to_container() {
+    fn s3_copy_bucket_to_container() {
         let ws = TestWorkspace::new();
         let decide = |args: &[&str]| analyze(&invocation(args), &commands(), &ws.workspace);
         assert_eq!(
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_prefix_may_start_with_dash() {
+    fn prefix_may_start_with_dash() {
         allowed(&["tool", "dash-prefix", "--name=x"]);
         // The client's part still can't be empty.
         assert_denied(&["tool", "dash-prefix", "--name="]);
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_rule_allows_bare_command() {
+    fn empty_rule_allows_bare() {
         assert_eq!(allowed(&["tool"]), vec![]);
         assert_eq!(allowed(&["/usr/local/bin/tool"]), vec![]);
     }
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn denies_lookalike_command_names() {
+    fn denies_lookalike_commands() {
         for arg0 in [
             "AWS",
             "aws.exe",
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_for_other_commands_do_not_match() {
+    fn other_commands_do_not_match() {
         let commands = parse_commands("  - {command: other, args: [s3, ls]}\n");
         assert_eq!(
             analyze(&invocation(&["aws", "s3", "ls"]), &commands, &workspace()),
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn cwd_allowed_runs_in_host_directory() {
+    fn cwd_allowed_runs_in_host_dir() {
         let ws = TestWorkspace::new();
         let commands = compose_commands();
         assert_eq!(
@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn cwd_later_entry_can_allow_other_directories() {
+    fn cwd_later_entry_allows_others() {
         let ws = TestWorkspace::new();
         let commands = parse_commands(concat!(
             "  - {command: docker, program: docker-a, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn cwd_argument_mismatch_reason_unchanged() {
+    fn cwd_mismatch_reason_unchanged() {
         let ws = TestWorkspace::new();
         let mut inv = invocation(&["docker", "compose", "down"]);
         inv.cwd = "/workspace/services/api".to_string();
@@ -896,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_mount_with_trailing_name_overlap() {
+    fn mount_trailing_name_overlap() {
         // The mount itself may be nested, e.g. /home/dev/ws.
         let ws = TestWorkspace::new();
         let workspace = Workspace {
@@ -917,7 +917,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cwd_symlink_out_of_workspace_is_refused() {
+    fn cwd_symlink_out_is_refused() {
         let ws = TestWorkspace::new();
         let outside = TempDir::new().unwrap();
         fs::create_dir(outside.path().join("api")).unwrap();
@@ -932,7 +932,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cwd_symlink_is_matched_by_its_target() {
+    fn cwd_symlink_matches_target() {
         let ws = TestWorkspace::new();
         let commands = compose_commands();
         // services/link -> infra/a: the name matches `services/*`, but the
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_dir_reports_names_below_workspace() {
+    fn resolve_dir_reports_names() {
         let ws = TestWorkspace::new();
         let dir = resolve_dir("/workspace/infra/a/b", &ws.workspace).unwrap();
         assert_eq!(dir.below_workspace, vec!["infra", "a", "b"]);
@@ -1018,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn path_within_cwd_needs_client_in_workspace() {
+    fn cwd_path_needs_client_inside() {
         let ws = TestWorkspace::new();
         assert_eq!(ws.path_arg("/", "cwd", "workspace/notes.txt"), None);
         assert_eq!(
@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn path_missing_parent_is_refused() {
+    fn path_missing_parent_refused() {
         let ws = TestWorkspace::new();
         assert_eq!(ws.path_arg("/workspace", "cwd", "missing/out.txt"), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "notes.txt/out.txt"), None);
@@ -1086,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn path_container_mount_lookalike() {
+    fn path_mount_lookalike() {
         let ws = TestWorkspace::new();
         assert_eq!(
             ws.path_arg("/workspace", "cwd", "/workspacex/notes.txt"),
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn path_dangling_symlink_is_refused() {
+    fn path_dangling_symlink_refused() {
         let ws = TestWorkspace::new();
         let outside = TempDir::new().unwrap();
         // Writing to `out.txt` would create the file outside the workspace.
@@ -1185,7 +1185,7 @@ mod tests {
             "nul-device",
             "com10",
             "lpt",
-            "ünïcødé",
+            "\u{FC}n\u{EF}c\u{F8}d\u{E9}",
         ] {
             assert_eq!(temp_file_name(good), Some(good), "{good}");
         }

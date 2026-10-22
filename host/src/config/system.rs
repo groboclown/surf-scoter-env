@@ -81,6 +81,7 @@ use yaml_serde::Value;
 use super::command::{self, CommandTemplate, Part};
 use super::host_commands::{self, Check, CheckRecord};
 use super::read::{parse_yaml, read_limited, tag_errors};
+use super::simple_checks::{self, EGRESS_HOSTS, PROJECT_FILES, SimpleCheck};
 use super::{ConfigError, child_key, index_key};
 
 pub const SCOTER_SECTION: &str = "scoter";
@@ -100,20 +101,34 @@ pub const DISTRIBUTION_DIR: &str = "distribution-dir";
 /// program changed it.
 pub const DISTRIBUTION_BIN_DIR: &str = "distribution-bin-dir";
 pub const CWD: &str = "cwd";
-/// Where the user's accepted (verified) project settings are kept.  Set by
-/// the setup files, not the tool; it decides what a project may do, so it
-/// must be absolute and outside the project.
-pub const VERIFIED_DIR: &str = "verified-dir";
+/// The setup section for what a review checks, and where acceptances are kept.
+pub const VERIFICATION_SECTION: &str = "verification";
+/// Where the user's acceptances of projects' settings are kept, in the
+/// `verification` section's `paths`.  Set by the setup files, not the tool;
+/// it decides what a project may do, so it must be absolute and outside the
+/// project.
+pub const VERIFIED_STORE: &str = "store";
 /// Where the tools keep their own state, such as the running environments.
-/// Like `verified-dir`, it must be absolute and outside the project.
+/// Like `verification:store`, it must be absolute and outside the project.
 pub const STATE_DIR: &str = "state-dir";
 /// The root of the repository holding the project, found by `scoter` from
 /// the setup's VCS sections and given to the generator (`--vcs-root`).
 pub const VCS_ROOT: &str = "vcs-root";
+/// The project's id, the same for the same project directory: its name and a
+/// hash of its canonical path (`environment_id`).  The verified store names
+/// the project's directory by it, and the setup can use it to name a
+/// workspace outside the project.
+pub const PROJECT_ID: &str = "project-id";
+/// The project's branch (`--project-branch`, from the VCS section's
+/// `current-branch`), made safe as a single path part (`path_part`).  Not
+/// set without a branch.
+pub const PROJECT_BRANCH: &str = "project-branch";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 10] = [
+const TOOL_ONLY_KEYS: [&str; 12] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
+    PROJECT_ID,
+    PROJECT_BRANCH,
     VCS_ROOT,
     DEV_CONTAINER_PATH,
     DEV_CONTAINER_WORKSPACE_DIR,
@@ -251,6 +266,9 @@ enum Entry {
     Value(ScalarValue),
     /// A `host-commands` check; `None` (null) removes a lower priority one.
     HostCommand(Option<CheckRecord>),
+    /// A `project-files` or `egress-hosts` check (the group's name, and the
+    /// check); `None` (null) removes a lower priority one.
+    Simple(&'static str, Option<SimpleCheck>),
 }
 
 impl Entry {
@@ -264,6 +282,7 @@ impl Entry {
             Entry::ValueList(_) => VALUE_LISTS,
             Entry::Value(_) => VALUES,
             Entry::HostCommand(_) => HOST_COMMANDS,
+            Entry::Simple(group, _) => group,
         }
     }
 }
@@ -380,6 +399,10 @@ pub struct SectionRecord {
     pub values: BTreeMap<String, ScalarValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_commands: BTreeMap<String, Option<CheckRecord>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_files: BTreeMap<String, Option<SimpleCheck>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress_hosts: BTreeMap<String, Option<SimpleCheck>>,
 }
 
 /// Where to find the system setup.
@@ -392,6 +415,9 @@ pub struct SetupOptions<'a> {
     pub project_config: Option<&'a Path>,
     /// The root of the repository holding the project: `scoter:vcs-root`.
     pub vcs_root: Option<&'a Path>,
+    /// The project's branch, as the VCS gave it: `scoter:project-branch`,
+    /// once made safe as a path part.
+    pub project_branch: Option<&'a str>,
     /// The dev container's mounts: `scoter:dev-container-workspace-dir` and
     /// `scoter:dev-container-settings-dir`.
     pub dev_container_workspace_dir: Option<&'a Path>,
@@ -457,6 +483,10 @@ pub struct Section {
     pub values: BTreeMap<String, ScalarValue>,
     /// The `host-commands` checks; removed (null) ones aren't here.
     pub host_commands: BTreeMap<String, Check>,
+    /// The `project-files` and `egress-hosts` checks, as written; removed
+    /// (null) ones aren't here.
+    pub project_files: BTreeMap<String, SimpleCheck>,
+    pub egress_hosts: BTreeMap<String, SimpleCheck>,
     /// The `programs` that aren't there: key -> the program it names.
     pub missing: BTreeMap<String, String>,
 }
@@ -579,8 +609,9 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     files.extend(base_files);
     files.sort_by_key(|f| f.source);
 
-    let mut tool_values: Vec<(&str, String)> = Vec::new();
-    let mut add = |key, value: Option<String>| tool_values.extend(value.map(|v| (key, v)));
+    let mut tool_values: Vec<(&str, Entry)> = Vec::new();
+    let mut add =
+        |key, value: Option<String>| tool_values.extend(value.map(|v| (key, Entry::Path(v))));
     add(PROJECT_CONFIG, options.project_config.map(path_text));
     add(PROJECT_DIR, options.project_dir.map(path_text));
     add(VCS_ROOT, options.vcs_root.map(path_text));
@@ -596,6 +627,19 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     add(USER_DIR, inputs.user_dir.clone());
     add(DISTRIBUTION_DIR, inputs.distribution_dir.clone());
     add(CWD, env.cwd.as_deref().map(path_text));
+    // Text, not paths: names to build paths from.
+    let text = |value: String| Entry::Value(ScalarValue::String(value));
+    tool_values.extend(
+        options
+            .project_dir
+            .map(|dir| (PROJECT_ID, text(environment_id(dir)))),
+    );
+    tool_values.extend(
+        options
+            .project_branch
+            .and_then(path_part)
+            .map(|branch| (PROJECT_BRANCH, text(branch))),
+    );
     let merge = |files: &[SetupFile]| {
         SystemConfig::merge(files, &tool_values, env.clone(), options.project_dir)
     };
@@ -606,11 +650,11 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     // referred to.
     let given = inputs.distribution_dir.is_some();
     let uses_cwd = !given && {
-        let elsewhere: Vec<(&str, String)> = tool_values
+        let elsewhere: Vec<(&str, Entry)> = tool_values
             .iter()
             .filter(|(key, _)| *key != CWD)
             .cloned()
-            .chain([(CWD, "/surf-scoter-not-the-cwd".to_string())])
+            .chain([(CWD, Entry::Path("/surf-scoter-not-the-cwd".to_string()))])
             .collect();
         SystemConfig::merge(&files, &elsewhere, env.clone(), options.project_dir)
             .get(SCOTER_SECTION, DISTRIBUTION_DIR)
@@ -695,14 +739,18 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     // The accepted project settings decide what a project may do, and the
     // state says which environments run where, so neither can be kept where
     // the project, or the container, could change them.
-    for (key, what) in [
-        (VERIFIED_DIR, "the accepted project settings are"),
-        (STATE_DIR, "the tools' state is"),
+    for (section, key, what) in [
+        (
+            VERIFICATION_SECTION,
+            VERIFIED_STORE,
+            "the accepted project settings are",
+        ),
+        (SCOTER_SECTION, STATE_DIR, "the tools' state is"),
     ] {
-        let Some(dir) = config.get_path(SCOTER_SECTION, key) else {
+        let Some(dir) = config.get_path(section, key) else {
             continue;
         };
-        let setting = format!("`{SCOTER_SECTION}:{key}` {}", dir.display());
+        let setting = format!("`{section}:{key}` {}", dir.display());
         if !dir.is_absolute() {
             errors.push(ConfigError::new(
                 None,
@@ -970,6 +1018,91 @@ fn is_location(section: &str, key: &str) -> bool {
     is_tool_only(section, key) || (section == SCOTER_SECTION && key == DISTRIBUTION_DIR)
 }
 
+/// The most characters of the directory name in a project's id.
+const ID_NAME_MAX_CHARS: usize = 32;
+/// The id's name when the directory's name leaves nothing.
+const ID_FALLBACK_NAME: &str = "project";
+/// How many bytes of the path's SHA-256 the id's hash holds (two hex digits each).
+const ID_HASH_BYTES: usize = 6;
+/// The most characters `path_part` keeps.
+const PATH_PART_MAX_CHARS: usize = 64;
+
+/// The project's id: `NAME-HASH`, from the project directory's canonical path,
+/// exactly as the verified store works it out (`store.environment_id` in the
+/// scripts' library).
+///
+/// `NAME` is the directory's name, lower-cased, with each run of anything
+/// outside `[a-z0-9-]` made one `-`, cut to 32 characters and trimmed of `-`
+/// (`project` if that leaves nothing).  `HASH` is the first 12 hex digits of
+/// the SHA-256 of the canonical path's bytes.
+pub fn environment_id(project_dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let base = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut name = String::new();
+    let mut in_run = false;
+    for c in base.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+            name.push(c);
+            in_run = false;
+        } else if !in_run {
+            name.push('-');
+            in_run = true;
+        }
+    }
+    let name: String = name.chars().take(ID_NAME_MAX_CHARS).collect();
+    let name = name.trim_matches('-');
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        canonical.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = canonical.to_string_lossy().into_owned().into_bytes();
+    let digest = Sha256::digest(&bytes);
+    let hash: String = digest
+        .iter()
+        .take(ID_HASH_BYTES)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "{}-{hash}",
+        if name.is_empty() {
+            ID_FALLBACK_NAME
+        } else {
+            name
+        }
+    )
+}
+
+/// `text` made safe as one path part, or None if nothing's left.
+///
+/// A branch name is the project's to choose (`../../.ssh`, or one holding a
+/// newline or `${...}`), so only letters, digits, `.`, `_` and `-` are kept,
+/// each run of anything else made one `-`; `-` and `.` are trimmed from the
+/// ends (so `.` and `..` leave nothing), and it's cut to 64 characters.
+pub fn path_part(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_run = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+            in_run = false;
+        } else if !in_run {
+            out.push('-');
+            in_run = true;
+        }
+    }
+    let cut: String = out.chars().take(PATH_PART_MAX_CHARS).collect();
+    let part = cut.trim_matches(|c| c == '-' || c == '.');
+    (!part.is_empty()).then(|| part.to_string())
+}
+
 /// The message for a reference to a location this run doesn't have.
 fn unset_location(section: &str, key: &str) -> String {
     format!("`${{{section}:{key}}}` isn't set for this run")
@@ -1034,6 +1167,14 @@ impl SetupFile {
                     Entry::HostCommand(check) => {
                         section.host_commands.insert(key, check.clone());
                     }
+                    Entry::Simple(group, check) => {
+                        let checks = if *group == EGRESS_HOSTS {
+                            &mut section.egress_hosts
+                        } else {
+                            &mut section.project_files
+                        };
+                        checks.insert(key, check.clone());
+                    }
                 }
             }
             sections.insert(name.clone(), section);
@@ -1091,12 +1232,36 @@ fn file_from_record(
                     .host_commands
                     .iter()
                     .map(|(k, v)| (k, Entry::HostCommand(v.clone()))),
+            )
+            .chain(
+                groups
+                    .project_files
+                    .iter()
+                    .map(|(k, v)| (k, Entry::Simple(PROJECT_FILES, v.clone()))),
+            )
+            .chain(
+                groups
+                    .egress_hosts
+                    .iter()
+                    .map(|(k, v)| (k, Entry::Simple(EGRESS_HOSTS, v.clone()))),
             );
         for (key, entry) in all {
             let at = format!(
                 "setup.files[{i}].sections.{}",
                 child_key(name, &group_key(entry.group(), key))
             );
+            let problems = match &entry {
+                Entry::Simple(group, Some(check)) => check.problems(group, &at),
+                _ => Vec::new(),
+            };
+            if !problems.is_empty() {
+                errors.extend(
+                    problems
+                        .into_iter()
+                        .map(|(key, message)| ConfigError::new(Some(origin), &key, message)),
+                );
+                continue;
+            }
             if let Entry::HostCommand(Some(check)) = &entry {
                 let problems = check.problems(&at);
                 if !problems.is_empty() {
@@ -1183,7 +1348,7 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
             _ => {
                 errors.push(error(
                     name,
-                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings"
+                    "must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts` mappings"
                         .to_string(),
                 ));
                 continue;
@@ -1199,13 +1364,15 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                 Some(VALUE_LISTS) => VALUE_LISTS,
                 Some(VALUES) => VALUES,
                 Some(HOST_COMMANDS) => HOST_COMMANDS,
+                Some(PROJECT_FILES) => PROJECT_FILES,
+                Some(EGRESS_HOSTS) => EGRESS_HOSTS,
                 _ => {
                     let shown = group
                         .as_str()
                         .map_or_else(|| format!("{group:?}"), str::to_string);
                     errors.push(error(
                         &child_key(name, &shown),
-                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
+                        "unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`"
                             .to_string(),
                     ));
                     continue;
@@ -1276,6 +1443,19 @@ fn load_file(path: &Path, source: Source) -> Result<SetupFile, Vec<ConfigError>>
                     (VALUE_LISTS, _) => {
                         errors.push(error(&at, "must be a list of values".to_string()));
                         continue;
+                    }
+                    (PROJECT_FILES | EGRESS_HOSTS, _) => {
+                        match simple_checks::parse(value.clone(), group, &at) {
+                            Ok(check) => Entry::Simple(group, check),
+                            Err(problems) => {
+                                errors.extend(
+                                    problems
+                                        .into_iter()
+                                        .map(|(key, message)| error(&key, message)),
+                                );
+                                continue;
+                            }
+                        }
                     }
                     (HOST_COMMANDS, _) => match host_commands::parse(value.clone(), &at) {
                         Ok(check) => Entry::HostCommand(check),
@@ -1403,7 +1583,7 @@ impl SystemConfig {
     /// sets, which win.
     fn merge(
         files: &[SetupFile],
-        tool_values: &[(&str, String)],
+        tool_values: &[(&str, Entry)],
         env: Env,
         project_dir: Option<&Path>,
     ) -> Self {
@@ -1424,7 +1604,7 @@ impl SystemConfig {
             scoter.insert(
                 key.to_string(),
                 Setting {
-                    value: Entry::Path(value.clone()),
+                    value: value.clone(),
                     file: None,
                 },
             );
@@ -1531,6 +1711,8 @@ impl SystemConfig {
                             }
                         }
                     }
+                    // Used as written: nothing to expand.
+                    Entry::Simple(..) => {}
                     Entry::HostCommand(None) => {}
                     Entry::HostCommand(Some(check)) => {
                         if let Err(failure) = expander.check_locations(name, key, check)
@@ -1638,6 +1820,11 @@ impl SystemConfig {
         self.setting_file(section, &group_key(HOST_COMMANDS, key))
     }
 
+    /// The file that set the check `section:key` of `group` (such as `egress-hosts`).
+    pub fn check_file(&self, section: &str, group: &str, key: &str) -> Option<&Path> {
+        self.setting_file(section, &group_key(group, key))
+    }
+
     /// The name of the project location `path` is in, once symlinks are
     /// resolved, if it's in one: the project directory, the project files
     /// directory, the dev container's workspace, or the repository holding
@@ -1692,7 +1879,7 @@ impl SystemConfig {
             Some(Entry::Run(_) | Entry::PathList(_) | Entry::ValueList(_)) => {
                 Err(format!("{reference} is a list; it can't be used here"))
             }
-            Some(Entry::HostCommand(_)) => Err(check_reference(section, key)),
+            Some(Entry::HostCommand(_) | Entry::Simple(..)) => Err(check_reference(section, key)),
             Some(Entry::Value(ScalarValue::Null)) => {
                 Err(format!("{reference} is null, so it can't be used here"))
             }
@@ -1895,6 +2082,8 @@ impl SystemConfig {
             value_lists: BTreeMap::new(),
             values: BTreeMap::new(),
             host_commands: BTreeMap::new(),
+            project_files: BTreeMap::new(),
+            egress_hosts: BTreeMap::new(),
             missing: missing_programs,
         };
         for key in &path_keys {
@@ -1943,6 +2132,15 @@ impl SystemConfig {
                 }
                 Entry::Value(value) => {
                     section.values.insert(key.clone(), value.clone());
+                }
+                Entry::Simple(_, None) => {}
+                Entry::Simple(group, Some(check)) => {
+                    let checks = if *group == EGRESS_HOSTS {
+                        &mut section.egress_hosts
+                    } else {
+                        &mut section.project_files
+                    };
+                    checks.insert(key.clone(), check.clone());
                 }
                 Entry::HostCommand(None) => {}
                 Entry::HostCommand(Some(check)) => {
@@ -2156,7 +2354,7 @@ impl Expander<'_> {
                 }),
             },
             Entry::Run(raw) => Ok(Resolved::List(self.words(section, raw, &origin, stack)?)),
-            Entry::HostCommand(_) => Err(Failure {
+            Entry::HostCommand(_) | Entry::Simple(..) => Err(Failure {
                 kind: FailureKind::Error,
                 origin: referrer.clone(),
                 message: check_reference(section, key),
@@ -2593,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn no_setup_file_found_in_the_project() {
+    fn no_setup_file_in_project() {
         let dir = TempDir::new();
         dir.write("proj/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let project_dir = dir.path().join("proj");
@@ -2659,7 +2857,44 @@ mod tests {
     const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n";
 
     #[test]
-    fn no_user_setup_from_the_project() {
+    fn environment_id_matches_store() {
+        // The same as the scripts' `store.environment_id` gives for these.
+        for (dir, id) in [
+            (
+                "/no/such/My Project!! (copy)",
+                "my-project-copy-c593c7ec2d55",
+            ),
+            (
+                "/no/such/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-y",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-06211fd163da",
+            ),
+            ("/no/such/!!!", "project-b94ae0807dcf"),
+        ] {
+            assert_eq!(environment_id(Path::new(dir)), id, "{dir}");
+        }
+    }
+
+    #[test]
+    fn path_part_is_one_safe_name() {
+        for (branch, part) in [
+            ("main", Some("main")),
+            ("feature/x", Some("feature-x")),
+            ("../../.ssh", Some("ssh")),
+            ("..", None),
+            (".", None),
+            ("", None),
+            ("a\nb", Some("a-b")),
+            ("${scoter:state-dir}", Some("scoter-state-dir")),
+            ("detached at 0123456789ab", Some("detached-at-0123456789ab")),
+            ("release-1.2_rc", Some("release-1.2_rc")),
+        ] {
+            assert_eq!(path_part(branch).as_deref(), part, "{branch:?}");
+        }
+        assert_eq!(path_part(&"b".repeat(100)).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn no_user_setup_from_project() {
         let dir = TempDir::new();
         // A repository, with the project in `client`.
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
@@ -2734,7 +2969,7 @@ mod tests {
     }
 
     #[test]
-    fn no_user_setup_from_the_project_found_earlier() {
+    fn no_user_setup_found_earlier() {
         // Found before the project was known, the file is in the record.
         let dir = TempDir::new();
         let file = dir.write("proj/conf/setup.yaml", PROJECT_FILES_SETUP);
@@ -2762,7 +2997,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_dir_outside_the_project() {
+    fn verified_dir_outside_project() {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
         let repo = dir.path().join("repo");
@@ -2777,7 +3012,7 @@ mod tests {
         let load_with_verified = |verified: &str| {
             dir.write(
                 "home/setup.yaml",
-                &format!("{PROJECT_FILES_SETUP}  paths:\n    verified-dir: {verified}\n"),
+                &format!("{PROJECT_FILES_SETUP}verification:\n  paths:\n    store: {verified}\n"),
             );
             let env = Env {
                 scoter_home: Some(dir.path().join("home")),
@@ -2789,7 +3024,7 @@ mod tests {
         assert_eq!(
             load_with_verified(&outside)
                 .unwrap()
-                .get_path(SCOTER_SECTION, VERIFIED_DIR),
+                .get_path(VERIFICATION_SECTION, VERIFIED_STORE),
             Some(PathBuf::from(&outside))
         );
         for (verified, location) in [
@@ -2808,7 +3043,7 @@ mod tests {
         let errors = load_with_verified("relative/v").unwrap_err();
         assert_eq!(
             errors,
-            [": `scoter:verified-dir` relative/v must be an absolute path"]
+            [": `verification:store` relative/v must be an absolute path"]
         );
 
         // The state directory is checked the same way.
@@ -2838,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_partly_works_out_missing_parts() {
+    fn resolve_partly_fills_missing() {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join("repo/client")).unwrap();
         let at = |p: &str| dir.path().join(p);
@@ -2997,7 +3232,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_container_path_is_set_later() {
+    fn dev_container_path_set_later() {
         let dir = TempDir::new();
         let setup = dir.write(
             "setup.yaml",
@@ -3075,7 +3310,7 @@ mod tests {
                 "a.paths.map: must be a single value, not a list or mapping",
                 "a.paths.none: has no value",
                 "a.runs: must be a mapping of names to values",
-                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`",
+                "a.other: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`",
                 "a.path-lists.c: must be a list of paths",
                 "a.path-lists.d[1]: must be a path",
                 "a.path-lists.d[2]: must be a path",
@@ -3083,17 +3318,17 @@ mod tests {
                 "a.values.map: must be a single value: text, a number, true/false or null",
                 "a.values.nan: must be a finite number",
                 "a.values.inf: must be a finite number",
-                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands` mappings",
+                "b: must be a section, with `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts` mappings",
                 "old-paths: must be a section; put lists of paths in a section's `path-lists`",
             ]
         );
     }
 
     #[test]
-    fn shape_old_flat_sections_are_refused() {
+    fn old_flat_sections_refused() {
         assert_eq!(
             one_error("ssh:\n  home: ~/.ssh\n"),
-            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values` and `host-commands`"
+            "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`"
         );
     }
 
@@ -3119,7 +3354,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_file_doesnt_hide_the_others() {
+    fn bad_file_doesnt_hide_others() {
         let dir = TempDir::new();
         let cli = dir.write("home-setup/setup.yaml", "a: [\n");
         dir.write("dist/setup.yaml", "b: text\n");
@@ -3131,7 +3366,7 @@ mod tests {
     // ---- merging ----
 
     #[test]
-    fn lists_are_replaced_sections_merged() {
+    fn lists_replace_sections_merge() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -3284,7 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_has_one_kind_of_value() {
+    fn key_has_one_kind_of_value() {
         let errors = load_one(concat!(
             "a:\n",
             "  paths:\n    x: /p\n    y: /q\n",
@@ -3302,7 +3537,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_keeps_its_kind_across_files() {
+    fn key_keeps_kind_across_files() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -3329,7 +3564,7 @@ mod tests {
     }
 
     #[test]
-    fn references_to_any_kind_of_value() {
+    fn references_to_any_kind() {
         let config = load_one(concat!(
             "a:\n",
             "  paths:\n    home: /h\n",
@@ -3454,7 +3689,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_name_the_file_that_set_the_value() {
+    fn errors_name_the_setting_file() {
         let dir = TempDir::new();
         let cli = dir.write("home-setup/setup.yaml", "a:\n  paths:\n    x: ${a:bad}\n");
         dir.write(
@@ -3648,7 +3883,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn section_refers_to_other_sections_programs() {
+    fn section_uses_others_programs() {
         let dir = TempDir::new();
         let python = tool(&dir, "bin/python3");
         let file = dir.write(
@@ -3691,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn programs_and_paths_are_different_kinds() {
+    fn programs_and_paths_differ() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -3813,7 +4048,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn executables_must_be_executable_files() {
+    fn executable_files_required() {
         let dir = TempDir::new();
         let plain = dir.write("plain-file", "#!/bin/sh\n");
         std::fs::create_dir_all(dir.path().join("a-dir")).unwrap();
@@ -3869,7 +4104,7 @@ mod tests {
     }
 
     #[test]
-    fn section_defaults_and_not_found() {
+    fn section_defaults_not_found() {
         let config = load_one("").unwrap();
         let defaults = SectionDefaults {
             programs: &[("exec", "no-such-docker")],
@@ -3915,7 +4150,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_are_checked_when_loading() {
+    fn commands_checked_on_load() {
         let errors = load_one(concat!(
             "t:\n",
             "  programs:\n    exec: tool {x:no}\n",
@@ -3943,7 +4178,7 @@ mod tests {
     // ---- starting from a setup record ----
 
     #[test]
-    fn record_is_expanded_again_without_reading_the_files() {
+    fn record_expands_without_reads() {
         let dir = TempDir::new();
         let file = dir.write(
             "setup.yaml",
@@ -3995,7 +4230,7 @@ mod tests {
     }
 
     #[test]
-    fn record_is_a_base_layer_for_the_search() {
+    fn record_is_search_base_layer() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -4075,7 +4310,7 @@ mod tests {
     }
 
     #[test]
-    fn record_keeps_a_history_of_inputs() {
+    fn record_keeps_input_history() {
         let dir = TempDir::new();
         dir.write("dist1/setup.yaml", "");
         dir.write("dist2/setup.yaml", "");
@@ -4130,7 +4365,7 @@ mod tests {
     }
 
     #[test]
-    fn record_duplicates_are_allowed_and_removed() {
+    fn record_duplicates_removed() {
         let record = SetupRecord::default();
         let history = LoadedFrom {
             distribution_dir: vec!["/a".to_string(), "/b".to_string(), "/a".to_string()],
@@ -4290,7 +4525,7 @@ mod tests {
     // ---- host-commands ----
 
     #[test]
-    fn host_commands_nothing_refers_to_a_check() {
+    fn host_checks_not_referable() {
         let check = "  host-commands:\n    c: {action: warn, reason: r, commands: [x]}\n";
         assert_eq!(
             one_error(&format!("a:\n  values:\n    v: 'is ${{a:c}}'\n{check}")),
@@ -4341,7 +4576,7 @@ mod tests {
     }
 
     #[test]
-    fn host_commands_kind_cant_change() {
+    fn host_commands_kind_fixed() {
         let dir = TempDir::new();
         let dist = dir.write(
             "dist/setup.yaml",

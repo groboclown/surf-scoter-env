@@ -24,8 +24,11 @@ NO_PROJECT = (
 )
 
 
-def run_revoke(config: UserConfig, names: Sequence[str], *, everything: bool) -> int:
-    """Revoke the acceptances `names` choose (or all the project's); without any, list them."""
+def run_revoke(
+    config: UserConfig, names: Sequence[str], *, pick: revoke.Pick = revoke.Pick.NAMED,
+) -> int:
+    """Revoke the acceptances `names` choose (or, with `Pick.ALL`, all the project's); without any, list them."""
+    everything = pick == revoke.Pick.ALL
     try:
         verified_store = revoke.open_store(config)
         if verified_store is None:
@@ -63,7 +66,7 @@ def run_revoke(config: UserConfig, names: Sequence[str], *, everything: bool) ->
             )
             return 0
         selection = (
-            revoke.select(record, rest, everything=everything)
+            revoke.select(record, rest, pick=pick)
             if record is not None else revoke.Selection(unmatched=list(rest))
         )
         if selection.unmatched:
@@ -137,7 +140,9 @@ def main(argv: Sequence[str]) -> int:
     args = parser.parse_args(argv)
     if args.everything and args.names:
         parser.error("give ids, branches and fingerprints, or --all, not both")
-    return run_revoke(config, args.names, everything=args.everything)
+    return run_revoke(
+        config, args.names, pick=revoke.Pick.ALL if args.everything else revoke.Pick.NAMED,
+    )
 
 
 if __name__ == "__main__":

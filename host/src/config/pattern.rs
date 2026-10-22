@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_star_stays_within_a_name() {
+    fn star_stays_within_a_name() {
         assert!(matches("services/*", "services/api"));
         assert!(matches("services/*", "services/.hidden"));
         assert!(!matches("services/*", "services"));
@@ -214,7 +214,7 @@ mod tests {
         assert!(matches("v?", "v1"));
         assert!(!matches("v?", "v"));
         assert!(!matches("v?", "v10"));
-        assert!(matches("??", "ün"));
+        assert!(matches("??", "\u{FC}n"));
     }
 
     #[test]

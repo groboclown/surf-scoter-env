@@ -1,18 +1,54 @@
 #SPDX:MIT
 """The Surf Scoter Universal Configuration file handler."""
+import enum
 import json
 import os
 import subprocess  # nosec: B404  # We know the potential issues with subprocess.
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from . import jdata
+from . import fileutil, jdata
 from .err import ConfigErr
 
 # The few hard-coded items.
 VCS_SECTION_SUFFIX = "-vcs"
 # The SUC's record of the project file, as written.
 CURRENT_PROJECT_SETUP = "current-project-setup"
+
+
+class PathKind(enum.Enum):
+    """What kind of file `UserConfig.search_path` looks for."""
+
+    FILE = "file"
+    DIR = "dir"
+
+
+class OnError(enum.Enum):
+    """What `UserConfig.run_command` does when the command fails."""
+
+    # Raise `subprocess.CalledProcessError`.
+    RAISE = "raise"
+    # Give back the completed process, with its exit code, for the caller to check.
+    RETURN = "return"
+
+
+class Capture(enum.Flag):
+    """Which of the command's output streams `UserConfig.run_command` captures.
+
+    A stream it doesn't capture goes to the user.
+    """
+
+    NONE = 0
+    STDOUT = enum.auto()
+    STDERR = enum.auto()
+    BOTH = STDOUT | STDERR
+
+
+class Echo(enum.Enum):
+    """Whether `UserConfig.run_command` says what it runs."""
+
+    SHOW = "show"
+    QUIET = "quiet"
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
@@ -51,21 +87,21 @@ class UserConfig:
             raise ConfigErr(f"VCS provider '{name}' not supported with the current configuration")
         return ret
 
-    def search_path(self, section: str, key: str, file: str | None, is_dir: bool) -> Path | None:
-        """Search the path list at the section/key for the file.
-        
+    def search_path(
+        self, section: str, key: str, file: str | None, kind: PathKind,
+    ) -> Path | None:
+        """Search the path list at the section/key for the file, of the given kind.
+
         If the file is None, then this just tries to find the first of the path list that
         exists.  If the section/key does not exist, this raises a ConfigErr.
         """
+        exists = os.path.isdir if kind == PathKind.DIR else os.path.isfile
         for path in self.__req_list_keys("resolved", section, "path-lists", key):
             loc = self.__req_str(*path)
-            if file is None:
-                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
-                    return Path(loc)
-            else:
+            if file is not None:
                 loc = os.path.join(loc, file)
-                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
-                    return Path(loc)
+            if exists(loc):
+                return Path(loc)
         return None
 
     def get_dist_bin_dir(self) -> Path:
@@ -82,8 +118,19 @@ class UserConfig:
         return Path(loc) if loc else None
 
     def require_value(self, section: str, key: str) -> str:
-        """Load a value (as a string) that might exist."""
-        return self.__req_str("resolved", section, "values", key)
+        """A section's `values` entry, which must be set, as text.
+
+        The generator keeps a number as a number (`cpus: 4`), so it's given
+        back as its text.
+        """
+        val = self.__find(jdata.find, "resolved", section, "values", key)
+        if isinstance(val, str):
+            return val
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return str(val)
+        if val is None:
+            raise ConfigErr(f"The setup's `{section}` `values: {key}` isn't set.")
+        raise ConfigErr(f"The setup's `{section}` `values: {key}` must be text or a number, not {val!r}.")
 
     def active_location(self, name: str) -> Path | None:
         """Read an active location path; None when it isn't set.
@@ -128,32 +175,46 @@ class UserConfig:
             args.append(arg)
         return args
 
+    def command_env(self, section: str) -> dict[str, str]:
+        """The environment for the section's `runs` commands: this one, less its `drop-env`.
+
+        A section's `value-lists: drop-env` names the variables its commands
+        don't get, each a name, or a prefix ending in `*`: the VCS's own
+        variables, say (`GIT_*`), which a project can set as you enter its
+        directory (a `.envrc`), and which would point the VCS at another
+        repository, configuration or program.
+        """
+        return drop_env(os.environ, self.value_list(section, "drop-env"))
+
     def run_command(
         self,
         section: str,
         run: str,
         /, *,
         cwd: Path | None = None,
-        check: bool = True,
-        capture_stdout: bool = True,
-        capture_stderr: bool = False,
+        on_error: OnError = OnError.RAISE,
+        capture: Capture = Capture.STDOUT,
         template: dict[str, str] | None = None,
+        echo: Echo = Echo.SHOW,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run the given command.
-        
-        This will return the completed process with stdout captured.  stderr will
-        forward to the user.
+
+        This will return the completed process with the `capture` streams
+        captured (by default, stdout); the others go to the user.  With
+        `Echo.QUIET`, it doesn't say what it runs.
         """
         cmd = self.require_run(section, run, template)
-        print(f"Running {cmd[0]}")
-        print(f"DEBUG {cmd}")
+        if echo == Echo.SHOW:
+            print(f"Running {cmd[0]}")
+            print(f"DEBUG {cmd}")
         return subprocess.run(  # nosec: B603  # Input validated on the call.
             cmd,
-            stdout=subprocess.PIPE if capture_stdout else None,
-            stderr=subprocess.PIPE if capture_stderr else None,
-            check=check,
+            stdout=subprocess.PIPE if Capture.STDOUT in capture else None,
+            stderr=subprocess.PIPE if Capture.STDERR in capture else None,
+            check=on_error == OnError.RAISE,
             cwd=cwd,
             shell=False,
+            env=self.command_env(section),
         )
 
     def dev_container_sshd_port_env(self) -> str | None:
@@ -161,8 +222,16 @@ class UserConfig:
         return self.__opt_str("dev-container", "sshd-port-env")
 
     def dev_container_sshd_port(self) -> str | None:
-        """Get the sshd-port from the dev-container."""
-        return self.__opt_str("dev-container", "sshd-port")
+        """The dev container's `sshd-port`, as text; None when it's null (chosen at run time).
+
+        `dev-env.yaml` gives it as a number, and the run sets it as one.
+        """
+        val = self.__find(jdata.find, "dev-container", "sshd-port")
+        if val is None:
+            return None
+        if isinstance(val, bool) or not isinstance(val, (int, str)):
+            raise ConfigErr(f"bad universal configuration file: dev-container / sshd-port: {val!r} isn't a port")
+        return str(val)
 
     def set_dev_container_sshd_port(self, value: str) -> None:
         """Set the ssh-port in the dev-container, if it's unset."""
@@ -223,6 +292,15 @@ class UserConfig:
                     ret.append((file, section, str(key_path[-1]), value))
         return ret
 
+    def simple_checks(self, group: str) -> dict[str, jdata.DictJsonData]:
+        """The setup's `project-files` or `egress-hosts` checks, by `section:key`, as written."""
+        found: dict[str, jdata.DictJsonData] = {}
+        for path in self.__find(jdata.find_dict_keys, "resolved"):
+            section = str(path[-1])
+            for key_path in self.__find(jdata.find_dict_keys, "resolved", section, group):
+                found[f"{section}:{key_path[-1]}"] = self.__req_dict(*key_path)
+        return found
+
     def host_command_checks(self) -> dict[str, jdata.DictJsonData]:
         """The setup's `host-commands` checks, by `section:key`, as the generator combined them."""
         # A universal file from before the checks has none.
@@ -262,6 +340,17 @@ class UserConfig:
     def dev_container(self) -> jdata.DictJsonData | None:
         """The dev container's `dev-env.yaml`, merged with its parents; None without a project."""
         return self.__find(jdata.find_dict, "dev-container")
+
+    def use_accepted_files(self, project_setup: jdata.DictJsonData, dev_container: jdata.DictJsonData | None) -> None:
+        """Replace `current-project-setup`, and `dev-container` when given, with the accepted copy's.
+
+        Under an exemption (see `verified.staging.adopt_accepted`), the run
+        uses the project file and `dev-env.yaml` files as accepted, not as
+        they are now.
+        """
+        self._config[CURRENT_PROJECT_SETUP] = project_setup
+        if dev_container is not None:
+            self._config["dev-container"] = dev_container
 
     def has_dev_container(self) -> bool:
         """Whether the file has the dev container's `dev-env.yaml` (it does with a project)."""
@@ -389,9 +478,26 @@ class UserConfig:
 
     def __req_dict_keys(self, *path: jdata.JsonPathPart) -> Sequence[jdata.JsonPath]:
         return UserConfig.__wrap(lambda: jdata.opt_dict_keys(self._config, *path))
+
     @staticmethod
     def __wrap[T](call: Callable[[], T]) -> T:
         try:
             return call()
         except Exception as err:
             raise ConfigErr(f"bad universal configuration file: {err}") from err
+
+
+def drop_env(environ: Mapping[str, str], patterns: Sequence[str]) -> dict[str, str]:
+    """`environ` without the variables `patterns` name: each a name, or a prefix ending in `*`.
+
+    Names match as the platform's environment does: ignoring case on Windows.
+    """
+    def fold(name: str) -> str:
+        return name.upper() if fileutil.is_windows() else name
+
+    exact = {fold(p) for p in patterns if not p.endswith("*")}
+    prefixes = tuple(fold(p[:-1]) for p in patterns if p.endswith("*"))
+    return {
+        name: value for name, value in environ.items()
+        if fold(name) not in exact and not (prefixes and fold(name).startswith(prefixes))
+    }

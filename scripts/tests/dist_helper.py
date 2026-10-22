@@ -8,15 +8,16 @@ import json
 import os
 import shutil
 import subprocess  # nosec: B404  # Runs the generator to make the tests' universal files.
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from ..surf_scoter_lib import fileutil
+
 SCRIPTS = Path(__file__).parents[1]
 REPO = SCRIPTS.parent
 GENERATOR = REPO / "host" / "target" / "debug" / "gen-scoter-uc"
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 HAVE_GENERATOR = POSIX and GENERATOR.is_file()
 NEEDS_GENERATOR = "needs the generator (cd host && cargo build)"
 
@@ -35,7 +36,7 @@ class DistTest(unittest.TestCase):
     """A distribution like an installed one, a user setup and a project.
 
     * `self.dist`: the generator, the scripts, the defaults and containers;
-    * `self.home`: the user's setup, with `verified-dir` at `self.verified`,
+    * `self.home`: the user's setup, with `verification: paths: store` at `self.verified`,
       and `self.mine` (the user's own containers) searched after the
       project's files directory;
     * `self.project`: a project with `PROJECT_FILE` and an `env` container.
@@ -62,10 +63,12 @@ class DistTest(unittest.TestCase):
         self.home.mkdir()
         (self.home / "setup.yaml").write_text(
             "scoter:\n"
-            f"  paths:\n    verified-dir: {json.dumps(str(self.verified))}\n"
             "  path-lists:\n    dev-containers-search:\n"
             "      - ${scoter:project-dir}/${scoter:project-files-dir}\n"
-            f"      - {json.dumps(str(self.mine))}\n",
+            f"      - {json.dumps(str(self.mine))}\n"
+            # Last, so a test can add to it.
+            "verification:\n"
+            f"  paths:\n    store: {json.dumps(str(self.verified))}\n",
             encoding="utf-8",
         )
         self.project = self.tmp / "proj"

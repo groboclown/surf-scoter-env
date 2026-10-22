@@ -1,6 +1,7 @@
 #SPDX:MIT
 """File helper utilities."""
 import contextlib
+import enum
 import os
 import platform
 import shutil
@@ -34,13 +35,22 @@ def backup(file: Path, backup_ext: str) -> bool:
     return False
 
 
-def restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
+class WithoutBackup(enum.Enum):
+    """What `restore` does with the file when it has no backup."""
+
+    KEEP = "keep"
+    DELETE = "delete"
+
+
+def restore(
+    file: Path, backup_ext: str, without_backup: WithoutBackup = WithoutBackup.KEEP,
+) -> bool:
     """Restore the file from backup.
-    
+
     Returns 'True' if the restore succeeded.
 
-    If 'delete_allowed' is True, then the restore will remove the
-    file if there exists no backup.
+    With `WithoutBackup.DELETE`, the restore removes the file if there
+    exists no backup.
 
     If the file can't be removed, then the backup goes untouched.
     """
@@ -48,12 +58,11 @@ def restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
     if not from_file.exists():
         # There is no backup file.
         # ... only delete the source file if the caller requests it.
-        if delete_allowed and not rm(file):  # noqa: SIM103
+        if without_backup == WithoutBackup.DELETE and not rm(file):  # noqa: SIM103  # Keeps the comment on the failing case.
             # It still exists.  Can't restore from backup.
             return False
         return True
     try:
-        # TODO ensure 'move' is Python 3.12 compatible.
         from_file.move(file)
     except OSError:
         return False
@@ -63,6 +72,8 @@ def restore(file: Path, backup_ext: str, delete_allowed: bool = False) -> bool:
 MODE_USER_RW = 0o600
 MODE_USER_R_ONLY = 0o400
 MODE_USER_RWX = 0o700
+# The mode bits that give the group or others any access.
+MODE_NOT_PRIVATE = 0o077
 
 
 def touch(file: Path, mode: int) -> None:
@@ -209,6 +220,8 @@ def write_private(root: Path, parts: Sequence[str], data: bytes) -> Path:
 # Flags for opening a file without following a symlink, where the platform can.
 O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
 O_BINARY: int = getattr(os, "O_BINARY", 0)
+# Opening a FIFO without waiting for a writer, where the platform can.
+O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
 
 
 @contextlib.contextmanager

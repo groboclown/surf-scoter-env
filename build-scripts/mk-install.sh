@@ -2,7 +2,7 @@
 
 set -e
 
-base=$( cd $( dirname "$0" )/.. && pwd )
+base=$( cd "$( dirname "$0" )/.." && pwd )
 
 if [ -z "$1" ] ; then
     echo "Usage: $0 OUTFILE [rust-target-platform]"
@@ -11,8 +11,8 @@ if [ -z "$1" ] ; then
 fi
 
 outfile="$1"
-mkdir -p $( dirname "${outfile}" )
-abs_outfile=$( cd $( dirname "${outfile}" ) && pwd )/$( basename "${outfile}" )
+mkdir -p "$( dirname "${outfile}" )"
+abs_outfile=$( cd "$( dirname "${outfile}" )" && pwd )/$( basename "${outfile}" )
 target_dir=target/release
 if [ -n "$2" ] ; then
     # Built for this platform: host/target/PLATFORM/release.
@@ -36,7 +36,7 @@ workdir="${base}/target/installer/${target_platform}"
 
 mkdir -p "${workdir}/bin"
 
-# Set up the bin directory
+# Set up the bin directory.
 cp "${base}/host/${target_dir}/scoter-host${ext}" "${workdir}/bin/."
 cp "${base}/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
 cp "${base}/scripts/"*.py "${workdir}/bin/."

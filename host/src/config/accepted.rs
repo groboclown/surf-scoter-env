@@ -1,6 +1,5 @@
 //! The accepted settings: what the user accepted for a project, resolved,
-//! from the verified store (`accepted.json`; see step 8 of
-//! `docs/contributors/projects-v1.md`).
+//! from the verified store (`accepted.json`).
 //!
 //! ```json
 //! {
@@ -36,13 +35,13 @@ use super::egress::{self, EgressRule};
 use super::environment::EnvPlan;
 use super::project::{self, Commands};
 use super::read;
-use super::system::{SCOTER_SECTION, SystemConfig, VERIFIED_DIR};
+use super::system::{SCOTER_SECTION, SystemConfig, VERIFICATION_SECTION, VERIFIED_STORE};
 use super::{ConfigError, child_key, index_key};
 
 pub const SCHEMA: &str = "surf-scoter-accepted-settings-1";
 /// The setup section and `values` key naming the network gateway.
-pub const GATEWAY_SECTION: &str = "network-gateway";
-pub const GATEWAY_NAME: &str = "name";
+pub const GATEWAY_SECTION: &str = "dev-env";
+pub const GATEWAY_NAME: &str = "network-gateway-name";
 const KEYS: [&str; 9] = [
     "$schema",
     "project-dir",
@@ -84,7 +83,7 @@ pub struct AcceptedSettings {
 
 /// Read the accepted settings from the store's `file`.
 pub fn read(file: &Path) -> Result<AcceptedSettings, Vec<ConfigError>> {
-    let text = read::read_regular_file_to(file, read::MAX_UNIVERSAL_FILE_SIZE)
+    let text = read::read_regular_file_to(file, read::MAX_UNIVERSAL_FILE_BYTES)
         .map_err(|m| vec![ConfigError::new(Some(file), "", m)])?;
     let contents: Json = serde_json::from_str(&text).map_err(|e| {
         vec![ConfigError::new(
@@ -413,11 +412,11 @@ pub fn check_for_run(
     };
     let error = |key: &str, message: String| ConfigError::new(Some(universal), key, message);
     let at = "accepted-settings";
-    match system.get_path(SCOTER_SECTION, VERIFIED_DIR) {
+    match system.get_path(VERIFICATION_SECTION, VERIFIED_STORE) {
         Some(verified) if canonical(&accepted.file).starts_with(canonical(&verified)) => {
             match check_private(&accepted.file).and_then(|()| {
                 let text =
-                    read::read_regular_file_to(&accepted.file, read::MAX_UNIVERSAL_FILE_SIZE)?;
+                    read::read_regular_file_to(&accepted.file, read::MAX_UNIVERSAL_FILE_BYTES)?;
                 serde_json::from_str::<Json>(&text).map_err(|e| e.to_string())
             }) {
                 Ok(stored) if stored == accepted.contents => {}
@@ -437,7 +436,7 @@ pub fn check_for_run(
         _ => errors.push(error(
             &child_key(at, "file"),
             format!(
-                "{} isn't in the verified store (`{SCOTER_SECTION}:{VERIFIED_DIR}`)",
+                "{} isn't in the verified store (`{VERIFICATION_SECTION}:{VERIFIED_STORE}`)",
                 accepted.file.display()
             ),
         )),
@@ -507,10 +506,17 @@ fn check_private(path: &Path) -> Result<(), String> {
     }
 }
 
+/// An example time, as `parse_time` takes it, for messages.
+pub const TIME_EXAMPLE: &str = "2026-11-19T15:04:05+00:00";
+
+const SECONDS_PER_MINUTE: i64 = 60;
+const SECONDS_PER_HOUR: i64 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
+
 /// An RFC 3339 time with seconds and an offset (`2026-11-19T15:04:05+00:00`,
 /// or `...Z`), as seconds since the Unix epoch.
 pub fn parse_time(text: &str) -> Result<i64, String> {
-    let bad = || format!("'{text}' must be a time such as 2026-11-19T15:04:05+00:00");
+    let bad = || format!("'{text}' must be a time such as {TIME_EXAMPLE}");
     let bytes = text.as_bytes();
     if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
         return Err(bad());
@@ -551,7 +557,7 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
             }
             let hours: i64 = rest[1..3].parse().map_err(|_| bad())?;
             let minutes: i64 = rest[4..6].parse().map_err(|_| bad())?;
-            sign * (hours * 3600 + minutes * 60)
+            sign * (hours * SECONDS_PER_HOUR + minutes * SECONDS_PER_MINUTE)
         }
     };
     let days_in_month = match month {
@@ -564,7 +570,11 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
     if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 60 {
         return Err(bad());
     }
-    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+    Ok(days_from_civil(year, month, day) * SECONDS_PER_DAY
+        + hour * SECONDS_PER_HOUR
+        + minute * SECONDS_PER_MINUTE
+        + second
+        - offset)
 }
 
 /// Days since 1970-01-01 for a date (proleptic Gregorian).

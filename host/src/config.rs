@@ -25,8 +25,10 @@ pub mod environment;
 pub mod host_commands;
 pub mod pattern;
 pub mod project;
+pub mod public_suffix;
 pub mod read;
 pub mod review;
+pub mod simple_checks;
 pub mod system;
 
 use std::fmt;
@@ -135,9 +137,61 @@ fn user_container(
 /// wildcard (`*.`) can't be on.
 pub const EGRESS_REFUSED_WILDCARDS: &str = "egress-refused-wildcards";
 
+/// The `verification` section's `path-lists` key naming the Public Suffix
+/// List files: the domains an egress wildcard can't be on, beyond
+/// `egress-refused-wildcards`.
+pub const PUBLIC_SUFFIX_LISTS: &str = "public-suffix-lists";
+
+/// The domains an egress wildcard (`*.DOMAIN`) can't be on: the setup's
+/// `egress-refused-wildcards`, and the public suffixes in the Public Suffix
+/// List files it names (`public-suffix-lists`).
+#[derive(Debug, Default)]
+pub struct RefusedWildcards {
+    listed: Vec<String>,
+    suffixes: public_suffix::SuffixList,
+}
+
+impl RefusedWildcards {
+    /// The setup's refused domains; a suffix list that can't be read is an error.
+    pub fn load(system: &SystemConfig) -> (Self, Vec<ConfigError>) {
+        let mut errors = Vec::new();
+        let mut suffixes = public_suffix::SuffixList::default();
+        for file in system.path_list(system::VERIFICATION_SECTION, PUBLIC_SUFFIX_LISTS) {
+            match read::read_limited_to(&file, read::MAX_UNIVERSAL_FILE_BYTES) {
+                Ok(text) => suffixes.add(&text),
+                Err(m) => errors.push(ConfigError::new(
+                    Some(&file),
+                    "",
+                    format!(
+                        "{m} (it's in your setup's `verification: path-lists: {PUBLIC_SUFFIX_LISTS}`; the list is at https://publicsuffix.org/list/public_suffix_list.dat)"
+                    ),
+                )),
+            }
+        }
+        let listed = system.value_list(system::VERIFICATION_SECTION, EGRESS_REFUSED_WILDCARDS);
+        (RefusedWildcards { listed, suffixes }, errors)
+    }
+
+    /// Why a wildcard on `domain` is refused, if it is.
+    pub fn reason(&self, domain: &str) -> Option<String> {
+        let domain = domain.to_ascii_lowercase();
+        if self.listed.iter().any(|d| d.eq_ignore_ascii_case(&domain)) {
+            Some(format!(
+                "your setup's `verification: value-lists: {EGRESS_REFUSED_WILDCARDS}`"
+            ))
+        } else if self.suffixes.is_public_suffix(&domain) {
+            Some(format!(
+                "a public suffix, in your setup's `verification: path-lists: {PUBLIC_SUFFIX_LISTS}`"
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 /// The project's egress wildcards on a domain the setup refuses them on.
-fn egress_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
-    project.wildcard_problems(&system.value_list(system::SCOTER_SECTION, EGRESS_REFUSED_WILDCARDS))
+fn egress_problems(project: &ProjectConfig, refused: &RefusedWildcards) -> Vec<ConfigError> {
+    project.wildcard_problems(&|domain| refused.reason(domain))
 }
 
 /// The `scoter` section's `values` key naming the project files directory.
@@ -153,6 +207,10 @@ pub struct LoadOptions {
     /// `scoter` found it from the setup's VCS sections.  It must hold the
     /// project directory.
     pub vcs_root: Option<PathBuf>,
+    /// The project's branch (`--project-branch`), as the VCS section's
+    /// `current-branch` gave it; `scoter:project-branch` is it made safe as a
+    /// path part.
+    pub project_branch: Option<String>,
     /// The dev container's mounts: the project workspace (`--dev-container-workspace-dir`)
     /// and the settings directory (`--dev-container-settings-dir`).
     pub dev_container_workspace_dir: Option<PathBuf>,
@@ -220,7 +278,7 @@ impl UniversalInput {
 
 /// Read a universal configuration file made earlier.
 fn read_universal(path: &Path) -> Result<UniversalInput, ConfigError> {
-    let text = read::read_limited_to(path, read::MAX_UNIVERSAL_FILE_SIZE)
+    let text = read::read_limited_to(path, read::MAX_UNIVERSAL_FILE_BYTES)
         .map_err(|m| ConfigError::new(Some(path), "", m))?;
     serde_json::from_str(&text).map_err(|e| {
         ConfigError::new(
@@ -333,6 +391,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         project_dir: path_of(&active.project_dir),
         project_config: path_of(&active.project_config),
         vcs_root: path_of(&active.vcs_root),
+        project_branch: active.project_branch.as_deref(),
         dev_container_workspace_dir: path_of(&active.dev_container_workspace_dir),
         dev_container_settings_dir: path_of(&active.dev_container_settings_dir),
         dev_container: universal.dev_container.is_some(),
@@ -371,8 +430,13 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         (None, Ok(_)) => {}
         (_, Err(e)) => errors.extend(e),
     }
-    if let (Some(system), Some(project)) = (&system, &project) {
-        errors.extend(egress_problems(project, system));
+    let refused = system.as_ref().map(|system| {
+        let (refused, problems) = RefusedWildcards::load(system);
+        errors.extend(problems);
+        refused
+    });
+    if let (Some(refused), Some(project)) = (&refused, &project) {
+        errors.extend(egress_problems(project, refused));
     }
     let accepted = universal.accepted_settings.and_then(|input| {
         accepted::parse(input.contents, &input.file)
@@ -462,9 +526,26 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     let dev_container_settings_dir = carried(&options.dev_container_settings_dir, |a| {
         &a.dev_container_settings_dir
     });
+    // Given, or carried over while the project is the one it was found for.
+    let same_project = |u: &UniversalInput| {
+        let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        match (&options.project_dir, &u.active_config_locations.project_dir) {
+            (None, _) => true,
+            (Some(given), Some(was)) => canonical(&tidy_dir(given)) == canonical(Path::new(was)),
+            (Some(_), None) => false,
+        }
+    };
+    let project_branch = match &options.project_branch {
+        Some(branch) => Some(branch.clone()),
+        None => universal
+            .as_ref()
+            .filter(|u| same_project(u))
+            .and_then(|u| u.active_config_locations.project_branch.clone()),
+    };
     let setup = SetupOptions {
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
+        project_branch: project_branch.as_deref(),
         // Worked out from the project directory, with the setup.
         project_config: None,
         find_project_config: true,
@@ -523,9 +604,16 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         system.set_dev_container_path(&dev.dir);
     }
     // After the dev container, as `env` values can refer to it.
+    let refused = system.as_ref().map(|system| {
+        let (refused, problems) = RefusedWildcards::load(system);
+        errors.extend(problems);
+        refused
+    });
     if let (Some(system), Some(project)) = (&system, &mut project) {
         errors.extend(plan_environments(project, system));
-        errors.extend(egress_problems(project, system));
+    }
+    if let (Some(refused), Some(project)) = (&refused, &project) {
+        errors.extend(egress_problems(project, refused));
     }
     // Checked against the project and the setup in effect.
     let accepted = options.accepted_settings.as_deref().and_then(|file| {
@@ -554,6 +642,29 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
+    // The wildcards a review or an acceptance gives get the same refusal as
+    // the project file's: a user's typed rule, or one accepted before the
+    // setup (or its suffix list) refused it.
+    if let Some(refused) = &refused {
+        let reason = |domain: &str| refused.reason(domain);
+        if let Some(review) = review.as_ref().filter(|r| !r.rejected) {
+            errors.extend(project::wildcard_errors(
+                &review.file,
+                review
+                    .egress
+                    .iter()
+                    .filter_map(|rule| rule["host"].as_str()),
+                &reason,
+            ));
+        }
+        if let Some(accepted) = &accepted {
+            errors.extend(project::wildcard_errors(
+                &accepted.file,
+                accepted.egress.iter().map(|rule| rule.host.as_str()),
+                &reason,
+            ));
+        }
+    }
     // An earlier acceptance's review: it only seeds a new review, and has
     // usually expired, so it isn't checked against the run.
     let previous_review = options.previous_review.as_deref().and_then(|file| {
@@ -894,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn load_finds_the_project_file_with_the_setup() {
+    fn load_finds_project_with_setup() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         let project = "container:\n  dev-container-path: env\n";
@@ -1001,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn load_dev_container_name_not_found() {
+    fn load_dev_container_not_found() {
         let dir = TempDir::new();
         let opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
         let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
@@ -1013,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn load_gathers_errors_from_every_file() {
+    fn load_gathers_all_file_errors() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         dir.write(
@@ -1078,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn load_project_errors_skip_dev_container() {
+    fn project_errors_skip_container() {
         let dir = TempDir::new();
         let opts = options(
             &dir,
@@ -1167,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn in_effect_values_carry_over_without_the_search() {
+    fn in_effect_kept_without_search() {
         let dir = TempDir::new();
         let user = dir.write(
             "home/.config/surf-scoter.d/setup.yaml",
@@ -1410,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn command_environments_are_worked_out() {
+    fn command_envs_are_worked_out() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         let opts = options(
@@ -1511,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_reads_no_other_file() {
+    fn universal_reads_no_other_file() {
         let dir = TempDir::new();
         let made_with = Env {
             vars: HashMap::from([("HOME".to_string(), "/home/me".to_string())]),
@@ -1568,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_contents_must_match_locations() {
+    fn universal_matches_locations() {
         let dir = TempDir::new();
         let (universal, _) = universal_for(&dir, Env::default());
         let edit = |change: &dyn Fn(&mut serde_json::Value)| {
@@ -1614,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_runs_the_host_brokered_list() {
+    fn universal_runs_host_brokered() {
         let dir = TempDir::new();
         let (universal, _) = universal_for(&dir, Env::default());
         let load = |change: &dyn Fn(&mut serde_json::Value)| {
@@ -1678,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_a_bad_universal_file() {
+    fn load_from_bad_universal_file() {
         let dir = TempDir::new();
         let bad = dir.write("bad.json", "{\"resolved\": {}}");
         let options = LoadOptions {

@@ -7,6 +7,7 @@ distribution script for processing.
 """
 # Compatibility: Python 3.12+
 import argparse
+import enum
 import json
 import os
 import platform
@@ -30,6 +31,23 @@ CURRENT_PROJECT_SETUP = "current-project-setup"
 SUB_CMD_PREFIX = "main_"
 SUB_CMD_SUFFIX = ".py"
 VCS_SECTION_SUFFIX = "-vcs"
+# How long a VCS section's `runs` command may take.
+VCS_COMMAND_TIMEOUT_SECONDS = 60
+# The exit code for a sub-command that couldn't start, as shells use it.
+EXIT_CANNOT_START = 127
+
+# Note: these lists hard-code sub-command usage.  That puts a limit on
+# what user-supplied sub-commands can do.  This should use
+# an alternative method for determining this relationship.
+# `help` lists the sub-commands, which needs the setup, not a project;
+# `list-accepted` lists every project's acceptances, from the setup's store,
+# and `cleanup` works on all of them.
+NO_PROJECT_CMDS = (None, "help", "list-accepted", "cleanup")
+# `verify` reviews what the project suggests; accepted settings
+# (a container of the user's, say) would change what it shows.
+# `revoke` works on the store itself, and the lookup could carry
+# an acceptance forward just before it's revoked.
+NO_ACCEPTANCE_CMDS = ("verify", "revoke", "kill", "exempt")
 
 
 # ---------------------------------------------------------------------
@@ -40,24 +58,25 @@ class ConfigErr(Exception):
     """A problem with the configuration file or arguments that control it."""
 
 
+class ConfigScope(enum.Enum):
+    """How much of the configuration `load_config` loads."""
+
+    # The setup alone: for commands, such as `help`, that don't need a project.
+    SETUP = "setup"
+    # The project as it suggests, without the user's accepted settings: for
+    # `verify`, which reviews the suggestion.
+    SUGGESTED = "suggested"
+    # The project with the user's accepted settings, if they accepted it.
+    ACCEPTED = "accepted"
+
+
 def load_config(
-    args: argparse.Namespace, *, with_project: bool = True, with_acceptance: bool = True,
+    args: argparse.Namespace, *, scope: ConfigScope = ConfigScope.ACCEPTED,
 ) -> DictJsonData:
-    """Load the SUC based on the arguments.
-
-    Without `with_project`, only the setup is loaded: for commands, such as
-    `help`, that don't need a project.  Without `with_acceptance`, the
-    project is loaded as it suggests, without the user's accepted settings:
-    for `verify`, which reviews the suggestion.
-    """
-    bin_dir = args.bin_dir
-    distribution_dir = args.distribution_dir
-
-    dist_dir = require_global_dist_dir(distribution_dir)
-    resolved_bin_dir = find_bin_dir(bin_dir, dist_dir)
+    """Load the SUC based on the arguments, as far as `scope` says."""
+    dist_dir = require_global_dist_dir(args.distribution_dir)
     # Phase 1: the setup alone, which says how to find the project.
     settings = generate_config(
-        bin_dir=resolved_bin_dir,
         distribution_dir=dist_dir,
         project_dir=None,
         dev_container_workspace_dir=None,
@@ -66,7 +85,7 @@ def load_config(
         no_setup_search=False,
     )
 
-    if not with_project:
+    if scope == ConfigScope.SETUP:
         return settings
 
     # Look from `--project-dir`, or the current directory, up to the root of
@@ -75,17 +94,20 @@ def load_config(
     vcs_root = find_vcs_root(settings, start)
     project_dir = find_project_dir(settings, start, vcs_root[0] if vcs_root else None)
 
+    # The branch, for the setup's `${scoter:project-branch}`.
+    branch = vcs_current_branch(settings, vcs_root) if project_dir and vcs_root else None
+
     if project_dir:
         # Phase 2: with the project, and the repository it's in.
         settings = reprocess_config(
-            resolved_bin_dir,
             dist_dir,
             project_dir,
             vcs_root[0] if vcs_root else None,
             settings,
+            project_branch=branch,
         )
         check_project_vcs(settings, vcs_root)
-    if project_dir and with_acceptance:
+    if project_dir and scope == ConfigScope.ACCEPTED:
         # Phase 3: with the user's accepted settings, if they accepted it.
         found = find_acceptance(settings)
         accepted = found.get("accepted-settings") if found else None
@@ -93,20 +115,39 @@ def load_config(
         if isinstance(notice, str):
             print(notice, file=sys.stderr)
         settings = reprocess_config(
-            resolved_bin_dir,
             dist_dir,
             project_dir,
             vcs_root[0] if vcs_root else None,
             settings,
             accepted_settings=accepted if isinstance(accepted, str) else None,
+            project_branch=branch,
         )
 
-    # Overwrite the bin dir if it was explicitly set.
-    active_locs = settings["active-config-locations"]
-    if isinstance(active_locs, dict):
-        active_locs["distribution-bin-dir"] = str(resolved_bin_dir)
-
     return settings
+
+
+def vcs_current_branch(settings: DictJsonData, vcs_root: tuple[Path, str]) -> str | None:
+    """The branch checked out at the repository root, from its VCS section's `runs: current-branch`.
+
+    None when the section has none, or it can't tell.  The generator makes
+    it safe as a path part; it's only a name to build paths from.
+    """
+    root, name = vcs_root
+    section = name + VCS_SECTION_SUFFIX
+    template = _opt_lookup(settings, "resolved", section, "runs", "current-branch")
+    if template is None:
+        return None
+    cmd = [str(root) if part == "{x:root}" else part
+           for part in _command(template, f"{section}/runs/current-branch", "{x:root}")]
+    try:
+        res = subprocess.run(  # nosec: B603  # The setup's command, as a list.
+            cmd, stdout=subprocess.PIPE, check=False, shell=False, timeout=VCS_COMMAND_TIMEOUT_SECONDS,
+            env=command_env(settings, section),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    branch = res.stdout.decode("utf-8", errors="replace").strip()
+    return branch if res.returncode == 0 and branch else None
 
 
 def vcs_find_root_commands(settings: DictJsonData) -> list[tuple[str, list[str]]]:
@@ -149,7 +190,8 @@ def find_vcs_root(settings: DictJsonData, start: Path) -> tuple[Path, str] | Non
             stdout=subprocess.PIPE,
             check=False,
             shell=False,
-            timeout=60,
+            timeout=VCS_COMMAND_TIMEOUT_SECONDS,
+            env=command_env(settings, name + VCS_SECTION_SUFFIX),
         )
         if res.returncode != 0:
             raise ConfigErr(f"Couldn't find the {name} repository root (`find-root` failed).")
@@ -243,7 +285,7 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
     prints JSON: `match`, `acceptance`, `accepted-settings` (the file for
     gen-scoter-uc) and `notice`.  None when the setup has no such command.
     """
-    template = _opt_lookup(settings, "resolved", "verified", "runs", "find-acceptance")
+    template = _opt_lookup(settings, "resolved", "scoter", "runs", "find-acceptance")
     if template is None:
         return None
     if not isinstance(template, list) or not all(isinstance(a, str) for a in template):
@@ -268,24 +310,24 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
 
 
 def reprocess_config(
-    bin_dir: Path,
     dist_dir: Path,
     project_dir: Path,
     vcs_root: Path | None,
     orig: DictJsonData,
     *,
     accepted_settings: str | None = None,
+    project_branch: str | None = None,
 ) -> DictJsonData:
     """Reprocess this configuration with the project, and the repository it's in.
 
     With `accepted_settings`, the generator builds the host commands from them.
+    `project_branch` is the project's branch, for `${scoter:project-branch}`.
     """
     # Save the configuration for reprocessing.
     tmp = save_to_tmp(orig)
 
     try:
         return generate_config(
-            bin_dir=bin_dir,
             distribution_dir=dist_dir,
             project_dir=str(project_dir),
             vcs_root=str(vcs_root) if vcs_root else None,
@@ -294,6 +336,7 @@ def reprocess_config(
             universal_file=tmp,
             no_setup_search=True,
             accepted_settings=accepted_settings,
+            project_branch=project_branch,
         )
     finally:
         remove_tmp(tmp)
@@ -314,7 +357,7 @@ def save_to_tmp(data: DictJsonData) -> str:
         finally:
             os.close(fd)
         return file
-    except:
+    except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
 
@@ -357,13 +400,27 @@ def require_global_dist_dir(distribution_dir: str | None) -> Path:
     )
 
 
-def find_bin_dir(bin_dir: str | None, dist_dir: Path) -> Path:
-    """Find the bin/ directory."""
-    if bin_dir:
-        if not os.path.isdir(bin_dir):
-            raise ConfigErr(f"Could not find bin directory '{bin_dir}'")
-        return Path(bin_dir)
-    return dist_dir / DISTRIBUTION_BIN_DIR
+def command_env(settings: DictJsonData, section: str) -> dict[str, str]:
+    """The environment for a section's `runs` commands: this one, less its `value-lists: drop-env`.
+
+    Each entry is a name, or a prefix ending in `*`; names match ignoring
+    case on Windows.  The library's `user_config.drop_env` does the same for
+    the sub-commands.
+    """
+    patterns = _opt_lookup(settings, "resolved", section, "value-lists", "drop-env")
+    if not isinstance(patterns, list):
+        return dict(os.environ)
+
+    def fold(name: str) -> str:
+        return name.upper() if _is_windows() else name
+
+    texts = [p for p in patterns if isinstance(p, str)]
+    exact = {fold(p) for p in texts if not p.endswith("*")}
+    prefixes = tuple(fold(p[:-1]) for p in texts if p.endswith("*"))
+    return {
+        name: value for name, value in os.environ.items()
+        if fold(name) not in exact and not (prefixes and fold(name).startswith(prefixes))
+    }
 
 
 def _opt_lookup(data: DictJsonData, *parts: str) -> JsonData:
@@ -391,7 +448,6 @@ def _dist_bin_dir(config: DictJsonData) -> Path:
 
 def generate_config(
     *,
-    bin_dir: Path | None,
     distribution_dir: Path,
     project_dir: str | None,
     dev_container_workspace_dir: str | None,
@@ -400,6 +456,7 @@ def generate_config(
     universal_file: str | None,
     no_setup_search: bool,
     accepted_settings: str | None = None,
+    project_branch: str | None = None,
 ) -> DictJsonData:
     """Run the gen-scoter-uc program.
 
@@ -407,10 +464,7 @@ def generate_config(
     `accepted_settings` (the user's accepted settings); without them, there
     are none.
     """
-    if bin_dir:
-        gen_uc = _require_exe(bin_dir / GEN_SCOTER_UC_EXEC)
-    else:
-        gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
+    gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
     args: list[str] = [str(gen_uc), "--distribution-dir", str(distribution_dir)]
     if project_dir:
         args.extend(("--project-dir", project_dir))
@@ -426,6 +480,8 @@ def generate_config(
         args.append("--no-setup-search")
     if accepted_settings:
         args.extend(("--accepted-settings", accepted_settings))
+    if project_branch:
+        args.extend(("--project-branch", project_branch))
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,
@@ -489,18 +545,16 @@ def _require_exe(name: str | Path) -> Path:
 
 
 def _is_windows() -> bool:
+    """Whether this runs on Windows."""
     return platform.system() == "Windows"
 
 
 # ---------------------------------------------------------------------
 # Sub Command Handlers
 
-def list_sub_commands(config: DictJsonData, script_dir: str | None) -> list[str]:
-    """Get the list of all sub-commands."""
-    if script_dir:
-        bin_dir = Path(script_dir)
-    else:
-        bin_dir = _dist_bin_dir(config)
+def list_sub_commands(config: DictJsonData) -> list[str]:
+    """Get the list of all sub-commands: the distribution's bin directory's scripts."""
+    bin_dir = _dist_bin_dir(config)
     ret: list[str] = []
     for name in os.listdir(bin_dir):
         if name.startswith(SUB_CMD_PREFIX) and name.endswith(SUB_CMD_SUFFIX):
@@ -546,16 +600,9 @@ def sub_command_prefix(config: DictJsonData, cmd_file: Path) -> list[str]:
     return [str(cmd_file) if part == "{x:script}" else part for part in cmd]
 
 
-def run_sub_command(
-    config: DictJsonData,
-    argv: Sequence[str],
-    script_dir: str | None,
-) -> int:
-    """Run the sub-command."""
-    if script_dir:
-        bin_dir = Path(script_dir)
-    else:
-        bin_dir = _dist_bin_dir(config)
+def run_sub_command(config: DictJsonData, argv: Sequence[str]) -> int:
+    """Run the sub-command, from the distribution's bin directory."""
+    bin_dir = _dist_bin_dir(config)
     cmd_file = bin_dir / (SUB_CMD_PREFIX + argv[0].replace("-", "_") + SUB_CMD_SUFFIX)
     if not cmd_file.is_file():
         return 1
@@ -570,7 +617,7 @@ def run_sub_command(
         return run_to_end(cmd_args)
     except OSError as err:
         print(f"Failed to start sub-command {argv[0]} at {cmd_file}: {err}", file=sys.stderr)
-        return 127
+        return EXIT_CANNOT_START
     finally:
         remove_tmp(config_file)
 
@@ -627,24 +674,6 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         dest="distribution_dir",
         help="Set the directory where you have Surf Scoter installed.",
     )
-    parser.add_argument(
-        "--bin-dir",
-        action="store",
-        dest="bin_dir",
-        help=(
-            "Point to the directory storing the Surf Scoter binary files.  "
-            "Defaults to the 'bin' directory inside the distribution."
-        ),
-    )
-    parser.add_argument(
-        "--sub-cmd-dir",
-        action="store",
-        dest="sub_cmd_dir",
-        help=(
-            "Point to the directory storing the Surf Scoter sub-command files.  "
-            "Defaults to the 'bin' directory inside the distribution."
-        ),
-    )
 
     parser.add_argument(
         "cmd",
@@ -664,22 +693,21 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
 # ---------------------------------------------------------------------
 # CLI code.
 
+def config_scope(sub_cmd: str | None) -> ConfigScope:
+    """How much of the configuration the sub-command needs."""
+    if sub_cmd in NO_PROJECT_CMDS:
+        return ConfigScope.SETUP
+    if sub_cmd in NO_ACCEPTANCE_CMDS:
+        return ConfigScope.SUGGESTED
+    return ConfigScope.ACCEPTED
+
+
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        # `help` lists the sub-commands, which needs the setup, not a project;
-        # `list-accepted` lists every project's acceptances, from the setup's store.
-        config = load_config(
-            args,
-            with_project=args.cmd not in (None, "help", "list-accepted"),
-            # `verify` reviews what the project suggests; accepted settings
-            # (a container of the user's, say) would change what it shows.
-            # `revoke` works on the store itself, and the lookup could carry
-            # an acceptance forward just before it's revoked.
-            with_acceptance=args.cmd not in ("verify", "revoke"),
-        )
+        config = load_config(args, scope=config_scope(args.cmd))
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1
@@ -688,7 +716,7 @@ def main(argv: Sequence[str]) -> int:
     sub_cmd_args = args.cmd_args
     if not sub_cmd or sub_cmd == "help":
         print("All supported sub-commands:")
-        for sub in list_sub_commands(config, args.sub_cmd_dir):
+        for sub in list_sub_commands(config):
             print(f"  {sub}")
         return 0
     if sub_cmd == "show-suc":
@@ -696,7 +724,7 @@ def main(argv: Sequence[str]) -> int:
         return 0
 
     try:
-        return run_sub_command(config, [sub_cmd, *sub_cmd_args], args.sub_cmd_dir)
+        return run_sub_command(config, [sub_cmd, *sub_cmd_args])
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1

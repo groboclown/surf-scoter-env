@@ -1,14 +1,13 @@
 #SPDX:MIT
 """Test the fileutil module."""
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from ...surf_scoter_lib import err, fileutil
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 
 class LockTest(unittest.TestCase):
     """Test fileutil.exclusive_lock."""
@@ -66,7 +65,8 @@ class WritePrivateTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b"one")
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         for directory in (root, root / "environments", path.parent):
-            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700, directory)
+            with self.subTest(directory=directory):
+                self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700, directory)
         fileutil.write_private(root, ("environments", "host", "suc.json"), b"two")
         self.assertEqual(path.read_bytes(), b"two")
         self.assertEqual(sorted(os.listdir(path.parent)), ["suc.json"])

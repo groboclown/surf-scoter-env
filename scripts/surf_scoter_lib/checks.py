@@ -9,26 +9,25 @@ data out.  Nothing is hard-coded but the rules for reading them.
 
 Each finding has a severity (`refuse`, `warn`, or `note` for what the
 review should show without judging it), where it is in the project file,
-and an explanation for the review's generated comments.  See step 11 of
-docs/contributors/projects-v1.md.
+and an explanation for the review's generated comments.
 """
 import fnmatch
 import os
 import re
 import stat
-import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from . import gateway, jdata
+from . import fileutil, gateway, jdata
 from .err import ConfigErr
 from .user_config import UserConfig
 from .verified import snapshot
 
-SECRET_FILES = "secret-file-patterns"  # nosec: B105  # A setting's name, not a secret.
-DATA_OUT_HOSTS = "egress-data-out-hosts"
+# The setup's simple check groups (see `simple_findings`).
+PROJECT_FILES = "project-files"
+EGRESS_HOSTS = "egress-hosts"
 
 
 class Severity(StrEnum):
@@ -171,7 +170,7 @@ def _real(path: str | None) -> str | None:
 
 def _base_name(path: str) -> str:
     name = os.path.basename(path)
-    return os.path.splitext(name)[0] if sys.platform == "win32" else name
+    return os.path.splitext(name)[0] if fileutil.is_windows() else name
 
 
 def _matches_name(check: jdata.DictJsonData, name: str, real: str | None) -> bool:
@@ -246,7 +245,7 @@ def check_host_commands(
 
     For each command, the checks without `overrides` that match it count,
     the most restrictive action winning; then each override for the command
-    takes the place of the check it overrides (step 4).
+    takes the place of the check it overrides.
     """
     checks = config.host_command_checks()
     if commands is None:
@@ -316,10 +315,7 @@ def _hits(
         env = _texts(check, "env")
         paths = _texts(check, "paths")
         if paths:
-            if real and any(
-                real == os.path.realpath(p) or real.startswith(os.path.realpath(p) + os.sep)
-                for p in paths
-            ):
+            if real and _under(real, paths):
                 yield _Hit(check_id, check, f"{at}.program")
             continue
         if _has_names(check) and not _matches_name(check, name, real):
@@ -362,13 +358,42 @@ def check_program_paths(
                     "a host command never runs a program from the project.",
                 ))
                 break
-        findings.extend(_writable_by_others(key, r.name, Path(r.executable)))
+        findings.extend(writable_by_others(key, r.name, Path(r.executable)))
     return findings
 
 
-def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
+def _under(real: str, paths: Sequence[str]) -> bool:
+    """Whether the program at `real` (its real path) is one of `paths`, or under one."""
+    return any(
+        real == os.path.realpath(p) or real.startswith(os.path.realpath(p) + os.sep) for p in paths
+    )
+
+
+def path_findings(config: UserConfig, key: str, program: str) -> list[Finding]:
+    """The setup's `host-commands` checks that match `program` by where it is (`paths`).
+
+    Version manager shims, say: where a program is matters for any program
+    the tools run, the setup's own too, unlike checks by name or option.
+    Overrides are for the project's commands, so they don't apply.
+    """
+    real = os.path.realpath(program)
+    return [
+        Finding(
+            _ACTIONS.get(jdata.req_str(check, "action"), Severity.REFUSE), key,
+            jdata.req_str(check, "reason"), (check_id,),
+        )
+        for check_id, check in config.host_command_checks().items()
+        if not _texts(check, "overrides") and _under(real, _texts(check, "paths"))
+        and jdata.req_str(check, "action") != "allow"
+    ]
+
+
+_ROOT_UID = 0
+
+
+def writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
     """Whether another user could change the program, or replace it."""
-    if sys.platform == "win32":
+    if fileutil.is_windows():
         return []
     found: list[Finding] = []
     uid = os.getuid()
@@ -389,7 +414,7 @@ def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
                 continue
             is_dir = stat.S_ISDIR(mode)
             what = "directory" if is_dir else "file"
-            if st.st_uid not in (0, uid):
+            if st.st_uid not in (_ROOT_UID, uid):
                 found.append(Finding(
                     Severity.REFUSE, key,
                     f"`{name}`'s {what} {current} belongs to another user, who could change "
@@ -415,6 +440,70 @@ def _writable_by_others(key: str, name: str, path: Path) -> list[Finding]:
 # Egress
 
 
+# ---------------------------------------------------------------------
+# The simple checks: `project-files` and `egress-hosts`
+
+
+@dataclass(frozen=True)
+class SimpleCheck:
+    """A `project-files` or `egress-hosts` check, by its `section:key`."""
+
+    id: str
+    action: str
+    reason: str
+    # Its `patterns`, or its `hosts`.
+    matches: tuple[str, ...]
+    overrides: tuple[str, ...]
+
+
+def simple_checks(config: UserConfig, group: str) -> list[SimpleCheck]:
+    """The setup's checks of `group`, as the generator wrote them."""
+    found: list[SimpleCheck] = []
+    for check_id, check in sorted(config.simple_checks(group).items()):
+        field_name = "hosts" if group == EGRESS_HOSTS else "patterns"
+        found.append(SimpleCheck(
+            check_id,
+            jdata.req_str(check, "action"),
+            jdata.req_str(check, "reason"),
+            # As written: an empty field is left out.
+            tuple(jdata.find_str_list(check, field_name)),
+            tuple(jdata.find_str_list(check, "overrides")),
+        ))
+    return found
+
+
+def simple_findings(
+    checks: Sequence[SimpleCheck],
+    key: str,
+    match: Callable[[SimpleCheck], str | None],
+    describe: Callable[[SimpleCheck, str], str],
+) -> list[Finding]:
+    """The findings of the `checks` on one item (a file, a host), as `host-commands` work them out.
+
+    `match` gives what of a check matches the item (a pattern, a host), or
+    None.  The checks without `overrides` that match count; then each override
+    that matches takes the place of the checks it names (only those that
+    matched: an override for nothing does nothing).  Every check that counts
+    is a finding, with its action's severity, so its reason is shown; a
+    refusal names its check, so a review's `$override` can set it aside.
+    """
+    counted = {c.id: (c, m) for c in checks if not c.overrides and (m := match(c)) is not None}
+    for override in checks:
+        if not override.overrides:
+            continue
+        matched = match(override)
+        replaced = [target for target in override.overrides if target in counted]
+        if matched is None or not replaced:
+            continue
+        for target in replaced:
+            del counted[target]
+        counted[override.id] = (override, matched)
+    return [
+        Finding(_ACTIONS.get(check.action, Severity.REFUSE), key, describe(check, matched), (check.id,))
+        for check, matched in sorted(counted.values(), key=lambda cm: _ORDER.get(cm[0].action, 2), reverse=True)
+    ]
+
+
 def _host_covers(rule_host: str, pattern: str) -> bool:
     """Whether a rule for `rule_host` allows a host `pattern` names."""
     if pattern.startswith("*."):
@@ -436,7 +525,7 @@ def check_egress(
         rules = gateway.rules_of(entries if entries is not None else config.project_egress())
     except gateway.RuleErr as err:
         return [Finding(Severity.REFUSE, "egress", str(err))]
-    data_out = config.value_list("scoter", DATA_OUT_HOSTS)
+    host_checks = simple_checks(config, EGRESS_HOSTS)
     findings: list[Finding] = []
     for i, rule in enumerate(rules):
         key = f"egress[{i}]"
@@ -446,14 +535,14 @@ def check_egress(
                 f"`{rule.host}` over plain HTTP can be read, and its downloads changed, by "
                 "anyone in between.",
             ))
-        covered = [p for p in data_out if _host_covers(rule.host, p)]
-        if covered:
-            findings.append(Finding(
-                Severity.WARN, key,
-                f"`{rule.host}` lets the container send data out ("
-                + ", ".join(f"`{p}`" for p in covered)
-                + " is a place anyone can upload to), whatever the other rules say.",
-            ))
+
+        def match(check: SimpleCheck, host: str = rule.host) -> str | None:
+            return next((h for h in check.matches if _host_covers(host, h)), None)
+
+        findings.extend(simple_findings(
+            host_checks, key, match,
+            lambda check, matched, host=rule.host: f"`{host}` (`{matched}`): {check.reason}",
+        ))
     return findings
 
 
@@ -521,7 +610,8 @@ def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Findin
     return findings
 
 
-def _secret_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
+def _file_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
+    """The first of `patterns` the file (or directory) at `rel` matches, by its own name."""
     name = rel.rsplit("/", 1)[-1]
     for pattern in patterns:
         if pattern.endswith("/"):
@@ -540,7 +630,7 @@ def check_project_files(config: UserConfig) -> list[Finding]:
     if project is None or files_name is None or file_name is None:
         return []
     files_dir = Path(os.path.realpath(project / files_name))
-    secrets = config.value_list("scoter", SECRET_FILES)
+    file_checks = simple_checks(config, PROJECT_FILES)
     builds = config.dev_container_parent_builds() if config.has_dev_container() else []
     local_tags = [tag for tag, _ in builds]
     dirs: list[Path | None] = [config.active_location("dev-container-path")]
@@ -561,12 +651,12 @@ def check_project_files(config: UserConfig) -> list[Finding]:
         real = Path(os.path.realpath(directory))
         if not real.is_relative_to(files_dir) or real == files_dir:
             continue
-        findings.extend(_container_findings(real, real.relative_to(files_dir).as_posix(), secrets, local_tags))
+        findings.extend(_container_findings(real, real.relative_to(files_dir).as_posix(), file_checks, local_tags))
     return findings
 
 
 def _container_findings(
-    directory: Path, rel: str, secrets: Sequence[str], local_tags: Sequence[str],
+    directory: Path, rel: str, file_checks: Sequence[SimpleCheck], local_tags: Sequence[str],
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -576,12 +666,11 @@ def _container_findings(
     for entry in entries:
         child = f"{rel}/{entry.name}"
         is_dir = entry.is_dir(follow_symlinks=False)
-        pattern = _secret_like(child, secrets, is_dir)
-        if pattern and not entry.is_symlink():
-            findings.append(Finding(
-                Severity.WARN, child,
-                f"Looks like a secret (`{pattern}`): everything in a container directory goes "
-                "into the image, where the container can read it.",
+        if not entry.is_symlink():
+            findings.extend(simple_findings(
+                file_checks, child,
+                lambda check, child=child, is_dir=is_dir: _file_like(child, check.matches, is_dir),
+                lambda check, matched: f"{check.reason} (`{matched}`)",
             ))
         if entry.is_symlink():
             findings.append(Finding(
@@ -590,7 +679,7 @@ def _container_findings(
                 "as it could bring in files from outside it.",
             ))
         elif is_dir:
-            findings.extend(_container_findings(Path(entry.path), child, secrets, local_tags))
+            findings.extend(_container_findings(Path(entry.path), child, file_checks, local_tags))
         elif entry.is_file(follow_symlinks=False):
             if entry.stat(follow_symlinks=False).st_nlink > 1:
                 findings.append(Finding(
@@ -647,7 +736,7 @@ def check_review(config: UserConfig, path_env: str | None = None) -> Report:
     each command's program as given (an absolute path, nothing looked up),
     its whole environment plan, the egress rules, and the project's
     container directories when the review uses the project's container.
-    Then the review's `$override`s (step 12): a refusal from the setup's
+    Then the review's `$override`s: a refusal from the setup's
     checks that the override names, every one of them, is set aside, as a
     note; a refusal for safety (the program's missing, in the project, or
     writable by others; a container file that's a link) never is; and an
@@ -727,4 +816,3 @@ def apply_overrides(
             for f in ret
         ]
     return ret
-

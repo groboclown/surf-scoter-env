@@ -24,8 +24,8 @@
 #   ::/128          Unspecified address (used for server listening, equivalent to 0.0.0.0)
 #   ff00::/8        IPv6 multicast
 #   2001:db8::/32   Documentation addresses
-#   2001::/32       Teredo-related special-purpose addressing
-#   64:ff9b:1::/48  Local-use IPv4/IPv6 translation prefix
+#   2001::/32       Teredo-related special-purpose addressing (not blocked)
+#   64:ff9b:1::/48  Local-use IPv4/IPv6 translation prefix (not blocked)
 
 
 0.0.0.0/8

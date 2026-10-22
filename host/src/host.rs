@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn run_needs_the_project_and_workspace() {
+    fn run_needs_project_workspace() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
         let ws = dir.path().join("ws");
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_bad_container_name() {
+    fn run_rejects_bad_container() {
         let dir = exec::TempDir::new().unwrap();
         let test = TestProject::new(dir.path());
         let ws = dir.path().join("ws");
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn run_reports_a_bad_universal_file() {
+    fn run_reports_bad_universal() {
         let dir = exec::TempDir::new().unwrap();
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{\"resolved\": {}}").unwrap();
@@ -671,7 +671,7 @@ mod tests {
     // ---- Outbox ----
 
     #[test]
-    fn outbox_wraps_frames_with_process_id() {
+    fn outbox_wraps_with_process_id() {
         let (tx, rx) = mpsc::channel();
         let outbox = Outbox { proc: 7, tx };
         outbox.send_frame(b"frame".to_vec()).unwrap();
@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_client_gone_before_request() {
+    fn handle_client_gone_early() {
         let (tx, rx) = mpsc::channel();
         let mut partial = request_bytes(&["echo"]);
         partial.truncate(3);
@@ -975,7 +975,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn serve_handles_interleaved_processes() {
+    fn serve_interleaves_processes() {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Started(0));
         broker.send(broker_host::Command::Started(1));
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_ignores_unknown_processes() {
+    fn serve_ignores_unknown_process() {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Message((99, b"x".to_vec())));
         broker.send(broker_host::Command::Terminated((99, 0)));
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_client_gone_before_request() {
+    fn serve_client_gone_early() {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Started(0));
         broker.send(broker_host::Command::Message((0, vec![0, 0])));
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_broker_closes_mid_request() {
+    fn serve_broker_closes_midway() {
         let mut broker = FakeBroker::start();
         broker.send(broker_host::Command::Started(0));
         broker.send(broker_host::Command::Message((0, vec![0, 0])));
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_rejects_malformed_broker_stream() {
+    fn serve_rejects_bad_stream() {
         let mut broker = FakeBroker::start();
         broker.to_host.as_mut().unwrap().write_all(&[42]).unwrap();
         let err = broker.serving.join().unwrap().unwrap_err();
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_rejects_truncated_broker_stream() {
+    fn serve_rejects_truncated() {
         let mut broker = FakeBroker::start();
         broker
             .to_host

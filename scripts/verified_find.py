@@ -4,7 +4,7 @@
 Usage: verified_find.py UNIVERSAL.json
 
 The setup's `verified: runs: find-acceptance` runs this for `scoter`.  It
-prints JSON: the match (`exact`, `meaning`, `blanket` or null), the
+prints JSON: the match (`exact`, `meaning`, `exempt` or null), the
 acceptance's id, its `accepted.json` (for `gen-scoter-uc
 --accepted-settings`), and any notice for the user; see
 `surf_scoter_lib.verified.lookup`.
@@ -17,7 +17,7 @@ from surf_scoter_lib import UserConfig
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import lookup
 
-MAX_UNIVERSAL_SIZE = 4 * 1024 * 1024
+MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
 
 
 def main(argv: Sequence[str]) -> int:
@@ -27,9 +27,9 @@ def main(argv: Sequence[str]) -> int:
         return 2
     try:
         with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_SIZE + 1)
-        if len(data) > MAX_UNIVERSAL_SIZE:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_SIZE} bytes")
+            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
+        if len(data) > MAX_UNIVERSAL_BYTES:
+            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")

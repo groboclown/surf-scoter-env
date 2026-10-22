@@ -197,10 +197,14 @@ mod tests {
     }
 
     #[test]
-    fn invocation_roundtrip_unicode_and_empty_strings() {
+    fn invocation_roundtrip_unicode() {
         let inv = Invocation {
-            cwd: "/tmp/ünïcødé 🦆".to_string(),
-            args: vec!["".to_string(), "日本語".to_string(), "a b\tc\n".to_string()],
+            cwd: "/tmp/\u{fc}n\u{ef}c\u{f8}d\u{e9} \u{1f986}".to_string(),
+            args: vec![
+                "".to_string(),
+                "\u{65e5}\u{672c}\u{8a9e}".to_string(),
+                "a b\tc\n".to_string(),
+            ],
             envs: vec![
                 ("EMPTY".to_string(), "".to_string()),
                 ("".to_string(), "x=y".to_string()),

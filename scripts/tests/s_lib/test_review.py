@@ -3,15 +3,14 @@
 import datetime
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from ...surf_scoter_lib import checks, jdata, review
+from ...surf_scoter_lib import checks, fileutil, jdata, review
 from ...surf_scoter_lib.user_config import UserConfig
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 NOW = datetime.datetime(2026, 10, 20, 12, 0, tzinfo=datetime.UTC)
 
 
@@ -80,9 +79,9 @@ class BuildTest(unittest.TestCase):
             "resolved": {
                 "scoter": {"values": {
                     "project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml",
-                    "verified-expiry-days": 10,
                 }},
-                "network-gateway": {"values": {"name": "squid"}},
+                "verification": {"values": {"expiry-days": 10}},
+                "dev-env": {"values": {"network-gateway-name": "squid"}},
             },
             "current-project-setup": {
                 "egress": [{"host": "registry.npmjs.org", "protocol": "tls"}],
@@ -103,7 +102,7 @@ class BuildTest(unittest.TestCase):
                 ],
             },
             "host-command-checks": {"checks": {
-                "host-bridge:shells": {
+                "verification:shells": {
                     "files": [], "action": "refuse",
                     "reason": "A shell runs anything. \x1b[31mDanger\x1b[0m \u202e",
                     "commands": {"sh": str(self.bin / "sh")}, "name-patterns": [], "options": [],
@@ -137,7 +136,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn(f'    program: "{self.bin / "aws"}"', lines)
         self.assertIn('    args: ["s3", {any: {prefix: "s3://b/"}}]', lines)
         self.assertIn('  # - command: "sh"', lines)
-        self.assertIn('    # $override: ["host-bridge:shells"]', lines)
+        self.assertIn('    # $override: ["verification:shells"]', lines)
         self.assertIn('  # - command: "gone"', lines)
         gone = text[text.index('# - command: "gone"'):]
         self.assertNotIn("$override", gone.split("\n\n")[0])
@@ -147,7 +146,47 @@ class BuildTest(unittest.TestCase):
         self.assertIn('  use: "project"', lines)
         self.assertIn('    "debian:bookworm": "debian:bookworm"', lines)
 
-    def test_values_cant_pose_as_comments(self) -> None:
+    def test_setup_notes(self) -> None:
+        """What the setup changes about the checks, or that it changes nothing; or left out."""
+        config = UserConfig(self.suc())
+        report = checks.check_project(config, str(self.bin))
+        def build(notes: list[str] | None) -> list[str]:
+            return review.build(config, review.Context(report=report, now=NOW, setup_notes=notes)).splitlines()
+        lines = build(["`x:y` overrides `verification:shells` for `sh`, with `warn`"])
+        self.assertIn("#scoter: How your setup changes the defaults' protections (as `scoter user-setup` shows):", lines)
+        self.assertIn("#scoter:   `x:y` overrides `verification:shells` for `sh`, with `warn`", lines)
+        self.assertIn("#scoter: Your setup changes none of the defaults' protections.", build([]))
+        self.assertFalse(any("protections" in line for line in build(None)))
+
+    def test_refused_egress_rule(self) -> None:
+        """An egress rule an `egress-hosts` check refuses is commented out, with its `$override`."""
+        suc = self.suc()
+        suc["resolved"]["verification"]["egress-hosts"] = {  # type: ignore[index]
+            "npm": {"action": "refuse", "reason": "not here", "hosts": ["registry.npmjs.org"]},
+        }
+        config = UserConfig(suc)
+        lines = review.build(config, review.Context(
+            report=checks.check_project(config, str(self.bin)), now=NOW,
+        )).splitlines()
+        self.assertIn("  #scoter: refuse: `registry.npmjs.org` (`registry.npmjs.org`): not here (verification:npm)", lines)
+        self.assertIn(
+            '  # - {host: "registry.npmjs.org", protocol: "tls", port: 443, $override: ["verification:npm"]}', lines,
+        )
+
+    def test_image_through_an_arg(self) -> None:
+        """A `FROM` naming its image through an `ARG` is noted: `images` can't map it."""
+        (self.project / ".surf-scoter.d" / "env" / "Dockerfile").write_text(
+            "ARG BASE=debian:bookworm\nFROM ${BASE}\n", encoding="utf-8",
+        )
+        lines = self.build().splitlines()
+        self.assertIn(
+            "  #scoter: note: env/Dockerfile builds `FROM ${BASE}`, an image named through an `ARG`: "
+            "`images` can't map it, as it isn't known until the build.",
+            lines,
+        )
+        self.assertIn("  images: {}", lines)
+
+    def test_values_not_comments(self) -> None:
         """A newline in a value stays inside its quotes, on one line."""
         text = self.build()
         self.assertIn('    NOTE: "x\\n# reviewed: safe"', text.splitlines())
@@ -195,7 +234,7 @@ class BranchTest(unittest.TestCase):
 
 
 class CompareTest(unittest.TestCase):
-    """Test comparing items across the three versions (step 17)."""
+    """Test comparing items across the three versions."""
 
     def kinds(self, section: str, old: list, mine: list, new: list) -> list[tuple[str, int | None]]:
         return [(c.kind, c.index) for c in review.compare(section, old, mine, new)]
@@ -240,7 +279,50 @@ class SetupChangesTest(unittest.TestCase):
     """Test listing the setup values that changed."""
 
     def test_changes(self) -> None:
-        from ...surf_scoter_lib.verified import previous
+        from ...surf_scoter_lib.verified import records
         before = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 2}, "vcs": "git-vcs"}
         now = {"gateway": {"name": "squid"}, "checks": {"a": 1, "b": 3, "c": 4}, "vcs": None}
-        self.assertEqual(previous.setup_changes(before, now), ["checks: b", "checks: c", "vcs"])
+        self.assertEqual(records.setup_changes(before, now), ["checks: b", "checks: c", "vcs"])
+
+
+class MergeEnvTest(unittest.TestCase):
+    """Test merging the top-level `env` by variable."""
+
+    def test_merge(self) -> None:
+        old = {"allow": ["LANG", "TZ"], "set": {"A": "1", "B": "2", "C": "/h/.ssh/config", "D": "4"}}
+        mine = {"allow": ["LANG"], "set": {"A": "1", "B": "mine", "C": "/h/.ssh/config", "D": "my-d"}}
+        new = {"allow": ["LANG", "TZ", "PAGER"], "set": {"A": "1", "B": "2", "C": "/other/config", "D": "40"}}
+        raw_old = {"set": {"C": "${ssh:config-file}", "D": "4"}}
+        raw_new = {"set": {"C": "${ssh:config-file}", "D": "40"}}
+        merge = review.merge_env(old, mine, new, raw_old, raw_new)
+        # Unchanged by the project: the user's (B), and their removal (TZ), kept.
+        self.assertEqual(merge.plan["set"]["B"], "mine")
+        self.assertNotIn("TZ", merge.plan["allow"])
+        self.assertIn("  set: B = \"mine\" (yours)", merge.kept)
+        self.assertIn("  allow: TZ (you removed it)", merge.kept)
+        # New from the project.
+        self.assertIn("PAGER", merge.plan["allow"])
+        self.assertIn("  allow: PAGER (new)", merge.changed)
+        # Changed by the setup's resolution, not the project: said so.
+        self.assertEqual(merge.plan["set"]["C"], "/other/config")
+        self.assertIn(
+            '  set: C: your setup now gives "/other/config" (was "/h/.ssh/config"), from `${ssh:config-file}`',
+            merge.changed,
+        )
+        # Changed by the project, after the user's edit: the project's, the user's kept aside.
+        self.assertEqual(merge.plan["set"]["D"], "40")
+        self.assertIn('  set: D: "4" -> "40"', merge.changed)
+        self.assertEqual(merge.earlier, {("set", "D"): "my-d"})
+
+    def test_removed_by_the_project(self) -> None:
+        merge = review.merge_env({"set": {"A": "1"}}, {"set": {"A": "1"}}, {}, None, None)
+        self.assertEqual(merge.plan, {})
+        self.assertEqual(merge.changed, ['  set: A = "1" (the project removed it)'])
+
+    def test_program_moved(self) -> None:
+        """Only where the program is found changed: not the project's change."""
+        old = {"command": "ls", "program": "/usr/bin/ls", "args": []}
+        new = {**old, "program": "/opt/bin/ls"}
+        shown = review.show(review.Change("changed", old, old, new, 0), [])
+        assert shown is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(shown.notes[0].startswith("found somewhere else since you accepted it"))

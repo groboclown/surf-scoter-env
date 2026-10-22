@@ -1,14 +1,14 @@
 #SPDX:MIT
 """Shared helpers for the verified store tests."""
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from ....surf_scoter_lib import fileutil
 from ....surf_scoter_lib.verified import store
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 
 
 class TempDirTest(unittest.TestCase):
@@ -30,4 +30,4 @@ class TempDirTest(unittest.TestCase):
         return path
 
     def new_store(self) -> store.VerifiedStore:
-        return store.VerifiedStore.open(self.tmp / "verified", create=True)
+        return store.VerifiedStore.open(self.tmp / "verified", if_missing=store.IfMissing.CREATE)

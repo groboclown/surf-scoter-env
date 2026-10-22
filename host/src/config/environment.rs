@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_comes_through_by_default() {
+    fn nothing_passes_by_default() {
         let plan = EnvPlan::default();
         let env = plan
             .apply(&pairs(&[("LD_PRELOAD", "/tmp/evil.so"), ("PATH", "/bin")]))
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn error_refuses_even_when_not_allowed() {
+    fn error_refuses_even_unallowed() {
         let plan = EnvPlan {
             error: vec!["AWS_SECRET_*".to_string()],
             ..EnvPlan::default()
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_adds_patterns_and_overrides_values() {
+    fn merge_adds_and_overrides() {
         let project = EnvPlan {
             allow: vec!["LANG".to_string()],
             drop: vec!["LANG_X".to_string()],
@@ -505,7 +505,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn programs_are_the_program_found() {
+    fn programs_are_program_found() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new();
         let tool = dir.write("bin/tool", "#!/bin/sh\n");

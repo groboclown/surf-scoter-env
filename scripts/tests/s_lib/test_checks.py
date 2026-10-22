@@ -2,15 +2,14 @@
 """Test the checks module."""
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from ...surf_scoter_lib import checks, jdata
+from ...surf_scoter_lib import checks, fileutil, jdata
 from ...surf_scoter_lib.user_config import UserConfig
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 Severity = checks.Severity
 
 
@@ -32,7 +31,8 @@ class _Project(unittest.TestCase):
         self.host_checks: dict[str, jdata.JsonData] = {}
         self.command_map: dict[str, jdata.JsonData] = {}
         self.egress: list[jdata.JsonData] = []
-        self.value_lists: dict[str, jdata.JsonData] = {}
+        self.project_files: dict[str, jdata.JsonData] = {}
+        self.egress_hosts: dict[str, jdata.JsonData] = {}
 
     def write(self, rel: str, text: str, mode: int = 0o644) -> Path:
         path = self.tmp / rel
@@ -56,10 +56,12 @@ class _Project(unittest.TestCase):
                 "vcs-root": str(self.project),
                 "dev-container-path": str(self.project / ".surf-scoter.d" / "env"),
             },
-            "resolved": {"scoter": {
-                "values": {"project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml"},
-                "value-lists": self.value_lists,
-            }},
+            "resolved": {
+                "scoter": {
+                    "values": {"project-files-dir": ".surf-scoter.d", "project-file-name": "project.yaml"},
+                },
+                "verification": {"project-files": self.project_files, "egress-hosts": self.egress_hosts},
+            },
             "current-project-setup": {"commands": self.commands, "egress": self.egress},
             "host-command-checks": {"checks": self.host_checks, "command-map": self.command_map},
             "dev-container": {"parent-builds": []},
@@ -134,18 +136,18 @@ class HostCommandsTest(_Project):
         """`mytool -> env` is refused as `env` is."""
         env = self.tool("env", self.tmp / "usr" / "bin")
         os.symlink(env, self.bin / "mytool")
-        self.check("host-bridge:command-runners", "refuse", commands={"env": str(env)})
+        self.check("verification:command-runners", "refuse", commands={"env": str(env)})
         self.commands = [{"command": "mytool", "args": []}]
         self.assertEqual(
             self.host_found(Severity.REFUSE),
-            [("refuse", "commands[0].program", "because host-bridge:command-runners")],
+            [("refuse", "commands[0].program", "because verification:command-runners")],
         )
 
     def test_name_patterns(self) -> None:
         """A pattern matches the name, or the base name of the file it really is."""
         python = self.tool("python3.12")
         os.symlink(python, self.bin / "py")
-        self.check("host-bridge:interpreters", "refuse", **{"name-patterns": ["python*"]})
+        self.check("verification:interpreters", "refuse", **{"name-patterns": ["python*"]})
         self.commands = [{"command": "py", "args": []}]
         self.assertEqual(len(self.host_found(Severity.REFUSE)), 1)
 
@@ -154,11 +156,11 @@ class HostCommandsTest(_Project):
         shims = self.tmp / "home" / ".asdf" / "shims"
         self.tool("node", shims)
         self.path_env = str(shims)
-        self.check("host-bridge:version-manager-shims", "refuse", paths=[str(shims)])
+        self.check("verification:version-manager-shims", "refuse", paths=[str(shims)])
         self.commands = [{"command": "node", "args": []}]
         self.assertEqual(
             self.host_found(Severity.REFUSE),
-            [("refuse", "commands[0].program", "because host-bridge:version-manager-shims")],
+            [("refuse", "commands[0].program", "because verification:version-manager-shims")],
         )
 
     def test_unknown_and_allowed(self) -> None:
@@ -174,19 +176,19 @@ class HostCommandsTest(_Project):
     def test_overrides(self) -> None:
         """Most restrictive first, then the override replaces the check it names."""
         ksh = self.tool("ksh")
-        self.check("host-bridge:shells", "refuse", commands={"ksh": str(ksh)})
-        self.check("host-bridge:korn", "warn", commands={"ksh": str(ksh)})
+        self.check("verification:shells", "refuse", commands={"ksh": str(ksh)})
+        self.check("verification:korn", "warn", commands={"ksh": str(ksh)})
         self.check(
-            "mine:ksh", "allow", commands={"ksh": str(ksh)}, overrides=["host-bridge:shells"],
+            "mine:ksh", "allow", commands={"ksh": str(ksh)}, overrides=["verification:shells"],
         )
         self.commands = [{"command": "ksh", "args": []}]
         found = self.host_findings()
         self.assertEqual(
             sorted((str(f.severity), f.checks) for f in found),
             [
-                ("note", ("host-bridge:shells", "mine:ksh")),
                 ("note", ("mine:ksh",)),
-                ("warn", ("host-bridge:korn",)),
+                ("note", ("verification:shells", "mine:ksh")),
+                ("warn", ("verification:korn",)),
             ],
         )
 
@@ -194,7 +196,7 @@ class HostCommandsTest(_Project):
         """An option that runs code, with a value the container fills in."""
         git = self.tool("git")
         self.check("git-vcs:git-options", "warn", commands={"git": str(git)}, options=["-c"])
-        self.check("host-bridge:code-options", "warn", options=["--eval"])
+        self.check("verification:code-options", "warn", options=["--eval"])
         self.commands = [
             {"command": "git", "args": ["-c", {"any": {}}, "status"]},
             {"command": "git", "args": ["-c", "core.pager=cat", "log"]},
@@ -205,14 +207,14 @@ class HostCommandsTest(_Project):
             warns,
             [
                 ("commands[0].args[1]", ("git-vcs:git-options",)),
-                ("commands[2].args[0]", ("host-bridge:code-options",)),
+                ("commands[2].args[0]", ("verification:code-options",)),
             ],
         )
 
     def test_env(self) -> None:
         """`env` entries match the `allow` entries exactly, the project's and the command's."""
         self.tool("aws")
-        self.check("host-bridge:loader-env", "refuse", env=["LD_PRELOAD", "*"])
+        self.check("verification:loader-env", "refuse", env=["LD_PRELOAD", "*"])
         self.commands = [{"command": "aws", "args": [], "env": {"allow": ["AWS_*", "*"]}}]
         suc = self.suc()
         suc["current-project-setup"]["env"] = {"allow": ["LD_PRELOAD"]}  # type: ignore[index]
@@ -275,9 +277,12 @@ class ProgramPathsTest(_Project):
 class EgressTest(_Project):
     """Test the egress rules."""
 
+    def host_check(self, name: str, action: str, hosts: list[str], **extra: jdata.JsonData) -> None:
+        self.egress_hosts[name] = {"action": action, "reason": f"because {name}", "hosts": hosts, **extra}
+
     def test_http_and_data_out(self) -> None:
-        """Plain `http`, and hosts anyone can upload to (exactly, or under a wildcard)."""
-        self.value_lists["egress-data-out-hosts"] = ["github.com", "*.githubusercontent.com"]
+        """Plain `http`, and the `egress-hosts` checks (a host exactly, or under a wildcard)."""
+        self.host_check("code-hosts", "warn", ["github.com", "*.githubusercontent.com"])
         self.egress = [
             {"host": "mirror.example.com", "protocol": "http"},
             {"host": "github.com", "protocol": "tls"},
@@ -285,18 +290,52 @@ class EgressTest(_Project):
             {"host": "*.github.com", "protocol": "tls"},
             {"host": "registry.npmjs.org", "protocol": "tls"},
         ]
-        keys = [(key, message.split(" ")[0]) for _, key, message in self.found(Severity.WARN)]
+        found = [(key, message) for _, key, message in self.found(Severity.WARN)]
+        self.assertEqual([k for k, _ in found], ["egress[0]", "egress[1]", "egress[2]"])
+        self.assertEqual(found[1][1], "`github.com` (`github.com`): because code-hosts")
         self.assertEqual(
-            keys,
-            [
-                ("egress[0]", "`mirror.example.com`"),
-                ("egress[1]", "`github.com`"),
-                ("egress[2]", "`raw.githubusercontent.com`"),
-            ],
+            found[2][1], "`raw.githubusercontent.com` (`*.githubusercontent.com`): because code-hosts",
         )
         # A wildcard rule that covers a listed host warns too.
-        self.value_lists["egress-data-out-hosts"] = ["gist.github.com"]
+        self.host_check("code-hosts", "warn", ["gist.github.com"])
         self.assertEqual([k for _, k, _ in self.found(Severity.WARN)], ["egress[0]", "egress[3]"])
+
+    def test_actions_and_overrides(self) -> None:
+        """The action decides the severity; each check that counts is shown; an override
+        takes the place of the checks it names, for the hosts it matches."""
+        self.host_check("code-hosts", "warn", ["github.com", "gitlab.com"])
+        self.host_check("forbidden", "refuse", ["github.com", "pastebin.com"])
+        self.egress = [
+            {"host": "github.com", "protocol": "tls"},
+            {"host": "gitlab.com", "protocol": "tls"},
+            {"host": "pastebin.com", "protocol": "tls"},
+        ]
+        found = [(s, k, f.checks) for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings
+                 for s, k in [(str(f.severity), f.key)] if k.startswith("egress")]
+        self.assertEqual(found, [
+            ("refuse", "egress[0]", ("verification:forbidden",)),
+            ("warn", "egress[0]", ("verification:code-hosts",)),
+            ("warn", "egress[1]", ("verification:code-hosts",)),
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+        ])
+        # Ours: allowed for github.com only, and only in place of `code-hosts`.
+        self.host_check("our-git", "allow", ["github.com"], overrides=["verification:code-hosts"])
+        found = [(str(f.severity), f.key, f.checks)
+                 for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings
+                 if f.key.startswith("egress")]
+        self.assertEqual(found, [
+            ("refuse", "egress[0]", ("verification:forbidden",)),
+            ("note", "egress[0]", ("verification:our-git",)),
+            ("warn", "egress[1]", ("verification:code-hosts",)),
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+        ])
+        # An override of a check that doesn't match does nothing.
+        self.host_check("our-git", "allow", ["pastebin.com"], overrides=["verification:code-hosts"])
+        self.assertIn(
+            ("refuse", "egress[2]", ("verification:forbidden",)),
+            [(str(f.severity), f.key, f.checks)
+             for f in checks.check_project(UserConfig(self.suc()), self.path_env).findings],
+        )
 
 
 @unittest.skipUnless(POSIX, "symlinks and FIFOs")
@@ -304,8 +343,10 @@ class ProjectFilesTest(_Project):
     """Test the container directories."""
 
     def test_symlink_and_secrets(self) -> None:
-        """A symlink is refused; a secret-looking file warns."""
-        self.value_lists["secret-file-patterns"] = [".env", ".aws/"]
+        """A symlink is refused; a secret-looking file is as its check says."""
+        self.project_files["secret-files"] = {"action": "warn", "reason": "secrets", "patterns": [".env", ".aws/"]}
+        self.project_files["keys"] = {"action": "refuse", "reason": "keys", "patterns": ["*.pem"]}
+        self.write("proj/.surf-scoter.d/env/id.pem", "x\n")
         os.symlink(self.tmp / "elsewhere", self.project / ".surf-scoter.d" / "env" / "creds")
         self.write("proj/.surf-scoter.d/env/.env", "TOKEN=x\n")
         (self.project / ".surf-scoter.d" / "env" / ".aws").mkdir()
@@ -313,6 +354,7 @@ class ProjectFilesTest(_Project):
         self.assertIn(("refuse", "env/creds"), [(s, k) for s, k, _ in found])
         warned = sorted(k for s, k, _ in found if s == "warn")
         self.assertEqual(warned, ["env/.aws", "env/.env"])
+        self.assertIn(("refuse", "env/id.pem", "keys (`*.pem`)"), found)
 
     def test_hard_links_and_fifos(self) -> None:
         """Hard links and special files in a container directory are refused."""
@@ -321,7 +363,7 @@ class ProjectFilesTest(_Project):
         refused = sorted(k for _, k, _ in self.found(Severity.REFUSE))
         self.assertEqual(refused, ["env/Dockerfile", "env/pipe"])
 
-    def test_outside_container_dirs_are_trusted(self) -> None:
+    def test_outside_dirs_trusted(self) -> None:
         """A container directory outside the project files directory isn't checked here."""
         suc = self.suc()
         outside = self.tmp / "dist" / "base"
@@ -378,8 +420,8 @@ class ReviewTest(_Project):
     def setUp(self) -> None:
         super().setUp()
         self.sh = self.tool("sh")
-        self.check("host-bridge:shells", "refuse", commands={"sh": str(self.sh)})
-        self.check("host-bridge:loader-env", "refuse", env=["LD_PRELOAD"])
+        self.check("verification:shells", "refuse", commands={"sh": str(self.sh)})
+        self.check("verification:loader-env", "refuse", env=["LD_PRELOAD"])
         self.accepted_commands: list[jdata.JsonData] = []
         self.overrides: list[jdata.JsonData] = []
         self.use: jdata.JsonData = "project"
@@ -408,41 +450,61 @@ class ReviewTest(_Project):
                                                           or "isn't on this computer" in f.message)
         ]
 
-    def test_policy_refusal_and_override(self) -> None:
+    def test_egress_override(self) -> None:
+        """An `egress-hosts` refusal is a policy refusal: the review's `$override` sets it aside."""
+        self.egress_hosts["forbidden"] = {"action": "refuse", "reason": "no", "hosts": ["pastebin.com"]}
+        egress = [{"host": "pastebin.com", "protocol": "tls", "port": 443, "methods": []}]
+
+        def egress_findings(overrides: list[jdata.JsonData]) -> list[tuple[str, str]]:
+            suc = self.suc()
+            suc["review"] = {"result": "accept", "accepted": {
+                "commands": [], "egress": egress,
+                "dev-container": {"use": self.use, "images": {}},
+                "overrides": {"commands": [], "egress": overrides},
+            }}
+            return [(str(f.severity), f.message) for f in checks.check_review(UserConfig(suc), self.path_env).findings
+                    if f.key.startswith("egress")]
+
+        self.assertEqual(egress_findings([]), [("refuse", "`pastebin.com` (`pastebin.com`): no")])
+        found = egress_findings([{"index": 0, "checks": ["verification:forbidden"]}])
+        self.assertEqual([s for s, _ in found], ["note"])
+        self.assertIn("You overrode `verification:forbidden`", found[0][1])
+
+    def test_policy_override(self) -> None:
         """Refused without an override; a note with one naming the refusing check."""
         self.accepted_commands = [self.command(str(self.sh))]
-        self.assertEqual(self.about(0), [("refuse", "because host-bridge:shells")])
-        self.overrides = [{"index": 0, "checks": ["host-bridge:shells"]}]
+        self.assertEqual(self.about(0), [("refuse", "because verification:shells")])
+        self.overrides = [{"index": 0, "checks": ["verification:shells"]}]
         self.assertEqual(
             self.about(0),
-            [("note", "You overrode `host-bridge:shells` here: because host-bridge:shells")],
+            [("note", "You overrode `verification:shells` here: because verification:shells")],
         )
 
     def test_override_names_exactly(self) -> None:
         """A name that doesn't refuse the item is refused; an unnamed refusal stays."""
         env = {"allow": ["LD_PRELOAD"], "drop": [], "error": [], "set": {}, "default": {}}
         self.accepted_commands = [self.command(str(self.sh), env=env)]
-        self.overrides = [{"index": 0, "checks": ["host-bridge:shells", "host-bridge:other"]}]
+        self.overrides = [{"index": 0, "checks": ["verification:shells", "verification:other"]}]
         found = self.about(0)
-        self.assertIn(("refuse", "because host-bridge:loader-env"), found)
+        self.assertIn(("refuse", "because verification:loader-env"), found)
         unknown = (
-            "`host-bridge:other` doesn't refuse this item; an override names only "
+            "`verification:other` doesn't refuse this item; an override names only "
             "the setup checks that refuse it."
         )
         self.assertIn(("refuse", unknown), found)
         self.assertIn(
-            ("note", "You overrode `host-bridge:shells` here: because host-bridge:shells"), found,
+            ("note", "You overrode `verification:shells` here: because verification:shells"), found,
         )
 
-    def test_safety_refusal_cant_be_overridden(self) -> None:
+    def test_safety_not_overridable(self) -> None:
         """A missing program stays refused, whatever the override says."""
         self.accepted_commands = [self.command(str(self.tmp / "gone"))]
-        self.overrides = [{"index": 0, "checks": ["host-bridge:shells"]}]
+        self.overrides = [{"index": 0, "checks": ["verification:shells"]}]
         severities = [s for s, m in self.about(0)]
         self.assertTrue(all(s == "refuse" for s in severities), self.about(0))
         self.assertTrue(any("Can't be overridden" in m for _, m in self.about(0)), self.about(0))
 
-    def test_own_container_skips_project_files(self) -> None:
+    def test_own_container_skips(self) -> None:
         """With one of the user's containers, the project's container files aren't checked."""
         os.mkfifo(self.project / ".surf-scoter.d" / "env" / "pipe")
         self.assertTrue(any(f.key == "env/pipe" for f in self.review().findings))

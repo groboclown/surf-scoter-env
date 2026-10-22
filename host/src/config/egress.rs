@@ -14,14 +14,22 @@
 //!     methods: [GET, HEAD]
 //! ```
 //!
-//! A gateway enforces what it can of a rule (step 9 of
-//! `docs/contributors/projects-v1.md`); these checks are only about the rule
-//! making sense, and being shown as what it does.
+//! A gateway enforces what it can of a rule; these checks are only about the
+//! rule making sense, and being shown as what it does.
 
 use serde::Deserialize;
 use yaml_serde::Value;
 
 use super::index_key;
+
+/// The longest host name DNS allows (RFC 1035), without the trailing dot.
+const MAX_HOST_NAME_CHARS: usize = 253;
+/// The longest label (the parts between dots) DNS allows (RFC 1035).
+const MAX_LABEL_CHARS: usize = 63;
+/// The default port for TLS and HTTPS.
+const HTTPS_PORT: u16 = 443;
+/// The default port for plain HTTP.
+const HTTP_PORT: u16 = 80;
 
 /// How the dev container talks to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -39,8 +47,8 @@ pub enum Protocol {
 impl Protocol {
     fn default_port(self) -> u16 {
         match self {
-            Protocol::Tls | Protocol::Https => 443,
-            Protocol::Http => 80,
+            Protocol::Tls | Protocol::Https => HTTPS_PORT,
+            Protocol::Http => HTTP_PORT,
         }
     }
 
@@ -160,13 +168,13 @@ pub fn host_problem(host: &str) -> Option<String> {
             "'{host}' can only have a `*` as its first label, as `*.example.com`"
         ));
     }
-    if name.len() > 253 {
+    if name.len() > MAX_HOST_NAME_CHARS {
         return Some(format!("'{host}' is longer than a host name can be"));
     }
     let labels: Vec<&str> = name.split('.').collect();
     for label in &labels {
         let valid = !label.is_empty()
-            && label.len() <= 63
+            && label.len() <= MAX_LABEL_CHARS
             && !label.starts_with('-')
             && !label.ends_with('-')
             && label
@@ -279,8 +287,8 @@ mod tests {
             assert_eq!(host_problem(good), None, "{good}");
         }
         let problem = |host: &str| host_problem(host).unwrap();
-        assert!(problem("bücher.example").contains("isn't ASCII"));
-        // A Cyrillic `а` in place of the Latin one.
+        assert!(problem("b\u{FC}cher.example").contains("isn't ASCII"));
+        // A Cyrillic `o` (U+043E) in place of the Latin one.
         assert!(problem("github.c\u{43e}m").contains("isn't ASCII"));
         assert!(problem("*").contains("every host"));
         assert!(problem("*.com").contains("top-level domain"));

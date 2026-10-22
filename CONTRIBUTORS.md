@@ -77,5 +77,15 @@ Don't point a `scoter: paths: distribution-dir` setting at the checkout either: 
 
 New releases must pass these gates:
 
-* ***NO OPEN SECURITY ISSUES.*** Because of the sensitivity of this project, releases must not have open security issues.
+* Changes merged into the `main` branch.
+* Major and minor versions:
+    * ***NO OPEN SECURITY ISSUES.*** Because of the sensitivity of this project, releases must not have open security issues.
+    * Review [`SECURITY.md`](SECURITY.md) for supported versions.
+* Patch versions:
+    * Open security issues are fine, if the patch covers at least one security issue.  This allows incremental fixes for security issues as they close, rather than waiting for all fixes to come in.
+* Bump version numbers:
+    * [host + generator](host/Cargo.toml)
+    * [client + bridge](containers/dev-env/Cargo.toml)
+    * TODO scoter.py and the install bundler.
+* Changelog updated.
 * **All builds pass.** All builds pass.  Includes lint and tests.

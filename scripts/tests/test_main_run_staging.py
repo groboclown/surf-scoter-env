@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Test staging the accepted copy of a project's files for the run (step 16)."""
+"""Test staging the accepted copy of a project's files for the run."""
 import datetime
 import json
 import os
@@ -7,6 +7,7 @@ import sys
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 # The scripts import the library as their own directory's, as they do when
 # they run.
@@ -15,7 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 import main_verify
 from surf_scoter_lib import checks, generator, review
 from surf_scoter_lib.user_config import UserConfig
-from surf_scoter_lib.verified import lookup, staging
+from surf_scoter_lib.verified import exempt, lookup, staging
 
 from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, DistTest
 from .test_main_verify import answers, quiet
@@ -102,7 +103,7 @@ class PrepareTest(DistTest):
         self.assertIsNone(plan)
         self.assertEqual(os.listdir(build), [])
 
-    def test_builds_from_the_accepted_copy(self) -> None:
+    def test_builds_from_accepted(self) -> None:
         """A change to the live files after the run read them doesn't reach the build."""
         suc = self.project_suc(self.accept())
         (self.files / "env" / "Dockerfile").write_text("FROM evil\n", encoding="utf-8")
@@ -115,7 +116,16 @@ class PrepareTest(DistTest):
         )
         self.assertEqual(os.stat(plan.dev_container / "Dockerfile").st_mode & 0o777, 0o644)
 
-    def test_changed_before_the_run_read_them(self) -> None:
+    def test_port_chosen_by_the_run(self) -> None:
+        """The run chooses a port the files leave unset before staging: that's no change."""
+        suc = self.project_suc(self.accept())
+        self.assertIsNone(suc["dev-container"]["sshd-port"])
+        config = UserConfig(suc)
+        config.set_dev_container_sshd_port("20001")
+        plan, _ = self.prepare(config.raw())
+        self.assertIsNotNone(plan)
+
+    def test_changed_before_read(self) -> None:
         """The run read files that aren't the accepted ones: it stops, and says to run again."""
         accepted = self.accept()
         (self.files / "env" / "dev-env.yaml").write_text(
@@ -140,6 +150,68 @@ class PrepareTest(DistTest):
         self.assertEqual(tag, "proj-base")
         self.assertTrue(parent.is_relative_to(build))
         self.assertEqual((parent / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
+    def exempt(self, accepted: Path) -> UserConfig:
+        """Start an exemption, change the live files, and adopt the accepted settings; the run's config."""
+        now = datetime.datetime.now(datetime.UTC)
+        exempt.start(UserConfig(self.project_suc()), now)
+        (self.files / "env" / "Dockerfile").write_text("FROM ubuntu:noble\n", encoding="utf-8")
+        (self.files / "env" / "extra.sh").write_text("echo hi\n", encoding="utf-8")
+        (self.files / "env" / "dev-env.yaml").write_text(
+            self.dev_env_yaml.replace("user: ubuntu", "user: root"), encoding="utf-8",
+        )
+        config = UserConfig(self.project_suc(accepted))
+        self.assertEqual(config.dev_container_str("user"), "root")
+        work = self.tmp / "state" / "adopt"
+        work.mkdir(parents=True, mode=0o700)
+        self.assertTrue(staging.adopt_accepted(config, work, generator.run, now))
+        return config
+
+    def test_exempt(self) -> None:
+        """Under an exemption: the container files as they are, the settings as accepted."""
+        config = self.exempt(self.accept())
+        # The run's settings are the accepted `dev-env.yaml`'s, before it reads any.
+        self.assertEqual(config.dev_container_str("user"), "ubuntu")
+        self.assertEqual(
+            config.require_active_location("dev-container-path"), self.files / "env",
+        )
+        plan, build = self.prepare(config.raw())
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(plan.dev_container.is_relative_to(build))
+        self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM ubuntu:noble\n")
+        self.assertEqual((plan.dev_container / "extra.sh").read_text(), "echo hi\n")
+        self.assertEqual(
+            (plan.dev_container / "dev-env.yaml").read_text(encoding="utf-8"), self.dev_env_yaml,
+        )
+
+    def test_not_exempt(self) -> None:
+        """Without an exemption, adopting changes nothing."""
+        suc = self.project_suc(self.accept())
+        work = self.tmp / "state" / "adopt"
+        work.mkdir(parents=True, mode=0o700)
+        now = datetime.datetime.now(datetime.UTC)
+        config = UserConfig(suc)
+        self.assertFalse(staging.adopt_accepted(config, work, generator.run, now))
+        self.assertEqual(config.raw(), suc)
+
+    @unittest.skipUnless(hasattr(os, "link"), "hard links")
+    def test_exempt_refused(self) -> None:
+        """Under an exemption, the setup's checks still refuse container files: a hard link here."""
+        config = self.exempt(self.accept())
+        os.link(self.files / "env" / "extra.sh", self.files / "env" / "linked.sh")
+        with self.assertRaisesRegex(staging.StagingErr, "has other hard links") as caught:
+            self.prepare(config.raw())
+        self.assertFalse(caught.exception.reverify)
+
+    def test_exempt_checks_refuse(self) -> None:
+        """Under an exemption, a refusal from the setup's `project-files` checks stops the run."""
+        config = self.exempt(self.accept())
+        refused = checks.Finding(checks.Severity.REFUSE, "env/extra.sh", "a secret")
+        with (
+            mock.patch.object(checks, "check_project_files", return_value=[refused]),
+            self.assertRaisesRegex(staging.StagingErr, "checks refuse them:\n  env/extra.sh: a secret"),
+        ):
+            self.prepare(config.raw())
 
     def test_expired(self) -> None:
         """An acceptance that has expired since: a new review."""
@@ -166,6 +238,62 @@ class PrepareTest(DistTest):
         assert plan is not None  # nosec: B101  # narrowing for the type checker
         self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM debian:trixie\n")
         self.assertEqual((self.files / "env" / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
+    def verified_parent(self) -> None:
+        """The project's container builds on `base`, one of the user's, which their setup verifies."""
+        (self.mine / "base").mkdir()
+        (self.mine / "base" / "Dockerfile").write_text("FROM debian:bookworm\n", encoding="utf-8")
+        (self.mine / "base" / "dev-env.yaml").write_text(self.dev_env_yaml, encoding="utf-8")
+        (self.files / "env" / "Dockerfile").write_text("FROM my-base\n", encoding="utf-8")
+        (self.files / "env" / "dev-env.yaml").write_text(
+            "parents:\n  - {name: base, tag: my-base}\n", encoding="utf-8",
+        )
+        setup = self.home / "setup.yaml"
+        setup.write_text(
+            setup.read_text(encoding="utf-8")
+            + f"  path-lists:\n    verified-containers:\n      - {json.dumps(str(self.mine))}\n",
+            encoding="utf-8",
+        )
+        # The later runs start from the first one's setup: make it again.
+        self.generate("--distribution-dir", str(self.dist), output=self.tmp / "first.json")
+
+    def test_verified_as_accepted(self) -> None:
+        """A `verification: verified-containers` container builds from the copy kept with the acceptance."""
+        self.verified_parent()
+        accepted = self.accept()
+        kept = json.loads((accepted.parent / "containers.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(kept["containers"]), [str(self.mine / "base")])
+        # It changes after the acceptance: the build still has what was accepted.
+        (self.mine / "base" / "Dockerfile").write_text("FROM evil\n", encoding="utf-8")
+        plan, build = self.prepare(self.project_suc(accepted))
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        [(tag, parent)] = plan.parents
+        self.assertEqual(tag, "my-base")
+        self.assertTrue(parent.is_relative_to(build))
+        self.assertEqual((parent / "Dockerfile").read_text(), "FROM debian:bookworm\n")
+
+    def test_verified_not_kept(self) -> None:
+        """An acceptance from before the containers were kept with it: a new review."""
+        self.verified_parent()
+        accepted = self.accept()
+        (accepted.parent / "containers.json").unlink()
+        with self.assertRaisesRegex(staging.StagingErr, "were kept with it") as caught:
+            self.prepare(self.project_suc(accepted))
+        self.assertTrue(caught.exception.reverify)
+
+    def test_user_container_images(self) -> None:
+        """`use: {name}` with an `images` mapping: built from a copy, rewritten; the user's own is left."""
+        (self.mine / "my-env").mkdir()
+        (self.mine / "my-env" / "Dockerfile").write_text("FROM debian:bookworm\n", encoding="utf-8")
+        (self.mine / "my-env" / "dev-env.yaml").write_text(self.dev_env_yaml, encoding="utf-8")
+        accepted = self.accept(lambda text: text.replace(
+            'use: "project"', 'use: {name: "my-env"}',
+        ).replace('"debian:bookworm": "debian:bookworm"', '"debian:bookworm": "debian:trixie"'))
+        plan, build = self.prepare(self.project_suc(accepted))
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        self.assertTrue(plan.dev_container.is_relative_to(build))
+        self.assertEqual((plan.dev_container / "Dockerfile").read_text(), "FROM debian:trixie\n")
+        self.assertEqual((self.mine / "my-env" / "Dockerfile").read_text(), "FROM debian:bookworm\n")
 
     def test_users_container(self) -> None:
         """`use: {name}`: the user's own container, where it is; the project's isn't built."""

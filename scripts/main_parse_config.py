@@ -15,7 +15,7 @@ def run_config_examine(config: UserConfig) -> int:
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     config, argv, parser = gen_parser(argv, (
-        "Fetch changes committed by the dev container to its local workspace."
+        "Parse the configuration and report issues."
     ))
     if not config:
         return BAD_EXECUTION_ARGS_CODE
@@ -41,6 +41,7 @@ def main(argv: Sequence[str]) -> int:
         )
 
     return run_config_examine(config)
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

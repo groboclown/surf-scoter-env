@@ -29,6 +29,7 @@ use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
 use crate::config::host_commands::{self, Combined};
+use crate::config::simple_checks::{EGRESS_HOSTS, PROJECT_FILES, SimpleCheck};
 use crate::config::system::{self, LoadedFrom, ScalarValue, SectionDefaults, SetupRecord};
 use crate::config::{ConfigError, ConfigErrors, FullConfig, child_key, index_key};
 
@@ -92,6 +93,12 @@ pub struct ActiveConfigLocations {
     /// The root of the repository holding the project (`--vcs-root`).
     #[serde(default)]
     pub vcs_root: Option<String>,
+    /// The project's id (`scoter:project-id`), worked out from its directory.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The project's branch, made safe as a path part (`scoter:project-branch`).
+    #[serde(default)]
+    pub project_branch: Option<String>,
     /// The project's dev container directory.
     #[serde(default)]
     pub dev_container_path: Option<String>,
@@ -135,6 +142,58 @@ pub struct UniversalSection {
     pub value_lists: BTreeMap<String, Option<Vec<String>>>,
     /// Plain values, by key.
     pub values: BTreeMap<String, ScalarValue>,
+    /// The `project-files` and `egress-hosts` checks, as written, by key.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_files: BTreeMap<String, SimpleCheck>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress_hosts: BTreeMap<String, SimpleCheck>,
+}
+
+/// The problems with the `project-files` and `egress-hosts` checks' overrides,
+/// which no one file can tell: each must name a check of the same group that
+/// is set, and that isn't an override itself.
+fn simple_check_problems(
+    system: &crate::config::system::SystemConfig,
+    resolved: &BTreeMap<String, UniversalSection>,
+) -> Vec<ConfigError> {
+    let mut errors = Vec::new();
+    for group in [PROJECT_FILES, EGRESS_HOSTS] {
+        let checks: BTreeMap<String, (&str, &str, &SimpleCheck)> = resolved
+            .iter()
+            .flat_map(|(name, section)| {
+                let checks = if group == EGRESS_HOSTS {
+                    &section.egress_hosts
+                } else {
+                    &section.project_files
+                };
+                checks.iter().map(move |(key, check)| {
+                    (
+                        format!("{name}:{key}"),
+                        (name.as_str(), key.as_str(), check),
+                    )
+                })
+            })
+            .collect();
+        for (name, key, check) in checks.values() {
+            for (i, target) in check.overrides.iter().enumerate() {
+                let problem = match checks.get(target) {
+                    None => Some(format!("`{target}` isn't one of the `{group}` checks set")),
+                    Some((_, _, overridden)) if !overridden.overrides.is_empty() => Some(format!(
+                        "`{target}` is an override itself; override the check it overrides"
+                    )),
+                    Some(_) => None,
+                };
+                if let Some(message) = problem {
+                    errors.push(ConfigError::new(
+                        system.check_file(name, group, key),
+                        &format!("{name}.{group}.{key}.overrides[{i}]"),
+                        message,
+                    ));
+                }
+            }
+        }
+    }
+    errors
 }
 
 /// Gather the universal configuration from a loaded configuration.
@@ -176,6 +235,8 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
                         path_lists,
                         value_lists: section.value_lists.clone(),
                         values: section.values.clone(),
+                        project_files: section.project_files.clone(),
+                        egress_hosts: section.egress_hosts.clone(),
                     },
                 );
                 sections.push(section);
@@ -186,6 +247,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     let host_command_checks = host_commands::combine(system, &sections)
         .map_err(|e| errors.extend(e))
         .unwrap_or_default();
+    errors.extend(simple_check_problems(system, &resolved));
 
     // Only the accepted commands run, as accepted: never the project file's.
     let host_brokered = config
@@ -212,6 +274,8 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             project_config: location(system::PROJECT_CONFIG),
             project_dir: location(system::PROJECT_DIR),
             vcs_root: location(system::VCS_ROOT),
+            project_id: location(system::PROJECT_ID),
+            project_branch: location(system::PROJECT_BRANCH),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
             dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
             dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
@@ -265,7 +329,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
 }
 
 /// The universal configuration as compact JSON, ending with a newline.
-/// (Compact, to stay well within `MAX_UNIVERSAL_FILE_SIZE`; a tool such as
+/// (Compact, to stay well within `MAX_UNIVERSAL_FILE_BYTES`; a tool such as
 /// `jq` lays it out for reading.)
 pub fn to_json(universal: &Universal) -> String {
     let mut text = serde_json::to_string(universal).expect("only JSON-ready values are stored");
@@ -490,6 +554,8 @@ mod tests {
                 path_lists: BTreeMap::new(),
                 value_lists: BTreeMap::new(),
                 values: BTreeMap::new(),
+                project_files: BTreeMap::new(),
+                egress_hosts: BTreeMap::new(),
             }
         };
         let ssh_config = p(&dir.path().join("proj/ssh/config"));
@@ -544,6 +610,12 @@ mod tests {
                                 "project-files-dir".to_string(),
                                 ScalarValue::String(".surf-scoter.d".to_string()),
                             ),
+                            (
+                                "project-id".to_string(),
+                                ScalarValue::String(crate::config::system::environment_id(
+                                    &dir.path().join("proj"),
+                                )),
+                            ),
                         ]),
                         ..section(
                             &[
@@ -590,11 +662,17 @@ mod tests {
         );
 
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
-        // The locations are also the `scoter` section's paths.
+        // The locations are also the `scoter` section's paths; the project's
+        // id and branch, its values (text, to build paths from).
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 11);
+        assert_eq!(active.len(), 13);
         for (key, value) in active {
-            let path = &json["resolved"]["scoter"]["paths"][key];
+            let group = if key == "project-id" || key == "project-branch" {
+                "values"
+            } else {
+                "paths"
+            };
+            let path = &json["resolved"]["scoter"][group][key];
             if value.is_null() {
                 assert!(path.is_null(), "{key}");
             } else {
@@ -804,7 +882,7 @@ mod tests {
                 "      command-map: {mytool: mytool, py: python3.12}\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, bash]}\n",
                 "    interpreters: {action: refuse, reason: interp, name-patterns: ['python*']}\n",
                 "    code-options: {action: warn, reason: opts, options: [-c]}\n",
@@ -820,11 +898,11 @@ mod tests {
         assert_eq!(
             checks.command_map,
             BTreeMap::from([
-                ("bash".to_string(), mapped(None, &["host-bridge:shells"])),
+                ("bash".to_string(), mapped(None, &["verification:shells"])),
                 ("docker".to_string(), mapped(p(&podman), &["docker:docker"])),
                 ("mytool".to_string(), mapped(p(&mytool), &["mine:tools"])),
                 ("py".to_string(), mapped(p(&python), &["mine:tools"])),
-                ("sh".to_string(), mapped(p(&sh), &["host-bridge:shells"])),
+                ("sh".to_string(), mapped(p(&sh), &["verification:shells"])),
             ])
         );
         let verdict = |action, checks: &[&str]| Verdict {
@@ -837,7 +915,7 @@ mod tests {
             BTreeMap::from([
                 (
                     "bash".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells"])
+                    verdict(Action::Refuse, &["verification:shells"])
                 ),
                 (
                     "docker".to_string(),
@@ -846,21 +924,21 @@ mod tests {
                 // The same file as `sh`.
                 (
                     "mytool".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:shells"])
                 ),
                 // By the base name of its executable.
                 (
                     "py".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:interpreters", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:interpreters"])
                 ),
                 // And the other way around.
                 (
                     "sh".to_string(),
-                    verdict(Action::Refuse, &["host-bridge:shells", "mine:tools"])
+                    verdict(Action::Refuse, &["mine:tools", "verification:shells"])
                 ),
             ])
         );
-        let shims = &checks.checks["host-bridge:shims"];
+        let shims = &checks.checks["verification:shims"];
         assert_eq!(
             shims.paths,
             [dir.path().join("dist/shims").display().to_string()]
@@ -869,7 +947,7 @@ mod tests {
             shims.files,
             [dir.path().join("dist/setup.yaml").display().to_string()]
         );
-        assert_eq!(checks.checks["host-bridge:code-options"].options, ["-c"]);
+        assert_eq!(checks.checks["verification:code-options"].options, ["-c"]);
         assert!(checks.notices.is_empty(), "{:?}", checks.notices);
     }
 
@@ -887,11 +965,11 @@ mod tests {
         let checks = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n    ksh-ok:\n      action: allow\n      reason: mine\n",
-                "      commands: [ksh, zsh]\n      overrides: ['host-bridge:shells', 'host-bridge:gone']\n",
+                "verification:\n  host-commands:\n    ksh-ok:\n      action: allow\n      reason: mine\n",
+                "      commands: [ksh, zsh]\n      overrides: ['verification:shells', 'verification:gone']\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, ksh]}\n",
                 "    korn: {action: warn, reason: korn, commands: [ksh]}\n",
             ),
@@ -901,12 +979,15 @@ mod tests {
         // the override takes `shells`' place, and `korn` still applies.
         let ksh = &checks.commands["ksh"];
         assert_eq!(ksh.action, Action::Warn);
-        assert_eq!(ksh.checks, ids(&["host-bridge:korn", "host-bridge:ksh-ok"]));
+        assert_eq!(
+            ksh.checks,
+            ids(&["verification:korn", "verification:ksh-ok"])
+        );
         assert_eq!(
             ksh.overridden,
             [Overridden {
-                check: "host-bridge:shells".to_string(),
-                by: "host-bridge:ksh-ok".to_string()
+                check: "verification:shells".to_string(),
+                by: "verification:ksh-ok".to_string()
             }]
         );
         assert_eq!(checks.commands["sh"].action, Action::Refuse);
@@ -916,8 +997,8 @@ mod tests {
         assert_eq!(
             messages(&checks.notices),
             [
-                "`host-bridge:ksh-ok` overrides `host-bridge:shells` for the command `zsh`, which `host-bridge:shells` doesn't match; the override does nothing for it",
-                "`host-bridge:ksh-ok` overrides `host-bridge:gone`, which isn't set; the override does nothing",
+                "`verification:ksh-ok` overrides `verification:shells` for the command `zsh`, which `verification:shells` doesn't match; the override does nothing for it",
+                "`verification:ksh-ok` overrides `verification:gone`, which isn't set; the override does nothing",
             ]
         );
         let user = dir.path().join("home/setup.yaml").display().to_string();
@@ -978,13 +1059,13 @@ mod tests {
         let errors = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n    shells: {action: refuse, reason: r, commands: [sh]}\n",
+                "verification:\n  host-commands:\n    shells: {action: refuse, reason: r, commands: [sh]}\n",
                 "a:\n  host-commands:\n    one: {action: warn, reason: r, command-map: {docker: podman}}\n",
                 "c:\n  host-commands:\n    x: {action: warn, reason: r, commands: [sh], overrides: ['c:x']}\n",
             ),
             concat!(
                 "b:\n  host-commands:\n    two: {action: warn, reason: r, command-map: {docker: sh}}\n",
-                "    relax: {action: allow, reason: r, commands: [sh], overrides: ['host-bridge:shells']}\n",
+                "    relax: {action: allow, reason: r, commands: [sh], overrides: ['verification:shells']}\n",
             ),
         )
         .unwrap_err();
@@ -997,7 +1078,7 @@ mod tests {
                     podman.display()
                 ),
                 format!(
-                    "b.host-commands.relax: overrides `host-bridge:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
+                    "b.host-commands.relax: overrides `verification:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
                     dir.path().join("home/setup.yaml").display()
                 ),
                 "c.host-commands.x: can't override itself".to_string(),
@@ -1007,7 +1088,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_command_program_in_the_project() {
+    fn host_program_in_project() {
         let dir = TempDir::new();
         let tool_path = tool(&dir, "proj/tool");
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
@@ -1035,13 +1116,13 @@ mod tests {
         let checks = combined(
             &dir,
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: warn, reason: mine, commands: [sh]}\n",
                 "    runners: null\n",
                 "    same: {action: refuse, reason: mine, commands: [x, y]}\n",
             ),
             concat!(
-                "host-bridge:\n  host-commands:\n",
+                "verification:\n  host-commands:\n",
                 "    shells: {action: refuse, reason: shell, commands: [sh, ksh, nu]}\n",
                 "    runners: {action: refuse, reason: run, commands: [env]}\n",
                 "    same: {action: warn, reason: theirs, commands: [x]}\n",
@@ -1054,13 +1135,13 @@ mod tests {
             messages(&checks.notices),
             [
                 format!(
-                    "{user} removes `host-bridge:runners`, so {dist}'s check no longer applies, nor will what it adds later"
+                    "{user} removes `verification:runners`, so {dist}'s check no longer applies, nor will what it adds later"
                 ),
                 format!(
-                    "{user} replaces `host-bridge:shells` from {dist} without its commands `ksh`, `nu`; what {dist} adds to it later won't apply (`overrides` relaxes a check without replacing it)"
+                    "{user} replaces `verification:shells` from {dist} without its commands `ksh`, `nu`; what {dist} adds to it later won't apply (`overrides` relaxes a check without replacing it)"
                 ),
                 format!(
-                    "{user} replaces `host-bridge:shells` from {dist} with `warn` in place of `refuse`"
+                    "{user} replaces `verification:shells` from {dist} with `warn` in place of `refuse`"
                 ),
             ]
         );
@@ -1085,16 +1166,16 @@ mod tests {
         );
         // The check in effect is the user's; the distribution's is hidden.
         assert_eq!(
-            checks.checks["host-bridge:shells"].files,
+            checks.checks["verification:shells"].files,
             [user.clone(), dist.clone()]
         );
-        assert!(!checks.checks.contains_key("host-bridge:runners"));
-        assert_eq!(checks.checks["host-bridge:same"].reason, "mine");
+        assert!(!checks.checks.contains_key("verification:runners"));
+        assert_eq!(checks.checks["verification:same"].reason, "mine");
     }
 
     #[cfg(unix)]
     #[test]
-    fn host_command_checks_survive_the_universal_file() {
+    fn host_checks_survive_universal() {
         let dir = TempDir::new();
         tool(&dir, "bin/sh");
         let config = load_setups(
@@ -1119,7 +1200,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_empty_without_accepted_settings() {
+    fn no_accepted_no_host_brokered() {
         let dir = TempDir::new();
         tool(&dir, "bin/aws");
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
@@ -1141,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn egress_wildcards_refused_by_the_setup() {
+    fn setup_refuses_egress_wildcard() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
         dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
@@ -1151,7 +1232,7 @@ mod tests {
         );
         dir.write(
             "home/setup.yaml",
-            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
         );
         let options = LoadOptions {
             project_dir: Some(dir.path().join("proj")),
@@ -1161,13 +1242,70 @@ mod tests {
             scoter_home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        let errors = error_texts(load_all_with_env(&options, env).unwrap_err());
+        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
         assert_eq!(
             errors,
             [
-                "egress[0].host: '*.github.io' would allow every name under `github.io`, where anyone can have one (your setup's `scoter: value-lists: egress-refused-wildcards`)"
+                "egress[0].host: '*.github.io' would allow every name under `github.io`, where anyone can have one (your setup's `verification: value-lists: egress-refused-wildcards`)"
             ]
         );
+
+        // The Public Suffix List files the setup names: a wildcard on a public
+        // suffix is refused, but not on an exception to a wildcard rule.
+        dir.write("psl.dat", "// A sample.\nexample.com\n*.ck\n!www.ck\n");
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\negress:\n  - {host: '*.example.com', protocol: tls}\n  - {host: '*.a.ck', protocol: tls}\n  - {host: '*.www.ck', protocol: tls}\n",
+        );
+        let with_list = |list: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!(
+                    "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  path-lists:\n    public-suffix-lists: ['{list}']\n"
+                ),
+            );
+            load_all_with_env(&options, env.clone())
+        };
+        let psl = dir.path().join("psl.dat").display().to_string();
+        assert_eq!(
+            error_texts(with_list(&psl).unwrap_err()),
+            [
+                "egress[0].host: '*.example.com' would allow every name under `example.com`, where anyone can have one (a public suffix, in your setup's `verification: path-lists: public-suffix-lists`)",
+                "egress[1].host: '*.a.ck' would allow every name under `a.ck`, where anyone can have one (a public suffix, in your setup's `verification: path-lists: public-suffix-lists`)",
+            ]
+        );
+        // A file that isn't there is an error, not a list with nothing in it.
+        let errors = error_texts(with_list("/no/such/psl.dat").unwrap_err());
+        assert!(
+            errors[0].contains("https://publicsuffix.org/list/public_suffix_list.dat"),
+            "{errors:?}"
+        );
+
+        // A wildcard typed in the review is refused the same way.
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        let review = dir.write(
+            "review.yaml",
+            &format!(
+                "review: \"surf-scoter-review-1\"\nproject-dir: \"{}\"\nexpires-at: \"2999-01-01T00:00:00Z\"\negress:\n  - {{host: \"*.example.com\", protocol: \"tls\"}}\n",
+                dir.path().join("proj").display()
+            ),
+        );
+        let reviewed = LoadOptions {
+            review: Some(review),
+            ..options.clone()
+        };
+        dir.write(
+            "home/setup.yaml",
+            &format!("scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  path-lists:\n    public-suffix-lists: ['{psl}']\n"),
+        );
+        let errors = error_texts(load_all_with_env(&reviewed, env).unwrap_err());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with(
+            "egress[0].host: '*.example.com' would allow every name under `example.com`"
+        ));
     }
 
     // ---- accepted settings ----
@@ -1191,7 +1329,7 @@ mod tests {
         dir.write(
             "home/setup.yaml",
             &format!(
-                "scoter:\n  paths:\n    verified-dir: {}\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+                "verification:\n  paths:\n    store: {}\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
                 verified.display()
             ),
         );
@@ -1224,7 +1362,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_from_accepted_settings() {
+    fn host_brokered_from_accepted() {
         let dir = TempDir::new();
         let aws = tool(&dir, "bin/aws");
         let (options, env, accepted) =
@@ -1255,7 +1393,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_checked_against_the_run() {
+    fn accepted_checked_against_run() {
         let dir = TempDir::new();
         let in_project = tool(&dir, "proj/tool");
         let (options, env, _) = accepted_project(
@@ -1321,7 +1459,7 @@ mod tests {
         let setup = std::fs::read_to_string(dir.path().join("home/setup.yaml")).unwrap();
         dir.write(
             "home/setup.yaml",
-            &format!("{setup}network-gateway:\n  values:\n    name: squid\n"),
+            &format!("{setup}dev-env:\n  values:\n    network-gateway-name: squid\n"),
         );
         assert!(load_all_with_env(&options, env).is_ok());
     }
@@ -1395,10 +1533,167 @@ mod tests {
         );
     }
 
+    // ---- project-files and egress-hosts checks ----
+
+    #[test]
+    fn simple_checks() {
+        let dir = TempDir::new();
+        dir.write(
+            "dist/setup.yaml",
+            concat!(
+                "verification:\n",
+                "  project-files:\n",
+                "    secrets: {action: warn, reason: secrets, patterns: [.env, .aws/]}\n",
+                "    keys: {action: refuse, reason: keys, patterns: ['*.pem']}\n",
+                "  egress-hosts:\n",
+                "    code-hosts: {action: warn, reason: uploads, hosts: [github.com, '*.githubusercontent.com']}\n",
+            ),
+        );
+        let load = |user: &str| {
+            dir.write("home/setup.yaml", user);
+            let options = LoadOptions {
+                distribution_dir: Some(dir.path().join("dist")),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_all_with_env(&options, env).and_then(|config| build(&config))
+        };
+        // The user's file replaces one, removes another, and relaxes a third for one host.
+        let universal = load(concat!(
+            "verification:\n",
+            "  project-files:\n",
+            "    secrets: {action: refuse, reason: mine, patterns: [.env]}\n",
+            "    keys: null\n",
+            "  egress-hosts:\n",
+            "    our-git: {action: allow, reason: ours, hosts: [github.com], overrides: ['verification:code-hosts']}\n",
+        ))
+        .unwrap();
+        let section = &universal.resolved["verification"];
+        assert_eq!(
+            section.project_files.keys().collect::<Vec<_>>(),
+            ["secrets"]
+        );
+        assert_eq!(section.project_files["secrets"].patterns, [".env"]);
+        assert_eq!(
+            section.egress_hosts.keys().collect::<Vec<_>>(),
+            ["code-hosts", "our-git"]
+        );
+        let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
+        assert_eq!(
+            json["resolved"]["verification"]["egress-hosts"]["our-git"]["overrides"][0],
+            "verification:code-hosts"
+        );
+        // Other sections have none, and the file says nothing of them.
+        assert!(json["resolved"]["scoter"].get("project-files").is_none());
+        // Overrides must name a check of the same group that's set, and not an override.
+        let errors = error_texts(
+            load(concat!(
+                "verification:\n",
+                "  egress-hosts:\n",
+                "    a: {action: allow, reason: r, hosts: [x.example.com], overrides: ['verification:secrets']}\n",
+                "    b: {action: allow, reason: r, hosts: [github.com], overrides: ['verification:code-hosts']}\n",
+                "    c: {action: allow, reason: r, hosts: [github.com], overrides: ['verification:b']}\n",
+            ))
+            .unwrap_err(),
+        );
+        assert_eq!(
+            errors,
+            [
+                "verification.egress-hosts.a.overrides[0]: `verification:secrets` isn't one of the `egress-hosts` checks set",
+                "verification.egress-hosts.c.overrides[0]: `verification:b` is an override itself; override the check it overrides",
+            ]
+        );
+        // A reference to one is an error.
+        assert!(load("other:\n  values:\n    x: ${verification:code-hosts}\n").is_err());
+    }
+
+    // ---- the project's id and branch ----
+
+    #[test]
+    fn project_id_and_branch() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nworkspace:\n  paths:\n    per-branch: /w/${scoter:project-id}/${scoter:project-branch}\n",
+        );
+        let env = || Env {
+            scoter_home: Some(dir.path().join("home")),
+            ..Env::default()
+        };
+        let options = LoadOptions {
+            project_dir: Some(dir.path().join("proj")),
+            project_branch: Some("feature/../x".to_string()),
+            ..LoadOptions::default()
+        };
+        let universal = build(&load_all_with_env(&options, env()).unwrap()).unwrap();
+        let id = crate::config::system::environment_id(&dir.path().join("proj"));
+        let active = &universal.active_config_locations;
+        assert_eq!(active.project_id.as_deref(), Some(id.as_str()));
+        assert_eq!(active.project_branch.as_deref(), Some("feature-..-x"));
+        assert_eq!(
+            universal.resolved["workspace"].paths["per-branch"],
+            Some(format!("/w/{id}/feature-..-x"))
+        );
+        // Carried over by a later run from the universal file.
+        let first = dir.write("first.json", &to_json(&universal));
+        let again = LoadOptions {
+            universal: Some(first),
+            no_setup_search: true,
+            ..LoadOptions::default()
+        };
+        let carried = build(&load_all_with_env(&again, env()).unwrap()).unwrap();
+        assert_eq!(
+            carried.active_config_locations.project_branch.as_deref(),
+            Some("feature-..-x")
+        );
+        assert_eq!(
+            carried.active_config_locations.project_id.as_deref(),
+            Some(id.as_str())
+        );
+        // With the same project given again too (a review's runs do); not
+        // with another.
+        let same = LoadOptions {
+            project_dir: Some(dir.path().join("proj")),
+            ..again.clone()
+        };
+        let carried = build(&load_all_with_env(&same, env()).unwrap()).unwrap();
+        assert_eq!(
+            carried.active_config_locations.project_branch.as_deref(),
+            Some("feature-..-x")
+        );
+        dir.write("other/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("other/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "other/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\n",
+        );
+        let other = LoadOptions {
+            project_dir: Some(dir.path().join("other")),
+            ..again.clone()
+        };
+        let carried = build(&load_all_with_env(&other, env()).unwrap()).unwrap();
+        assert_eq!(carried.active_config_locations.project_branch, None);
+        // The setup can't set them.
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n    project-id: mine\n",
+        );
+        assert!(load_all_with_env(&options, env()).is_err());
+    }
+
     // ---- review files ----
 
     #[test]
-    fn review_into_the_universal_file() {
+    fn review_into_universal_file() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
         dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
@@ -1411,7 +1706,7 @@ mod tests {
         dir.write(
             "home/setup.yaml",
             &format!(
-                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\nnetwork-gateway:\n  values:\n    name: squid\n",
+                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\ndev-env:\n  values:\n    network-gateway-name: squid\n",
                 dir.path().join("mine").display()
             ),
         );
@@ -1499,7 +1794,7 @@ mod tests {
                 "expires-at: \"2000-01-01T00:00:00Z\"\n",
                 "$comment: \"for the release\"\n",
                 "egress:\n  - {host: \"github.com\", protocol: \"tls\", $comment: \"read only\"}\n",
-                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"host-bridge:shells\"]}\n",
+                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"verification:shells\"]}\n",
             ),
         );
         let load_with = |file: &Path| {
@@ -1520,7 +1815,7 @@ mod tests {
         let data = &section["data"];
         assert_eq!(data["$comment"], "for the release");
         assert_eq!(data["egress"][0]["$comment"], "read only");
-        assert_eq!(data["commands"][0]["$override"][0], "host-bridge:shells");
+        assert_eq!(data["commands"][0]["$override"][0], "verification:shells");
         // Nothing is accepted from it.
         assert!(universal.review.is_none());
         assert!(universal.host_brokered.is_empty());
@@ -1593,7 +1888,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_use_the_users_container() {
+    fn accepted_users_container() {
         let dir = TempDir::new();
         let config =
             accepted_container(&dir, r#"{"use": {"name": "my-env"}, "images": {}}"#).unwrap();
@@ -1619,7 +1914,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_use_the_projects_container() {
+    fn accepted_projects_container() {
         let dir = TempDir::new();
         let config = accepted_container(&dir, r#"{"use": "project", "images": {}}"#).unwrap();
         let universal = build(&config).unwrap();
@@ -1636,7 +1931,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_container_only_outside_the_project() {
+    fn accepted_users_not_in_project() {
         let dir = TempDir::new();
         // `env` is only in the project: not one of the user's.
         let errors = error_texts(

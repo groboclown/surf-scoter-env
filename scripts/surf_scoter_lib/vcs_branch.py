@@ -10,22 +10,28 @@ import os
 import stat
 from pathlib import Path
 
-MAX_SIZE = 4096
+from . import fileutil
+
+MAX_FILE_BYTES = 4096
+# A commit id's length in hex digits: SHA-1, and SHA-256.
+COMMIT_ID_CHARS = (40, 64)
+# How much of a detached commit's id to show.
+SHORT_COMMIT_CHARS = 12
 
 
 def _read_small(path: Path) -> str | None:
     """A small regular file's text, not following a symlink; None if it isn't one."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, os.O_RDONLY | fileutil.O_NOFOLLOW | fileutil.O_NONBLOCK)
     except OSError:
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        data = os.read(fd, MAX_SIZE + 1)
+        data = os.read(fd, MAX_FILE_BYTES + 1)
     finally:
         os.close(fd)
-    if len(data) > MAX_SIZE:
+    if len(data) > MAX_FILE_BYTES:
         return None
     try:
         return data.decode("utf-8")
@@ -57,6 +63,6 @@ def current_branch(root: Path) -> str | None:
     if head.startswith("ref: "):
         ref = head[len("ref: "):]
         return ref.removeprefix("refs/heads/")
-    if len(head) in (40, 64) and all(c in "0123456789abcdef" for c in head):
-        return f"detached at {head[:12]}"
+    if len(head) in COMMIT_ID_CHARS and all(c in "0123456789abcdef" for c in head):
+        return f"detached at {head[:SHORT_COMMIT_CHARS]}"
     return None

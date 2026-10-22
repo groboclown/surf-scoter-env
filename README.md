@@ -96,11 +96,13 @@ This will process the project files and start up containers.  It will report the
 
 If you want to set up your project to define a Surf Scoter development environment, then [the fine documentation can help](docs/new-project-setup.md).
 
+When a run ends, it stops its containers, but keeps the project's workspace for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
+
 ## Connecting to a Developer Environment
 
 The following commands assume you use `podman`.  If you use `docker`, then switch the command execution to instead be `docker`.
 
-When you launch the environment, scoter will tell you the container's hostname.  You use this as the connection ID.
+When you launch the environment, scoter will tell you the container's hostname: `scoter-` and the project's id, such as `scoter-my-project-c593c7ec2d55`.  You use this as the connection ID.  Each running environment has its own entry in your `~/.ssh/config`; when it stops, scoter asks whether to remove it (see `ssh: values: config-cleanup` in [the setup file's documentation](docs/system-config-file.md)).
 
 ### Direct connect to the container
 
@@ -140,8 +142,8 @@ In order to make the IDE then perform its work in the sandbox, rather than conti
 
 Once you have the developer environment running, you can then:
 
-1. Run the pallette command `Remote-SSH: Add new SSH Host...`.  This should read your `~/.ssh/config` file to show you the hosts (see bug #12).
-2. Run the pallette command `Remote-SSH: Connect to Host...`.  This will present a drop-down containing the newly added host.
+1. Run the palette command `Remote-SSH: Connect to Host...`.  It lists the hosts in your `~/.ssh/config`, where each running environment has its own entry, named after its project (such as `scoter-my-project-c593c7ec2d55`).
+2. Choose the environment's host.
 
 Some things to keep in mind:
 

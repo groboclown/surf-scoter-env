@@ -13,29 +13,29 @@ So, here's the steps to get it working.  First off, we need some of your Windows
 * Your WSL2 distribution is named `wsl-ubuntu`.  That means you can launch a new session in that environment with `C:\Windows\System32\wsl.exe -d wsl-ubuntu`.
 * You run containers in your WSL2 session using docker, found under `/usr/sbin/docker`.
 
-If you look at your WSL2 session, at your `~/.ssh/config` file, it tells you the port number for the `scoter` setup, as well as the container's username and the SSH key location:
+When `scoter run` starts, it tells you the environment's host name: `scoter-` and the project's id, such as `scoter-my-project-c593c7ec2d55`.  If you look at your WSL2 session, at your `~/.ssh/config` file, the environment's entry tells you its port number, the container's username and the SSH key location:
 
 ```shell
-$ grep -A 8 "Host scoter-" ~/.ssh/config
-Host scoter-ubuntu-20000-*
-  # For Surf Scoter dev container user ubuntu on port 20000
+$ grep -A 8 "Host scoter-my-project-c593c7ec2d55" ~/.ssh/config
+Host scoter-my-project-c593c7ec2d55
+  # Surf Scoter environment; see `ssh: values: config-cleanup`.
   User ubuntu
-  IdentityFile ~/.ssh/scoter-dev-container
+  IdentityFile /home/jane/.ssh/scoter-dev-container
   IdentitiesOnly yes
   StrictHostKeyChecking yes
-  ProxyCommand docker exec -i %h socat STDIO 'TCP:127.0.0.1:20000'
+  ProxyCommand docker exec -i %h socat STDIO TCP:127.0.0.1:20000
 ```
 
-This tells us it's running user `ubuntu` on port `20000`, and the private SSH key is at `~/.ssh/scoter-dev-container`.
+This tells us it's running user `ubuntu` on port `20000`, and the private SSH key is at `~/.ssh/scoter-dev-container`.  The port can change from run to run, if another environment is running.
 
 You can also find the host fingerprint for that session by looking in your `~/.ssh/known_hosts` file:
 
 ```shell
-grep -E "^scoter-ubuntu-20000-" ~/.ssh/known_hosts
-scoter-ubuntu-20000-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxnu2CtdL0PdsqsgQSfQuxO0drqIhP0ZM73PQUxP0Xc
+grep -E "^scoter-my-project-c593c7ec2d55 " ~/.ssh/known_hosts
+scoter-my-project-c593c7ec2d55 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxnu2CtdL0PdsqsgQSfQuxO0drqIhP0ZM73PQUxP0Xc
 ```
 
-This tells us that it's running as host `scoter-ubuntu-20000-a`.
+The host key stays the same from run to run of the project: it's kept with the project's workspace.
 
 We now have all the pieces necessary to get started.
 
@@ -44,7 +44,7 @@ We now have all the pieces necessary to get started.
 Modify your `C:\Users\jane\.ssh\config` file:
 
 ```
-Host scoter-ubuntu-20000-a
+Host scoter-my-project-c593c7ec2d55
   User ubuntu
   IdentityFile ~/.ssh/scoter-dev-container
   IdentitiesOnly yes
@@ -54,10 +54,9 @@ Host scoter-ubuntu-20000-a
 
 Let's take that line by line.
 
-- `Host scoter-ubuntu-20000-a`
+- `Host scoter-my-project-c593c7ec2d55`
     - Declares the host block.
-    - Taken from the hostname pulled out of `known_hosts`.
-    - Normally, `scoter` will use a `-*` at the end.  Programs like VS Code will use this file to pre-load host names, so replacing the `-*` with the real suffix makes those tools work easier.  You can keep the `-*`, though, if you prefer.
+    - The environment's host name, the same as in WSL2.  Programs like VS Code use this file to offer host names.
 - `User ubuntu`
     - Declares the username SSH will use to connect to this host.
     - Copied directly from the WSL2 `config` file.
@@ -80,7 +79,7 @@ The Windows side needs the exact same line in the `C:\Users\jane\.ssh\known_host
 If you want a short-cut, then, from your WSL2 session:
 
 ```shell
-grep -E "^scoter-ubuntu-20000-a" ~/.ssh/known_hosts > /mnt/c/Users/jane/.ssh/known_hosts
+grep -E "^scoter-my-project-c593c7ec2d55 " ~/.ssh/known_hosts >> /mnt/c/Users/jane/.ssh/known_hosts
 ```
 
 You might not have your Windows drive mounted in your WSL2 session, in which case you need to hand-copy that file (`/mnt/c` is where WSL2 mounts your Windows `C:` drive if you have it enabled).

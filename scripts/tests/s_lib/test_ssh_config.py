@@ -89,7 +89,7 @@ class SshConfigTest(unittest.TestCase):
         config.add_key_value("new", "SomeKey", "tuna")
         self.assertEqual(src + "Host new\n  SomeKey tuna\n", config.output())
 
-    def test_output_two_host_introduce_first(self) -> None:
+    def test_output_two_hosts_first(self) -> None:
         """Test a file with two host value, inserting a new line in the first one."""
         self.maxDiff = None
         # Note: no trailing EOL.
@@ -100,3 +100,28 @@ class SshConfigTest(unittest.TestCase):
             "host abc\n  k1 v1\n  # Add a comment\nhost def\n  k2 v2\n",
             config.output(),
         )
+
+
+class RemoveHostTest(unittest.TestCase):
+    """Removing a host block."""
+
+    def test_keeps_next_comments(self) -> None:
+        """The block goes, with its blank lines; comments after its settings stay, with the block before."""
+        config = ssh_config.SshConfig.parse_file(
+            "# Top.\n"
+            "Host a\n  User me\n\n"
+            "Host gone\n  # Surf Scoter environment\n  User x\n\n# About b.\n"
+            "Host b\n  User you\n"
+        )
+        config.remove_host("gone")
+        config.remove_host("never-there")
+        self.assertEqual(
+            config.output(),
+            "# Top.\nHost a\n  User me\n\n# About b.\nHost b\n  User you\n",
+        )
+
+    def test_first_block(self) -> None:
+        """The first block's trailing lines go before the next block."""
+        config = ssh_config.SshConfig.parse_file("Host gone\n  User x\n\n# Kept.\nHost b\n  User you\n")
+        config.remove_host("gone")
+        self.assertEqual(config.output(), "# Kept.\nHost b\n  User you\n")

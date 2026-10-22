@@ -32,7 +32,7 @@ The weak points of [file access](files.md): how code in the development containe
 | [FILE-6](#file-6-the-workspace-and-setup-separation) | The workspace and setup separation | High | Mitigated |
 | [FILE-7](#file-7-world-writable-setup-files) | World-writable setup files | Medium | Open |
 | [FILE-8](#file-8-everything-readable-in-the-container-is-exposed) | Everything readable in the container is exposed | Medium | By design |
-| [FILE-9](#file-9-the-workspace-inside-the-project-directory) | The workspace inside the project directory | Low | By design |
+| [FILE-9](#file-9-the-workspace-inside-the-project-directory) | The workspace inside the project directory | Low | Mitigated by default |
 
 Related vectors elsewhere: crafted mount points ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)), and permission bits left on workspace files ([DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker), [DEV-7](dev-container-attack-vectors.md#dev-7-setuid-files-that-run-as-the-developer), [DEV-10](dev-container-attack-vectors.md#dev-10-loosened-permissions-on-workspace-files)).
 
@@ -53,7 +53,7 @@ When the workspace already exists, `scoter run` (unless given `--no-workspace-fe
 ### FILE-2: Object files shared with the project repository
 
 **Severity:** High.  **Status:** Mitigated, for workspaces created after the fix.
-**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in [`run-container.sh`](../../run-container.sh).
+**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py).
 
 By default, `git clone` of a local path hard-links the object files when it can, and the workspace sits on the same file system as the project.  The project and the workspace then share each object file's inode, owned by the developer.  With `keep-id`, the container runs as that owner, so it can make an object file writable and replace its contents.  The developer's real repository then returns the attacker's content under the original, already-reviewed hash.
 
@@ -138,14 +138,14 @@ Isolation limits where data can go, not what the container can read.  Committed 
 
 ### FILE-9: The workspace inside the project directory
 
-**Severity:** Low.  **Status:** By design.
+**Severity:** Low.  **Status:** Mitigated by default.
 **Where:** `workspace: paths` in [`setup.yaml`](../../defaults/setup.yaml).
 
-`.dev-env/` is under the project directory, so host tools that walk the project tree (search indexers, test runners, language servers, backup tools) may find the workspace too.  `scoter` adds the workspace to `.dev-env/.gitignore`, but other tools have their own rules.
+The workspace used to be under the project directory (`.dev-env/`), so host tools that walk the project tree (search indexers, test runners, language servers, backup tools) could find it too.  Its default is now outside the project: `${scoter:state-dir}/workspaces/${scoter:project-id}`.  A setup that moves it back inside the project has the risk again; `scoter run` then adds the directories to the project's ignore file (`ignore-file`), but other tools have their own rules.
 
-**Red team:** list the host tools that descend into `.dev-env/workspace` from the project directory, and what each reads there.
+**Red team:** with the workspace configured inside the project, list the host tools that descend into it from the project directory, and what each reads there.
 
-**When changing this code:** moving the workspace out of the project directory would also put the workspace on a different file system from the project, ruling out FILE-2 entirely.
+**When changing this code:** the default `state-dir` is in your home directory, often on the same file system as the project, so the workspace's clone still needs `--no-local` (FILE-2).
 
 
 ## Sensitive code

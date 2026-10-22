@@ -15,6 +15,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import gateway_squid
+from surf_scoter_lib import fileutil
 
 SCRIPT = SCRIPTS / "gateway_squid.py"
 
@@ -50,12 +51,15 @@ class TranslateTest(unittest.TestCase):
         exact = re.compile(gateway_squid.pattern("registry.npmjs.org"))
         self.assertTrue(exact.search("registry.npmjs.org"))
         for other in ("x.registry.npmjs.org", "registryXnpmjs.org", "registry.npmjs.org.evil.com"):
-            self.assertIsNone(exact.search(other), other)
+            with self.subTest(other=other):
+                self.assertIsNone(exact.search(other), other)
         wild = re.compile(gateway_squid.pattern("*.pkg.dev"))
         for match in ("us.pkg.dev", "a.b.pkg.dev"):
-            self.assertTrue(wild.search(match), match)
+            with self.subTest(match=match):
+                self.assertTrue(wild.search(match), match)
         for other in ("pkg.dev", "evilpkg.dev", "pkg.dev.evil.com", "us.pkgXdev"):
-            self.assertIsNone(wild.search(other), other)
+            with self.subTest(other=other):
+                self.assertIsNone(wild.search(other), other)
 
     def test_nothing_accepted(self) -> None:
         """No rules, no hosts: nothing gets out."""
@@ -86,7 +90,7 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["refused"], [])
         self.assertIn("^a\\.example\\.com$", output.read_text(encoding="utf-8"))
-        if sys.platform != "win32":
+        if not fileutil.is_windows():
             self.assertEqual(os.stat(output).st_mode & 0o777, 0o644)
 
     def test_refuses(self) -> None:

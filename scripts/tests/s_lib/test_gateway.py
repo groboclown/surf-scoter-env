@@ -39,7 +39,7 @@ class RulesFromTest(unittest.TestCase):
             _rule("a.example.com", port=True),
             _rule("a.example.com", protocol="http", methods=["get"]),
         ):
-            with self.assertRaises(gateway.RuleErr, msg=str(bad)):
+            with self.subTest(bad=bad), self.assertRaises(gateway.RuleErr, msg=str(bad)):
                 gateway.rules_from(UserConfig({"egress": {"rules": [bad]}}))
         with self.assertRaises(gateway.RuleErr):
             gateway.rules_from(UserConfig({"egress": {"rules": "x"}}))

@@ -5,14 +5,18 @@ An acceptance records what the user accepted, and what it holds for:
 
 * `suggestion`: the manifest of the project's files it was reviewed from;
 * `setup`: the setup values it was reviewed under (see `setup_values`);
-* its window: when it was accepted, when it expires, and any exemption.
+* its window: when it was accepted, and when it expires.
 
 A run looks for an acceptance with the same `setup` id whose `suggestion`
 matches the project's files now: exactly, or on meaning (the same but for
-comments and the like), which carries it forward.  A `blanket` acceptance
-has no suggestion and matches any.
+comments and the like), which carries it forward.  Failing those, an
+exemption the user started (`scoter exempt`) on the environment
+holds for its branch: the run then uses the exemption's acceptance, with
+the container files as they are.
 
-See docs/contributors/projects-v1.md, step 5.
+An environment keeps one acceptance per branch (`branch`, None without
+one): a new one replaces the branch's last, which is what the next review
+compares with, so nothing piles up.
 """
 import datetime
 import secrets
@@ -28,6 +32,8 @@ from .store import VerifiedStore, json_id
 ENVIRONMENT_SCHEMA = "surf-scoter-verified-environment-1"
 ENVIRONMENT_FILE = "environment.json"
 ACCEPTANCES_DIR = "acceptances"
+# The random part of an acceptance id, in bytes (twice as many hex digits).
+ACCEPTANCE_ID_RANDOM_BYTES = 4
 
 
 class Kind(StrEnum):
@@ -37,8 +43,9 @@ class Kind(StrEnum):
     REVIEWED = "reviewed"
     # An earlier acceptance, for files that differ from it only in noise.
     CARRIED = "carried"
-    # The user accepts the project whatever its files say.
-    BLANKET = "blanket"
+    # The project's suggestion, accepted as it stood, unreviewed, under an
+    # exemption (`scoter verify --with-exemption`).
+    EXEMPTED = "exempted"
 
 
 class Validity(StrEnum):
@@ -46,8 +53,6 @@ class Validity(StrEnum):
 
     VALID = "valid"
     EXPIRED = "expired"
-    # Exempted from its checks until a later time (step 20).
-    EXEMPT = "exempt"
     # The window itself is wrong: it starts in the future, say.
     INVALID = "invalid"
 
@@ -102,9 +107,8 @@ class Acceptance:
     accepted_at: datetime.datetime
     expires_at: datetime.datetime
     setup: SetupRecord
-    suggestion: Manifest | None
+    suggestion: Manifest
     from_id: str | None = None
-    exempt_until: datetime.datetime | None = None
     branch: str | None = None
 
     def validity(self, now: datetime.datetime) -> Validity:
@@ -113,13 +117,11 @@ class Acceptance:
             return Validity.INVALID
         if self.expires_at <= now:
             return Validity.EXPIRED
-        if self.exempt_until is not None and now < self.exempt_until:
-            return Validity.EXEMPT
         return Validity.VALID
 
     def usable(self, now: datetime.datetime) -> bool:
-        """Valid, or exempt."""
-        return self.validity(now) in (Validity.VALID, Validity.EXEMPT)
+        """Valid at `now`."""
+        return self.validity(now) == Validity.VALID
 
     def to_json(self) -> jdata.DictJsonData:
         """As JSON data."""
@@ -129,9 +131,8 @@ class Acceptance:
             "from": self.from_id,
             "accepted-at": _text(self.accepted_at),
             "expires-at": _text(self.expires_at),
-            "exempt-until": _text(self.exempt_until),
             "branch": self.branch,
-            "suggestion": None if self.suggestion is None else self.suggestion.to_json(),
+            "suggestion": self.suggestion.to_json(),
             "setup": self.setup.to_json(),
         }
 
@@ -139,11 +140,7 @@ class Acceptance:
     def from_json(data: jdata.JsonData) -> "Acceptance":
         """From JSON data."""
         kind = Kind(jdata.req_str(data, "kind"))
-        suggestion_data = jdata.find_dict(data, "suggestion")
-        suggestion = None if suggestion_data is None else Manifest.from_json(suggestion_data)
-        if (suggestion is None) != (kind == Kind.BLANKET):
-            raise ValueError("suggestion: only a blanket acceptance has none")
-        exempt = jdata.find_str(data, "exempt-until")
+        suggestion = Manifest.from_json(jdata.req_dict(data, "suggestion"))
         acceptance_id = jdata.req_str(data, "id")
         _check_id(acceptance_id)
         return Acceptance(
@@ -152,7 +149,6 @@ class Acceptance:
             from_id=jdata.find_str(data, "from"),
             accepted_at=parse_time(jdata.req_str(data, "accepted-at")),
             expires_at=parse_time(jdata.req_str(data, "expires-at")),
-            exempt_until=None if exempt is None else parse_time(exempt),
             branch=jdata.find_str(data, "branch"),
             suggestion=suggestion,
             setup=SetupRecord.from_json(jdata.req_dict(data, "setup")),
@@ -161,7 +157,7 @@ class Acceptance:
 
 def new_acceptance_id(now: datetime.datetime) -> str:
     """A new acceptance id: the time, and a random part."""
-    return now.strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
+    return now.strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(ACCEPTANCE_ID_RANDOM_BYTES)
 
 
 def _check_id(acceptance_id: str) -> None:
@@ -174,7 +170,49 @@ class MatchKind(StrEnum):
 
     EXACT = "exact"
     MEANING = "meaning"
-    BLANKET = "blanket"
+    # No match, but an exemption holds: its acceptance, with the container
+    # files as they are.
+    EXEMPT = "exempt"
+
+
+@dataclass(frozen=True)
+class Exemption:
+    """A window in which the environment's runs don't stop for a review.
+
+    It holds for `branch` (when the VCS gave one), until `until`, and uses
+    the acceptance `acceptance`: its settings, its project file and
+    `dev-env.yaml` files, with the container files as they are.
+    """
+
+    acceptance: str
+    until: datetime.datetime
+    branch: str | None
+    started_at: datetime.datetime
+
+    def holds(self, branch: str | None, now: datetime.datetime) -> bool:
+        """Whether it holds for a run on `branch` at `now`."""
+        return now < self.until and (self.branch is None or self.branch == branch)
+
+    def to_json(self) -> jdata.DictJsonData:
+        """As JSON data."""
+        return {
+            "acceptance": self.acceptance,
+            "until": _text(self.until),
+            "branch": self.branch,
+            "started-at": _text(self.started_at),
+        }
+
+    @staticmethod
+    def from_json(data: jdata.JsonData) -> "Exemption":
+        """From JSON data."""
+        acceptance_id = jdata.req_str(data, "acceptance")
+        _check_id(acceptance_id)
+        return Exemption(
+            acceptance=acceptance_id,
+            until=parse_time(jdata.req_str(data, "until")),
+            branch=jdata.find_str(data, "branch"),
+            started_at=parse_time(jdata.req_str(data, "started-at")),
+        )
 
 
 @dataclass(frozen=True)
@@ -192,41 +230,60 @@ class EnvironmentRecord:
     id: str
     project_dir: str
     acceptances: list[Acceptance]
+    exemption: Exemption | None = None
 
-    def find(self, current: Manifest, setup: SetupRecord, now: datetime.datetime) -> Match | None:
+    def exempt_acceptance(self, branch: str | None, now: datetime.datetime) -> Acceptance | None:
+        """The acceptance an exemption that holds for `branch` at `now` uses; None without one."""
+        if self.exemption is None or not self.exemption.holds(branch, now):
+            return None
+        found = next((a for a in self.acceptances if a.id == self.exemption.acceptance), None)
+        return found if found is not None and found.usable(now) else None
+
+    def find(
+        self, current: Manifest, setup: SetupRecord, now: datetime.datetime,
+        branch: str | None = None,
+    ) -> Match | None:
         """The acceptance that holds for the project's files now, if any.
 
-        An exact match first, then one on meaning, then a blanket acceptance;
-        the newest of each.  Only usable acceptances under the same setup count.
+        An exact match first, then one on meaning, the newest of each; then
+        the acceptance an exemption for `branch` uses.  Only usable
+        acceptances under the same setup count: an exemption doesn't cover a
+        change to the setup.
         """
         usable = [
             a for a in self.acceptances
             if a.usable(now) and a.setup.id == setup.id
         ]
         for acceptance in usable:
-            if acceptance.suggestion is not None and acceptance.suggestion.id == current.id:
+            if acceptance.suggestion.id == current.id:
                 return Match(acceptance, MatchKind.EXACT)
         for acceptance in usable:
-            if (
-                acceptance.suggestion is not None
-                and acceptance.suggestion.meaning_id == current.meaning_id
-            ):
+            if acceptance.suggestion.meaning_id == current.meaning_id:
                 return Match(acceptance, MatchKind.MEANING)
-        for acceptance in usable:
-            if acceptance.kind == Kind.BLANKET:
-                return Match(acceptance, MatchKind.BLANKET)
+        exempt = self.exempt_acceptance(branch, now)
+        if exempt is not None and exempt.setup.id == setup.id:
+            return Match(exempt, MatchKind.EXEMPT)
         return None
 
-    def add(self, acceptance: Acceptance) -> None:
-        """Add the acceptance, as the newest."""
+    def add(self, acceptance: Acceptance) -> list[Acceptance]:
+        """Add the acceptance, as the newest, in place of its branch's others; those replaced.
+
+        An exemption using a replaced acceptance moves to the new one, with
+        the same end and branch.  The caller removes the replaced ones'
+        files once the record is saved (`remove_replaced`).
+        """
         if any(a.id == acceptance.id for a in self.acceptances):
             raise VerifiedStoreErr(f"{self.id}: already has an acceptance `{acceptance.id}`")
-        self.acceptances.insert(0, acceptance)
+        replaced = [a for a in self.acceptances if a.branch == acceptance.branch]
+        self.acceptances = [acceptance, *(a for a in self.acceptances if a.branch != acceptance.branch)]
+        if self.exemption is not None and any(a.id == self.exemption.acceptance for a in replaced):
+            self.exemption = replace(self.exemption, acceptance=acceptance.id)
+        return replaced
 
     def carry_forward(
         self, match: Match, current: Manifest, now: datetime.datetime, branch: str | None,
-    ) -> Acceptance:
-        """Add an acceptance for `current`, carried from a match on meaning.
+    ) -> tuple[Acceptance, list[Acceptance]]:
+        """Add an acceptance for `current`, carried from a match on meaning; it, and those it replaced.
 
         It keeps the earlier acceptance's expiry: carrying forward never extends it.
         """
@@ -241,29 +298,13 @@ class EnvironmentRecord:
             suggestion=current,
             branch=branch,
         )
-        self.add(carried)
-        return carried
-
-    def prune(self, keep: int, now: datetime.datetime) -> list[Acceptance]:
-        """Remove the expired (or invalid) acceptances beyond the newest `keep`; those removed."""
-        kept: list[Acceptance] = []
-        removed: list[Acceptance] = []
-        unusable = 0
-        for acceptance in self.acceptances:
-            if acceptance.usable(now):
-                kept.append(acceptance)
-                continue
-            unusable += 1
-            (kept if unusable <= keep else removed).append(acceptance)
-        self.acceptances = kept
-        return removed
+        return carried, self.add(carried)
 
     def blobs(self) -> set[str]:
         """The blobs its acceptances' suggestions refer to."""
         return {
             entry.sha256
             for acceptance in self.acceptances
-            if acceptance.suggestion is not None
             for entry in acceptance.suggestion.files.values()
         }
 
@@ -274,6 +315,7 @@ class EnvironmentRecord:
             "id": self.id,
             "project-dir": self.project_dir,
             "acceptances": [a.to_json() for a in self.acceptances],
+            "exemption": None if self.exemption is None else self.exemption.to_json(),
         }
 
     @staticmethod
@@ -286,6 +328,10 @@ class EnvironmentRecord:
                 Acceptance.from_json(jdata.req_dict(data, *key))
                 for key in jdata.opt_list_keys(data, "acceptances")
             ],
+            exemption=(
+                None if jdata.find_dict(data, "exemption") is None
+                else Exemption.from_json(jdata.req_dict(data, "exemption"))
+            ),
         )
 
 
@@ -326,26 +372,22 @@ def save_environment(store: VerifiedStore, record: EnvironmentRecord) -> None:
     """Write the environment's record, and list it in the index.
 
     The store must be locked.  Nothing is pruned: an expired acceptance is
-    still what the next review compares with (step 17), so removing them is
-    for the user to ask for (`prune_environment`).
+    still what the next review compares with, so it stays until
+    it's replaced or revoked.
     """
     store.register(record.project_dir, record.id)
     store.write_json(record.id, ENVIRONMENT_FILE, data=record.to_json())
 
 
-def prune_environment(store: VerifiedStore, record: EnvironmentRecord, keep: int) -> list[Acceptance]:
-    """Remove the environment's expired acceptances beyond the newest `keep`; those removed.
+def remove_replaced(store: VerifiedStore, record: EnvironmentRecord, replaced: list[Acceptance]) -> None:
+    """Remove the files of the acceptances a new one replaced (`add`), once the record is saved.
 
-    The store must be locked.  The record is written, the pruned
-    acceptances' files go, and so do the blobs nothing refers to any more.
+    The store must be locked.  The blobs nothing refers to any more go too.
     """
-    removed = record.prune(keep, now_utc())
-    save_environment(store, record)
-    for acceptance in removed:
+    for acceptance in replaced:
         store.remove(record.id, ACCEPTANCES_DIR, acceptance.id)
-    if removed:
+    if replaced:
         remove_unused_blobs(store)
-    return removed
 
 
 def remove_unused_blobs(store: VerifiedStore) -> int:
@@ -372,7 +414,7 @@ def setup_values(
     A change to any of them asks for a new review: they're the boundaries
     the project was reviewed within, and they come from the setup files, not
     the project.  They're kept whole, as the file has them, to compare.
-    `verified_containers` maps each `dev-containers-verified` container
+    `verified_containers` maps each `verification: verified-containers` container
     directory the build uses to its manifest's id.
     """
     vcs_runs: jdata.JsonData = None
@@ -385,16 +427,16 @@ def setup_values(
         "project-files-dir": config.raw("resolved", "scoter", "values", "project-files-dir"),
         "dev-containers-search":
             config.raw("resolved", "scoter", "path-lists", "dev-containers-search"),
-        "dev-containers-verified":
-            config.raw("resolved", "scoter", "path-lists", "dev-containers-verified"),
-        "verified-dir": config.raw("resolved", "scoter", "paths", "verified-dir"),
+        "verified-container-dirs":
+            config.raw("resolved", "verification", "path-lists", "verified-containers"),
+        "store": config.raw("resolved", "verification", "paths", "store"),
         "vcs": vcs_section,
         "vcs-runs": vcs_runs,
         # What enforces the egress rules: a different gateway enforces them
         # differently, so the rules need a new review.
         "gateway": {
-            "name": config.raw("resolved", "network-gateway", "values", "name"),
-            "write-config": config.raw("resolved", "network-gateway", "runs", "write-config"),
+            "name": config.raw("resolved", "dev-env", "values", "network-gateway-name"),
+            "write-config": config.raw("resolved", "dev-env", "runs", "network-gateway-write-config"),
         },
         "host-command-checks": config.raw("host-command-checks", "checks"),
         "hidden-host-commands": _hidden_checks(config),
@@ -418,3 +460,19 @@ def _hidden_checks(config: UserConfig) -> jdata.DictJsonData:
                     {"file": file, "check": jdata.find(setup, *key_path)}
                 )
     return {key: found[1:] for key, found in sorted(versions.items()) if len(found) > 1}
+
+
+def setup_changes(before: jdata.DictJsonData, now: jdata.DictJsonData) -> list[str]:
+    """The setup values that differ: each top-level name, or, within a mapping, `name: key`."""
+    changes: list[str] = []
+    for name in sorted(set(before) | set(now)):
+        old, new = before.get(name), now.get(name)
+        if old == new:
+            continue
+        if isinstance(old, dict) and isinstance(new, dict):
+            changes.extend(
+                f"{name}: {key}" for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)
+            )
+        else:
+            changes.append(name)
+    return changes

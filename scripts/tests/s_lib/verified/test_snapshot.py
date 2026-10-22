@@ -174,7 +174,7 @@ class SnapshotTest(TempDirTest):
     def test_bad_paths(self) -> None:
         """A manifest path that could lead outside the snapshot is refused."""
         for path in ("../x", "/etc/passwd", "a/../../b", "a//b", "./a", "a\\b", "c:x", ""):
-            with self.assertRaises(snapshot.SnapshotErr, msg=path):
+            with self.subTest(path=path), self.assertRaises(snapshot.SnapshotErr, msg=path):
                 snapshot.check_relative(path)
         entry = snapshot.FileEntry(sha256="0" * 64, size=1, executable=False).to_json()
         data = {"id": "x", "files": {"../escape": entry}}
