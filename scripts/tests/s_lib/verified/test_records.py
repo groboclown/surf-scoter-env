@@ -115,7 +115,8 @@ class RecordsTest(TempDirTest):
         other = replace(self.acceptance(_manifest("1"), age=100), branch="dev")
         none = self.acceptance(_manifest("2"))
         for acceptance in (expired, other, none):
-            self.assertEqual(env.add(acceptance), [])
+            with self.subTest(acceptance=acceptance):
+                self.assertEqual(env.add(acceptance), [])
         env.exemption = records.Exemption(expired.id, self.NOW, "main", self.NOW)
         newer = replace(self.acceptance(_manifest("3")), branch="main")
         self.assertEqual(env.add(newer), [expired])

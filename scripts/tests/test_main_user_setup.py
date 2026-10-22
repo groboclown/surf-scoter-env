@@ -14,13 +14,14 @@ from pathlib import Path
 SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import main_user_setup
+from surf_scoter_lib import fileutil
 from surf_scoter_lib.user_config import UserConfig
 
 # Writes the key pair `-f` names, as ssh-keygen would.
 KEYGEN = "import sys; f = sys.argv[sys.argv.index('-f') + 1]; open(f, 'w').write('k'); open(f + '.pub', 'w').write('p')"
 
 
-@unittest.skipIf(sys.platform == "win32", "modes")
+@unittest.skipIf(fileutil.is_windows(), "modes")
 class FreshHomeTest(unittest.TestCase):
     """`scoter user-setup --non-interactive` on a home without `~/.ssh`."""
 
@@ -40,15 +41,17 @@ class FreshHomeTest(unittest.TestCase):
     def test_creates_the_ssh_files(self) -> None:
         """The key pair, an empty config and known hosts, in a new `~/.ssh` only you can read."""
         with contextlib.redirect_stdout(io.StringIO()):
-            main_user_setup.gen_key_pair(self.config, interactive=False)
-            main_user_setup.ensure_ssh_config(self.config, interactive=False)
-            main_user_setup.ensure_ssh_known_hosts(self.config, interactive=False)
+            main_user_setup.gen_key_pair(self.config, interactive=main_user_setup.Interaction.DEFAULTS)
+            main_user_setup.ensure_ssh_config(self.config, interactive=main_user_setup.Interaction.DEFAULTS)
+            main_user_setup.ensure_ssh_known_hosts(self.config, interactive=main_user_setup.Interaction.DEFAULTS)
         self.assertEqual(os.stat(self.ssh).st_mode & 0o777, 0o700)
         for name in ("scoter-dev-container", "scoter-dev-container.pub", "config", "known_hosts"):
-            self.assertTrue((self.ssh / name).is_file(), name)
+            with self.subTest(name=name):
+                self.assertTrue((self.ssh / name).is_file(), name)
         self.assertEqual(os.stat(self.ssh / "config").st_mode & 0o777, 0o600)
 
-    def test_existing_directory_left_alone(self) -> None:
+    def test_existing_dir_left_alone(self) -> None:
+        """A directory that's there keeps its mode."""
         self.ssh.mkdir(parents=True, mode=0o750)
         os.chmod(self.ssh, 0o750)  # nosec: B103  # A directory of the user's own choosing, to see it kept.
         main_user_setup.ensure_private_dir(self.ssh)

@@ -79,7 +79,8 @@ class LogAction(argparse.Action):
             choices=None, required=False, help=help, metavar=None, deprecated=False
         )
 
-    def format_usage(self):
+    def format_usage(self) -> str:
+        """The usage text: each option, separated by `|`."""
         return ' | '.join(self.option_strings)
 
     def __call__(

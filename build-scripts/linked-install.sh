@@ -1,7 +1,6 @@
 #!/bin/sh
-# Construct a install similar to self-hosted-install.sh but uses
-# links between files, so you can use it to directly test outside
-# a container.
+# Construct an install similar to self-host-install.sh, but with links
+# between files, so you can use it to test directly outside a container.
 
 set -e
 
@@ -11,7 +10,7 @@ if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ] ; then
     exit 1
 fi
 
-here=$( cd $( dirname "$0" )/.. && pwd )
+here=$( cd "$( dirname "$0" )/.." && pwd )
 target="$1"
 
 if [ -e "${target}" ] ; then
@@ -56,6 +55,6 @@ if ! ln "${here}/scoter.py" scoter ; then
     echo "scoter.py : link failed."
     link_fail=1
 fi
-if [ $link_fail = 1 ] ; then
+if [ "${link_fail}" = 1 ] ; then
     echo "   Changes to failed-link files won't take effect until you run this again."
 fi

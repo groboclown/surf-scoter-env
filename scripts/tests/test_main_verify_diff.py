@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Test the re-review: comparing with the earlier acceptance (step 17)."""
+"""Test the re-review: comparing with the earlier acceptance."""
 import datetime
 import json
 import sys
@@ -153,7 +153,7 @@ class ReReviewTest(DistTest):
             for line in lines
         ), lines)
 
-    def test_base_prefers_the_branch_and_takes_expired(self) -> None:
+    def test_base_prefers_branch(self) -> None:
         """The newest on the branch, though there's a newer one elsewhere, and though it has expired."""
         text, _, prompt = self.review_text("main")
         self.use(text, prompt)

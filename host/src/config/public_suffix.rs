@@ -80,7 +80,7 @@ co.uk
 // ck : https://en.wikipedia.org/wiki/.ck
 *.ck
 !www.ck
-公司.cn
+\u{516C}\u{53F8}.cn
 xn--55qx5d.cn
 // ===BEGIN PRIVATE DOMAINS===
 github.io   // with a comment after

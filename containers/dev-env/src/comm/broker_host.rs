@@ -17,7 +17,7 @@
 //!    process started: a client connected.
 //!    process communication: bytes the client sent.
 //!    process terminated: the client connection ended before the host closed it.
-//!         Exit code 0 means the client closed cleanly, 1 means a socket I/O error.
+//!         Exit code 0 means the client closed cleanly, 122 means a socket I/O error.
 //! host -> broker (broker's stdin):
 //!    process communication: bytes to send to the client.
 //!    process terminated: send any pending bytes, then close the client connection.
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_rejects_oversized_message() {
+    fn recv_rejects_oversized() {
         // Must fail on the declared size, without allocating it.
         for size in [low::MAXIMUM_BYTE_ARRAY_LEN as u64 + 1, u64::MAX] {
             let mut buf = vec![COMMAND_PROCESS_MESSAGE];
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_accepts_maximum_declared_size() {
+    fn recv_accepts_maximum_size() {
         // Exactly the maximum is allowed; the missing body makes this an EOF.
         let mut buf = vec![COMMAND_PROCESS_MESSAGE];
         buf.extend_from_slice(&1u64.to_be_bytes());
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn send_rejects_oversized_message() {
+    fn send_rejects_oversized() {
         let cmd = Command::Message((1, vec![0; low::MAXIMUM_BYTE_ARRAY_LEN as usize + 1]));
         let mut buf = Vec::new();
         assert_eq!(

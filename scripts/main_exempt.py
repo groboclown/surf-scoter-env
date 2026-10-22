@@ -6,8 +6,9 @@ for a review.  Each run uses your last acceptance's settings, project file
 and `dev-env.yaml` files, with the container files as they are; changes to
 the project file and `dev-env.yaml` files are ignored until `scoter verify
 --with-exemption` picks them up.  It holds for the branch it was started
-on.  See step 21 of docs/contributors/projects-v1.md.
+on.
 """
+import enum
 import sys
 from collections.abc import Sequence
 
@@ -16,10 +17,19 @@ from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import exempt, records
 
 
-def run_exempt(config: UserConfig, length: str | None, *, end: bool) -> int:
-    """Start (or move the end of) the project's exemption, or `end` it."""
+class Action(enum.Enum):
+    """What `run_exempt` does with the project's exemption."""
+
+    # Start it, or move its end.
+    START = "start"
+    # End it now (`--end`).
+    END = "end"
+
+
+def run_exempt(config: UserConfig, length: str | None, *, action: Action = Action.START) -> int:
+    """Start (or move the end of) the project's exemption, or end it."""
     try:
-        if end:
+        if action == Action.END:
             ended = exempt.end(config)
             print("The exemption ended." if ended else "There's no exemption to end.")
             return 0
@@ -62,7 +72,7 @@ def main(argv: Sequence[str]) -> int:
     args = parser.parse_args(argv)
     if args.end and args.length:
         parser.error("give --for or --end, not both")
-    return run_exempt(config, args.length, end=args.end)
+    return run_exempt(config, args.length, action=Action.END if args.end else Action.START)
 
 
 if __name__ == "__main__":

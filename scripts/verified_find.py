@@ -17,7 +17,7 @@ from surf_scoter_lib import UserConfig
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import lookup
 
-MAX_UNIVERSAL_SIZE = 4 * 1024 * 1024
+MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
 
 
 def main(argv: Sequence[str]) -> int:
@@ -27,9 +27,9 @@ def main(argv: Sequence[str]) -> int:
         return 2
     try:
         with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_SIZE + 1)
-        if len(data) > MAX_UNIVERSAL_SIZE:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_SIZE} bytes")
+            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
+        if len(data) > MAX_UNIVERSAL_BYTES:
+            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")

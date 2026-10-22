@@ -1,14 +1,13 @@
 #SPDX:MIT
 """Writing the review file: the project's suggestion, for the user to accept, edit or reject.
 
-The file's layout and rules are in step 12 of docs/contributors/projects-v1.md:
-only what becomes the accepted settings is YAML data; everything the user
+Only what becomes the accepted settings is YAML data; everything the user
 needs to judge it is a comment.  Explanations start `#scoter:`; what the
 user might switch on (`result: reject`, a refused command) is YAML
 commented out with `# `.
 
 It's written without a YAML library, as a small subset the generator's
-parser reads (step 13): every string as JSON writes it, with
+parser reads: every string as JSON writes it, with
 `ensure_ascii`, so bidirectional, zero-width and look-alike characters show
 as `\\u` escapes; placeholders and short lists in flow style; no anchors,
 tags or block scalars.  Comments are cleaned the same way, with control
@@ -29,6 +28,10 @@ from .verified import previous as previous_acceptance
 from .verified import snapshot
 
 FORMAT = "surf-scoter-review-1"
+# How long a new acceptance lasts, without `verification: expiry-days`.
+DEFAULT_EXPIRY_DAYS = 30
+# How much of a file's SHA-256 the dev container's listing shows.
+SHORT_DIGEST_CHARS = 12
 
 # Terminal escape sequences: CSI (`ESC [ ... final`), OSC (`ESC ] ... BEL` or
 # `ESC ] ... ESC \\`), and two-character escapes.
@@ -122,7 +125,7 @@ class Context:
     branch: str | None = None
     # A line about an acceptance that already matches, if any.
     accepted_note: str | None = None
-    # The earlier acceptance to compare with (step 17), with what the user
+    # The earlier acceptance to compare with, with what the user
     # accepted filled in; None for a full review.
     previous: previous_acceptance.Previous | None = None
     # How the user's setup changes the defaults' protections
@@ -149,7 +152,7 @@ def _is_item(key: str) -> bool:
 
 def expires_at(config: UserConfig, now: datetime.datetime) -> str:
     """A new acceptance's expiry: `verification: expiry-days` from now (30 by default)."""
-    days = config.optional_int_value("verification", "expiry-days") or 30
+    days = config.optional_int_value("verification", "expiry-days") or DEFAULT_EXPIRY_DAYS
     return (now + datetime.timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
@@ -194,7 +197,7 @@ def build(config: UserConfig, context: Context) -> str:
 
 
 def changes(config: UserConfig, context: Context) -> dict[str, int]:
-    """How many items of each kind of change (step 17), for the summary."""
+    """How many items of each kind of change since the earlier acceptance, for the summary."""
     previous = context.previous
     if previous is None:
         return {}
@@ -402,7 +405,7 @@ def suggested(config: UserConfig, report: checks.Report) -> jdata.DictJsonData:
 
 
 # ---------------------------------------------------------------------
-# Comparing with the earlier acceptance (step 17)
+# Comparing with the earlier acceptance
 
 
 @dataclass(frozen=True)
@@ -545,7 +548,7 @@ def show(change: Change, found: Sequence[checks.Finding]) -> Shown | None:
         lead = ["new: the project added this since you accepted it."] if kind == "added" else []
         return Shown(suggestion(new), bool(refusals), lead + texts + guide)
     if kind == "unchanged":
-        assert new is not None and mine is not None  # nosec: B101
+        assert new is not None and mine is not None  # nosec: B101  # unchanged items have both
         if not refusals:
             return Shown(mine, False, ["unchanged since you accepted it."])
         overridden = set(mine.get("$override") or [])
@@ -553,16 +556,16 @@ def show(change: Change, found: Sequence[checks.Finding]) -> Shown | None:
             return Shown(mine, False, [*texts, f"you overrode {', '.join(policy)} here; unchanged since you accepted it."])
         return Shown(suggestion(new), True, [*texts, *guide, "You accepted it before; it's refused now."])
     if kind == "edited":
-        assert mine is not None  # nosec: B101
+        assert mine is not None  # nosec: B101  # an edit is the user's version
         return Shown(mine, False, [
             "your change, kept (it's checked again when you use the review):",
             *differences(change.old, mine),
         ])
     if kind == "removed-by-you":
-        assert new is not None  # nosec: B101
+        assert new is not None  # nosec: B101  # the project still suggests it
         return Shown(suggestion(new), True, ["you removed this before; remove the `# ` to take it back."])
     if kind == "changed":
-        assert new is not None  # nosec: B101
+        assert new is not None  # nosec: B101  # a changed item has a current version
         data = suggestion(new)
         differ = {
             k for k in set(_strip(change.old) or {}) | set(_strip(new) or {})
@@ -581,10 +584,10 @@ def show(change: Change, found: Sequence[checks.Finding]) -> Shown | None:
             earlier = _without(mine, "$override")
         return Shown(data, bool(refusals), notes, earlier)
     if kind == "removed":
-        assert mine is not None  # nosec: B101
+        assert mine is not None  # nosec: B101  # only accepted items show as removed
         return Shown(mine, True, ["the project removed this since you accepted it; remove the `# ` to keep it anyway."])
     if kind == "yours":
-        assert mine is not None  # nosec: B101
+        assert mine is not None  # nosec: B101  # the user's own item is their version
         return Shown(mine, False, ["added by you (it's checked again when you use the review)."])
     return None
 
@@ -701,7 +704,7 @@ def _label(key: tuple[str, str], value: jdata.JsonData) -> str:
 
 @dataclass
 class EnvMerge:
-    """The top-level `env`, merged variable by variable (step 17)."""
+    """The top-level `env`, merged variable by variable with the earlier acceptance."""
 
     plan: jdata.DictJsonData
     # What changed since, what the user changed and kept, and the user's
@@ -869,7 +872,7 @@ def _dev_container(out: Writer, config: UserConfig, context: Context) -> None:
                 out.note(f"  {rel}  unchanged since you accepted it{extra}", indent=2)
             else:
                 state = "" if before is None else ("  changed since you accepted it" if old is not None else "  new since you accepted it")
-                out.note(f"  {rel}  {entry.size} bytes  sha256:{entry.sha256[:12]}...{extra}{state}", indent=2)
+                out.note(f"  {rel}  {entry.size} bytes  sha256:{entry.sha256[:SHORT_DIGEST_CHARS]}...{extra}{state}", indent=2)
                 if old is not None:
                     out.notes(_file_diff(old, data), indent=2)
                 elif snapshot.is_dockerfile(rel.rsplit("/", 1)[-1]):

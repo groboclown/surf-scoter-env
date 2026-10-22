@@ -1,19 +1,54 @@
 #SPDX:MIT
 """The Surf Scoter Universal Configuration file handler."""
+import enum
 import json
 import os
 import subprocess  # nosec: B404  # We know the potential issues with subprocess.
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from . import jdata
+from . import fileutil, jdata
 from .err import ConfigErr
 
 # The few hard-coded items.
 VCS_SECTION_SUFFIX = "-vcs"
 # The SUC's record of the project file, as written.
 CURRENT_PROJECT_SETUP = "current-project-setup"
+
+
+class PathKind(enum.Enum):
+    """What kind of file `UserConfig.search_path` looks for."""
+
+    FILE = "file"
+    DIR = "dir"
+
+
+class OnError(enum.Enum):
+    """What `UserConfig.run_command` does when the command fails."""
+
+    # Raise `subprocess.CalledProcessError`.
+    RAISE = "raise"
+    # Give back the completed process, with its exit code, for the caller to check.
+    RETURN = "return"
+
+
+class Capture(enum.Flag):
+    """Which of the command's output streams `UserConfig.run_command` captures.
+
+    A stream it doesn't capture goes to the user.
+    """
+
+    NONE = 0
+    STDOUT = enum.auto()
+    STDERR = enum.auto()
+    BOTH = STDOUT | STDERR
+
+
+class Echo(enum.Enum):
+    """Whether `UserConfig.run_command` says what it runs."""
+
+    SHOW = "show"
+    QUIET = "quiet"
 
 # ---------------------------------------------------------------------
 # Configuration Understanding
@@ -52,21 +87,21 @@ class UserConfig:
             raise ConfigErr(f"VCS provider '{name}' not supported with the current configuration")
         return ret
 
-    def search_path(self, section: str, key: str, file: str | None, is_dir: bool) -> Path | None:
-        """Search the path list at the section/key for the file.
-        
+    def search_path(
+        self, section: str, key: str, file: str | None, kind: PathKind,
+    ) -> Path | None:
+        """Search the path list at the section/key for the file, of the given kind.
+
         If the file is None, then this just tries to find the first of the path list that
         exists.  If the section/key does not exist, this raises a ConfigErr.
         """
+        exists = os.path.isdir if kind == PathKind.DIR else os.path.isfile
         for path in self.__req_list_keys("resolved", section, "path-lists", key):
             loc = self.__req_str(*path)
-            if file is None:
-                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
-                    return Path(loc)
-            else:
+            if file is not None:
                 loc = os.path.join(loc, file)
-                if (is_dir and os.path.isdir(loc)) or (not is_dir and os.path.isfile(loc)):
-                    return Path(loc)
+            if exists(loc):
+                return Path(loc)
         return None
 
     def get_dist_bin_dir(self) -> Path:
@@ -157,26 +192,26 @@ class UserConfig:
         run: str,
         /, *,
         cwd: Path | None = None,
-        check: bool = True,
-        capture_stdout: bool = True,
-        capture_stderr: bool = False,
+        on_error: OnError = OnError.RAISE,
+        capture: Capture = Capture.STDOUT,
         template: dict[str, str] | None = None,
-        quiet: bool = False,
+        echo: Echo = Echo.SHOW,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run the given command.
-        
-        This will return the completed process with stdout captured.  stderr will
-        forward to the user.  With `quiet`, it doesn't say what it runs.
+
+        This will return the completed process with the `capture` streams
+        captured (by default, stdout); the others go to the user.  With
+        `Echo.QUIET`, it doesn't say what it runs.
         """
         cmd = self.require_run(section, run, template)
-        if not quiet:
+        if echo == Echo.SHOW:
             print(f"Running {cmd[0]}")
             print(f"DEBUG {cmd}")
         return subprocess.run(  # nosec: B603  # Input validated on the call.
             cmd,
-            stdout=subprocess.PIPE if capture_stdout else None,
-            stderr=subprocess.PIPE if capture_stderr else None,
-            check=check,
+            stdout=subprocess.PIPE if Capture.STDOUT in capture else None,
+            stderr=subprocess.PIPE if Capture.STDERR in capture else None,
+            check=on_error == OnError.RAISE,
             cwd=cwd,
             shell=False,
             env=self.command_env(section),
@@ -443,6 +478,7 @@ class UserConfig:
 
     def __req_dict_keys(self, *path: jdata.JsonPathPart) -> Sequence[jdata.JsonPath]:
         return UserConfig.__wrap(lambda: jdata.opt_dict_keys(self._config, *path))
+
     @staticmethod
     def __wrap[T](call: Callable[[], T]) -> T:
         try:
@@ -457,7 +493,7 @@ def drop_env(environ: Mapping[str, str], patterns: Sequence[str]) -> dict[str, s
     Names match as the platform's environment does: ignoring case on Windows.
     """
     def fold(name: str) -> str:
-        return name.upper() if sys.platform == "win32" else name
+        return name.upper() if fileutil.is_windows() else name
 
     exact = {fold(p) for p in patterns if not p.endswith("*")}
     prefixes = tuple(fold(p[:-1]) for p in patterns if p.endswith("*"))

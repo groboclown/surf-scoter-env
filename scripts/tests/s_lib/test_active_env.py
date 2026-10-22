@@ -5,7 +5,6 @@ import io
 import json
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +13,7 @@ from ...surf_scoter_lib import fileutil
 from ...surf_scoter_lib.active_env import ActiveEnvironmentSet
 from ...surf_scoter_lib.err import ActiveEnvErr
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 
 
 class ActiveEnvTest(unittest.TestCase):
@@ -89,7 +88,7 @@ class ActiveEnvTest(unittest.TestCase):
         self.state.mkdir(mode=0o755)
         os.chmod(self.state, 0o755)  # nosec: B103  # To see it made private.
         self.file.write_text("[]", encoding="utf-8")
-        os.chmod(self.file, 0o644)  # nosec: B103  # As an earlier version left it.
+        os.chmod(self.file, 0o644)  # As an earlier version left it.
         with self.locked() as envs:
             envs.reserve_environ("h")
         self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)

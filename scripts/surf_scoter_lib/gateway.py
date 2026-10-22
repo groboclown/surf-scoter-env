@@ -2,14 +2,13 @@
 """Turning the egress rules into a network gateway's configuration.
 
 The rules come from the universal configuration file: the accepted ones
-(`egress.rules`), or, until a review can make an acceptance (step 15 of
-docs/contributors/projects-v1.md), the project file's own (`current-project-setup`).
+(`egress.rules`), or, until a review makes an acceptance, the project file's
+own (`current-project-setup`).
 
 Each gateway enforces what it can.  A rule it can't enforce is refused, with
 the reason; it's never dropped, or loosened into something broader.  Each
 gateway's own translation is in its script (`gateway_squid.py` for Squid),
-which the setup's `network-gateway: runs: write-config` runs.  See step 9 of
-docs/contributors/projects-v1.md.
+which the setup's `network-gateway: runs: write-config` runs.
 """
 import re
 from dataclasses import dataclass, field
@@ -19,6 +18,10 @@ from .err import ConfigErr
 from .user_config import UserConfig
 
 DEFAULT_PORTS = {"tls": 443, "https": 443, "http": 80}
+MAX_PORT = 65535
+# DNS limits (RFC 1035): a whole name, and each label in it.
+MAX_HOST_NAME_CHARS = 253
+MAX_LABEL_CHARS = 63
 
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")
 
@@ -94,7 +97,7 @@ def _rule(entry: jdata.DictJsonData, i: int) -> Rule:
         raise RuleErr(f"{at}.protocol: {protocol!r} isn't known")
     if port is None:
         port = DEFAULT_PORTS[protocol]
-    if not 0 < port < 65536:
+    if not 0 < port <= MAX_PORT:
         raise RuleErr(f"{at}.port: {port!r} isn't a port")
     if not all(m.isascii() and m.isalpha() and m.isupper() for m in methods):
         raise RuleErr(f"{at}.methods: expected upper-case method names")
@@ -111,6 +114,6 @@ def host_is_valid(host: str) -> bool:
     labels = name.split(".")
     return (
         len(labels) >= 2
-        and len(name) <= 253
-        and all(len(label) <= 63 and _LABEL.fullmatch(label) for label in labels)
+        and len(name) <= MAX_HOST_NAME_CHARS
+        and all(len(label) <= MAX_LABEL_CHARS and _LABEL.fullmatch(label) for label in labels)
     )

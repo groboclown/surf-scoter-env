@@ -100,7 +100,7 @@ def program_findings(config: UserConfig, path_env: str | None = None) -> list[ch
 
     `check_programs`' problems refuse, but a relative `PATH` entry, which
     the tools skip, only warns.  Then, for each program as found: whether
-    another user could change it (step 11's check), and the setup's
+    another user could change it, and the setup's
     `host-commands` checks that match by where a program is (`paths`: version
     manager shims, which pick the real program from a file in the directory
     they run in).  `scoter user-setup` reports them; `scoter run` refuses to
@@ -208,7 +208,7 @@ def host_command_report(config: UserConfig) -> list[str]:
 
 
 # ---------------------------------------------------------------------
-# Guarded settings (step 20 of docs/contributors/projects-v1.md)
+# Guarded settings
 
 # The `verification` value lists naming them: `guarded`, where any change is
 # reported, and `guarded-removals`, deny-lists where adding entries only

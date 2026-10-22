@@ -13,6 +13,8 @@
 # How long to wait for the environment to start, in seconds.
 IT_RUN_TIMEOUT="${IT_RUN_TIMEOUT:-1800}"
 
+# `setsid` (util-linux) isn't on macOS by default.  The run gets its own
+# process group, so the crash below can kill all of it.
 it_require setsid ssh "${IT_CONTAINER_TOOL}"
 it_init
 it_project "${IT_TEST_DIR}/project" git

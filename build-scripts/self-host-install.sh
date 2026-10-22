@@ -13,7 +13,7 @@
 # can't change them until you install again.
 #
 # The copy comes from `git archive`, so only committed files go in, never
-# uncommitted changes, untracked files or the workspace.  It's built from that
+# uncommitted changes, untracked files, or the workspace.  It's built from that
 # export, installed outside this repository, and left read-only.
 
 set -e

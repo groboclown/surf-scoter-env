@@ -16,7 +16,7 @@ This analysis starts from one assumption: **anything inside the dev container ma
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_docker_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
+| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
 | `Dockerfile`, build context, parent directories | The project | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which doesn't override them |
 | Workspace files, including permission bits | Code in the container | The host file system, and whatever later reads it |
@@ -75,7 +75,7 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 ### DEV-2: Mount points are written into the compose `.env` file
 
 **Severity:** Critical.  **Status:** Open.
-**Where:** `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_docker_compose_env_file` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../scripts/main_run.py).
 
 `mounts: workspace` and `mounts: setup` go into the `.env` file unescaped.  The only check is a leading `/`.  A newline adds a line, and compose takes the last value for a repeated name (confirmed with podman-compose 1.6.0), so `"/workspace\nWORKSPACE_HOST=/home/you"` mounts the developer's home directory into the container, read-write.
 

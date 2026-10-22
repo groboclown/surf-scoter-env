@@ -53,11 +53,13 @@ pub(crate) const EXIT_DENIED: i32 = 126;
 pub(crate) const EXIT_START_FAILED: i32 = 127;
 
 /// Maximum number of output bytes sent per message.
-const OUTPUT_CHUNK: usize = 64 * 1024;
+const OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 /// Stdin chunks buffered for a process that isn't reading them yet.
-const STDIN_BACKLOG: usize = 64;
+const STDIN_BACKLOG_CHUNKS: usize = 64;
 /// How often to check whether the process exited, once its output has closed.
 const WAIT_POLL: Duration = Duration::from_millis(10);
+/// Added to the signal number to report death by signal, as shells do.
+const SIGNAL_EXIT_BASE: i32 = 128;
 
 /// What to run.  Built by `analyze`.
 #[derive(Debug, PartialEq, Eq)]
@@ -324,7 +326,7 @@ fn exit_code(status: ExitStatus) -> i32 {
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(sig) = status.signal() {
-            return 128 + sig;
+            return SIGNAL_EXIT_BASE + sig;
         }
     }
     1
@@ -334,10 +336,10 @@ fn exit_code(status: ExitStatus) -> i32 {
 /// When the client goes away (or misbehaves), the process is killed.
 fn pump_input<R: Read>(mut input: R, stdin: ChildStdin, running: &Mutex<Running>) {
     // Writing happens on its own thread, so signals still get through while
-    // the process isn't reading its stdin.  Once `STDIN_BACKLOG` chunks are
+    // the process isn't reading its stdin.  Once `STDIN_BACKLOG_CHUNKS` chunks are
     // waiting, reading the client blocks (and with it, signal delivery) until
     // the process catches up; the client can't make the host buffer without bound.
-    let (tx, rx) = mpsc::sync_channel(STDIN_BACKLOG);
+    let (tx, rx) = mpsc::sync_channel(STDIN_BACKLOG_CHUNKS);
     thread::spawn(move || write_stdin(rx, stdin));
     let mut stdin_tx: Option<SyncSender<Vec<u8>>> = Some(tx);
     loop {
@@ -375,7 +377,7 @@ fn pump_output<R: Read, S: FrameSink>(
     sink: &S,
     send: fn(&mut Vec<u8>, &[u8]) -> io::Result<()>,
 ) {
-    let mut buf = vec![0u8; OUTPUT_CHUNK];
+    let mut buf = vec![0u8; OUTPUT_CHUNK_BYTES];
     loop {
         let n = match r.read(&mut buf) {
             Ok(0) => return,
@@ -638,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_name_isnt_run() {
+    fn bare_name_isnt_run() {
         let sink = VecSink::default();
         let (input, _w) = idle_client();
         let req = ExecRequest {
@@ -747,7 +749,7 @@ mod tests {
         }
 
         #[test]
-        fn temp_files_are_generated_and_removed() {
+        fn temp_files_made_and_removed() {
             let out = run_with_temp_files(
                 None,
                 &[None, Some("out.json")],
@@ -769,7 +771,7 @@ mod tests {
         }
 
         #[test]
-        fn temp_files_with_a_requested_cwd() {
+        fn temp_files_with_requested_cwd() {
             let dir = TempDir::new().unwrap();
             let out = run_with_temp_files(
                 Some(dir.path().to_path_buf()),
@@ -786,7 +788,7 @@ mod tests {
         }
 
         #[test]
-        fn stdout_and_stderr_are_separate() {
+        fn stdout_and_stderr_separate() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
             let code = run(
@@ -813,13 +815,13 @@ mod tests {
             assert_eq!(sink.stdout(), vec![0u8; 200_000]);
             for cmd in sink.commands() {
                 if let Command::Stdout(d) = cmd {
-                    assert!(d.len() <= OUTPUT_CHUNK);
+                    assert!(d.len() <= OUTPUT_CHUNK_BYTES);
                 }
             }
         }
 
         #[test]
-        fn runs_in_private_temp_dir_that_is_removed() {
+        fn runs_in_removed_private_temp() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
             assert_eq!(
@@ -836,7 +838,7 @@ mod tests {
         }
 
         #[test]
-        fn runs_in_requested_directory_and_keeps_it() {
+        fn runs_in_requested_dir_kept() {
             let dir = TempDir::new().unwrap();
             fs::write(dir.path().join("marker"), b"").unwrap();
             let sink = VecSink::default();
@@ -856,7 +858,7 @@ mod tests {
         }
 
         #[test]
-        fn missing_requested_directory_fails_to_start() {
+        fn missing_requested_dir_fails() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
             let mut req = request("true", &[]);
@@ -866,7 +868,7 @@ mod tests {
         }
 
         #[test]
-        fn uses_only_the_given_environment() {
+        fn uses_only_given_environment() {
             let sink = VecSink::default();
             let (input, _w) = idle_client();
             let mut req = request("sh", &["-c", "printf %s \"$GIVEN:${HOME-none}\""]);
@@ -877,7 +879,7 @@ mod tests {
         }
 
         #[test]
-        fn stdin_is_passed_through_then_closed() {
+        fn stdin_passed_then_closed() {
             let (input, mut w) = io::pipe().unwrap();
             client_host::send_stdin(&mut w, b"abc").unwrap();
             client_host::send_stdin(&mut w, b"def\n").unwrap();
@@ -888,7 +890,7 @@ mod tests {
         }
 
         #[test]
-        fn stdin_after_process_stopped_reading_is_harmless() {
+        fn stdin_unread_is_harmless() {
             let (input, mut w) = io::pipe().unwrap();
             client_host::send_stdin(&mut w, b"ignored").unwrap();
             let sink = VecSink::default();
@@ -915,7 +917,7 @@ mod tests {
         }
 
         #[test]
-        fn signal_reaches_process_not_reading_stdin() {
+        fn signal_without_stdin_reader() {
             // A full stdin pipe must not hold up signal delivery, as long as
             // the backlog isn't full: 8 x 32 KiB is more than a pipe holds.
             let (input, mut w) = io::pipe().unwrap();
@@ -944,7 +946,7 @@ mod tests {
         }
 
         #[test]
-        fn client_disconnect_kills_process() {
+        fn disconnect_kills_process() {
             let (input, w) = io::pipe().unwrap();
             let (_sink, handle) = run_in_background(request("sleep", &["30"]), input);
             drop(w);
@@ -980,7 +982,7 @@ mod tests {
         }
 
         #[test]
-        fn signal_after_exit_is_not_delivered() {
+        fn signal_after_exit_not_sent() {
             let child = Process::new("true").spawn().unwrap();
             let running = Mutex::new(Running {
                 child,
@@ -1003,7 +1005,7 @@ mod tests {
         }
 
         #[test]
-        fn temp_dir_is_private_and_removed() {
+        fn temp_dir_private_and_removed() {
             use std::os::unix::fs::PermissionsExt;
             let a = TempDir::new().unwrap();
             let b = TempDir::new().unwrap();

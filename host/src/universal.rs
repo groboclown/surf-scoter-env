@@ -329,7 +329,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
 }
 
 /// The universal configuration as compact JSON, ending with a newline.
-/// (Compact, to stay well within `MAX_UNIVERSAL_FILE_SIZE`; a tool such as
+/// (Compact, to stay well within `MAX_UNIVERSAL_FILE_BYTES`; a tool such as
 /// `jq` lays it out for reading.)
 pub fn to_json(universal: &Universal) -> String {
     let mut text = serde_json::to_string(universal).expect("only JSON-ready values are stored");
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_command_program_in_the_project() {
+    fn host_program_in_project() {
         let dir = TempDir::new();
         let tool_path = tool(&dir, "proj/tool");
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
@@ -1175,7 +1175,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_command_checks_survive_the_universal_file() {
+    fn host_checks_survive_universal() {
         let dir = TempDir::new();
         tool(&dir, "bin/sh");
         let config = load_setups(
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_empty_without_accepted_settings() {
+    fn no_accepted_no_host_brokered() {
         let dir = TempDir::new();
         tool(&dir, "bin/aws");
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn egress_wildcards_refused_by_the_setup() {
+    fn setup_refuses_egress_wildcard() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
         dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_from_accepted_settings() {
+    fn host_brokered_from_accepted() {
         let dir = TempDir::new();
         let aws = tool(&dir, "bin/aws");
         let (options, env, accepted) =
@@ -1393,7 +1393,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_checked_against_the_run() {
+    fn accepted_checked_against_run() {
         let dir = TempDir::new();
         let in_project = tool(&dir, "proj/tool");
         let (options, env, _) = accepted_project(
@@ -1693,7 +1693,7 @@ mod tests {
     // ---- review files ----
 
     #[test]
-    fn review_into_the_universal_file() {
+    fn review_into_universal_file() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
         dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_use_the_users_container() {
+    fn accepted_users_container() {
         let dir = TempDir::new();
         let config =
             accepted_container(&dir, r#"{"use": {"name": "my-env"}, "images": {}}"#).unwrap();
@@ -1914,7 +1914,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_use_the_projects_container() {
+    fn accepted_projects_container() {
         let dir = TempDir::new();
         let config = accepted_container(&dir, r#"{"use": "project", "images": {}}"#).unwrap();
         let universal = build(&config).unwrap();
@@ -1931,7 +1931,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn accepted_settings_container_only_outside_the_project() {
+    fn accepted_users_not_in_project() {
         let dir = TempDir::new();
         // `env` is only in the project: not one of the user's.
         let errors = error_texts(

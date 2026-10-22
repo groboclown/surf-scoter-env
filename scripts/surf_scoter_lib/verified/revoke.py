@@ -14,10 +14,11 @@ Acceptances are chosen:
   the fingerprint (the snapshot id) of the files they were accepted for, as
   the review file shows it.
 
-A project keeps one acceptance per branch: one carried forward (step 5:
-the same files, but for comments) took the place of the one it came from.
+A project keeps one acceptance per branch: one carried forward (for the
+same files, but for comments) took the place of the one it came from.
 """
 import datetime
+import enum
 import os
 import re
 from collections.abc import Iterable
@@ -27,7 +28,7 @@ from ..user_config import UserConfig
 from . import records, store
 
 # The shortest fingerprint prefix taken: as long as the review shows them.
-MIN_FINGERPRINT = 12
+MIN_FINGERPRINT_CHARS = 12
 FINGERPRINT_PREFIX = "sha256:"
 # An acceptance id, as `records.new_acceptance_id` makes them.
 ACCEPTANCE_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
@@ -86,7 +87,7 @@ def fingerprint(acceptance: records.Acceptance) -> str:
 
 def describe(acceptance: records.Acceptance, now: datetime.datetime) -> str:
     """One line for the acceptance: its id, kind, branch, fingerprint and expiry."""
-    short = fingerprint(acceptance).removeprefix(FINGERPRINT_PREFIX)[:MIN_FINGERPRINT]
+    short = fingerprint(acceptance).removeprefix(FINGERPRINT_PREFIX)[:MIN_FINGERPRINT_CHARS]
     carried = f"  carried from {acceptance.from_id}" if acceptance.from_id else ""
     return (
         f"{acceptance.id}  {acceptance.kind:<8}  branch {acceptance.branch or '-'}  "
@@ -108,20 +109,27 @@ def _matches_fingerprint(name: str, acceptance: records.Acceptance) -> bool:
     found = fingerprint(acceptance)
     digest = name.removeprefix(FINGERPRINT_PREFIX).lower()
     return (
-        len(digest) >= MIN_FINGERPRINT
+        len(digest) >= MIN_FINGERPRINT_CHARS
         and all(c in "0123456789abcdef" for c in digest)
         and found.removeprefix(FINGERPRINT_PREFIX).startswith(digest)
     )
 
 
+class Pick(enum.Enum):
+    """Which acceptances to choose: those the names choose, or all of them."""
+
+    NAMED = "named"
+    ALL = "all"
+
+
 def select(
-    record: records.EnvironmentRecord, names: Iterable[str], *, everything: bool = False,
+    record: records.EnvironmentRecord, names: Iterable[str], *, pick: Pick = Pick.NAMED,
 ) -> Selection:
     """The acceptances `names` choose: each an id, a branch, or a fingerprint (or the start of one).
 
-    With `everything`, all of them.
+    With `Pick.ALL`, all of them.
     """
-    if everything:
+    if pick == Pick.ALL:
         return Selection(list(record.acceptances))
     chosen: set[str] = set()
     selection = Selection()
@@ -140,7 +148,7 @@ def select(
 def find_ids(
     verified_store: store.VerifiedStore, ids: Iterable[str],
 ) -> dict[Environment, list[records.Acceptance]]:
-    """The acceptances with these ids, in any project, by environment ."""
+    """The acceptances with these ids, in any project, by environment."""
     wanted = {i for i in ids if ACCEPTANCE_ID.fullmatch(i)}
     found: dict[Environment, list[records.Acceptance]] = {}
     if not wanted:

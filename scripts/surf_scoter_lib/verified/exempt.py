@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Start and end an exemption on a project (`scoter exempt`, step 21).
+"""Start and end an exemption on a project (`scoter exempt`).
 
 An exemption is a window in which the project's runs don't stop for a
 review: they use an acceptance's settings, project file and `dev-env.yaml`

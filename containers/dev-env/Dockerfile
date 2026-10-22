@@ -14,12 +14,12 @@ RUN set -x \
 FROM public.ecr.aws/docker/library/ubuntu:rolling
 
 # Bring over the launcher.
-# You will probably want to run `ls /usr/local/bin/scoter-client COMMON_NAME` on this.
+# You will probably want to run `ln -s /usr/local/bin/scoter-client COMMON_NAME` on this.
 COPY --chmod=0755 --from=build /usr/src/surf-scoter-env/target/release/client /usr/local/bin/scoter-client
 COPY --chmod=0755 --from=build /usr/src/surf-scoter-env/target/release/broker /usr/local/bin/scoter-container
 
 # Install system tools.
-#   May want to switch to Dropbear SSH, or some userspace only SSH server.
+#   May want to switch to Dropbear SSH, or some userspace-only SSH server.
 RUN set -x \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -58,7 +58,5 @@ COPY --chmod=0555 entrypoint.sh /entrypoint.sh
 
 USER ubuntu
 WORKDIR /workspace
-
-EXPOSE 22022
 
 ENTRYPOINT [ "/entrypoint.sh" ]

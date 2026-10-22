@@ -1,13 +1,13 @@
 FROM public.ecr.aws/docker/library/debian:bookworm-slim
 
-# Install squid + CA certs
+# Install Squid and CA certificates.
 RUN set -x \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
     squid ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Setup the squid configuration file.
+# Set up the Squid configuration file.
 COPY squid.conf /etc/squid/squid.conf
 
 # The allowed hosts.  Surf Scoter mounts its own list over this one, which

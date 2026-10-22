@@ -265,7 +265,7 @@ mod tests {
             "a b",
             "a/b",
             "a;b",
-            "ünï",
+            "\u{FC}n\u{EF}",
         ] {
             assert!(validate_name(name).is_err(), "{name}");
         }

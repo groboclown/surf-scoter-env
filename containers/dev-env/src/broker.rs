@@ -26,6 +26,9 @@ use std::time::Duration;
 use surf_scoter_env_launcher::comm::broker_host::{self, Command, ExitCode, ProcessId};
 use surf_scoter_env_launcher::comm::client_broker;
 
+/// Prefix for the broker's diagnostics on stderr.
+const LOG_PREFIX: &str = "scoter-broker";
+
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 
@@ -35,7 +38,10 @@ const CLIENT_CLOSED: ExitCode = 0;
 const CLIENT_IO_ERROR: ExitCode = 122;
 
 /// Maximum number of client bytes sent per message.
-const CLIENT_CHUNK: usize = 64 * 1024;
+const CLIENT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Umask applied while binding, so the socket gets mode 0600 (owner only).
+const SOCKET_UMASK: libc::mode_t = 0o177;
 
 /// Pause after a failed accept, so a persistent error doesn't spin.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -103,7 +109,7 @@ fn read_from_client(
     mut stream: &UnixStream,
     data: &Mutex<InnerClientBroker>,
 ) -> ExitCode {
-    let mut buf = vec![0u8; CLIENT_CHUNK];
+    let mut buf = vec![0u8; CLIENT_CHUNK_BYTES];
     loop {
         match stream.read(&mut buf) {
             Ok(0) => return CLIENT_CLOSED,
@@ -123,13 +129,11 @@ fn read_from_client(
 /// or the client side has finished.
 fn write_to_client(host_stdin: Receiver<ClientMessage>, mut stream: UnixStream) {
     for msg in host_stdin {
-        match msg {
-            Some(bytes) => {
-                if stream.write_all(&bytes).is_err() {
-                    break;
-                }
-            }
-            None => break,
+        let Some(bytes) = msg else {
+            break;
+        };
+        if stream.write_all(&bytes).is_err() {
+            break;
         }
     }
     // Ends the reader too, if it's still waiting on the client.
@@ -150,30 +154,26 @@ impl SocketListener {
             if self.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            match stream {
-                Ok(stream) => {
-                    let rx = match lock(&self.data).add_proc(proc_idx) {
-                        Ok(rx) => rx,
-                        Err(_) => {
-                            eprintln!(
-                                "scoter-broker: host output closed; no longer accepting clients"
-                            );
-                            return;
-                        }
-                    };
-                    let client = Client {
-                        proc: proc_idx,
-                        host_stdin: rx,
-                        data: self.data.clone(),
-                    };
-                    thread::spawn(move || client.handle_client(stream));
-                    proc_idx += 1;
-                }
+            let stream = match stream {
+                Ok(stream) => stream,
                 Err(e) => {
-                    eprintln!("scoter-broker: failed to accept a client connection: {e}");
+                    eprintln!("{LOG_PREFIX}: failed to accept a client connection: {e}");
                     thread::sleep(ACCEPT_RETRY_DELAY);
+                    continue;
                 }
-            }
+            };
+
+            let Ok(rx) = lock(&self.data).add_proc(proc_idx) else {
+                eprintln!("{LOG_PREFIX}: host output closed; no longer accepting clients");
+                return;
+            };
+            let client = Client {
+                proc: proc_idx,
+                host_stdin: rx,
+                data: self.data.clone(),
+            };
+            thread::spawn(move || client.handle_client(stream));
+            proc_idx += 1;
         }
     }
 }
@@ -269,7 +269,7 @@ impl BoundSocket {
         let listener = {
             let _guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             // SAFETY: umask has no failure modes; the previous mask is restored right after bind.
-            let old_mask = unsafe { libc::umask(0o177) };
+            let old_mask = unsafe { libc::umask(SOCKET_UMASK) };
             let listener = UnixListener::bind(path);
             unsafe { libc::umask(old_mask) };
             listener?
@@ -318,7 +318,7 @@ where
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "scoter-broker: cannot listen on {}: {e}",
+                "{LOG_PREFIX}: cannot listen on {}: {e}",
                 socket_path.display()
             );
             return EXIT_FAILURE;
@@ -328,7 +328,7 @@ where
         Ok(l) => l,
         Err(e) => {
             eprintln!(
-                "scoter-broker: cannot listen on {}: {e}",
+                "{LOG_PREFIX}: cannot listen on {}: {e}",
                 socket_path.display()
             );
             socket.remove();
@@ -346,7 +346,7 @@ where
             let code = match broker_host::send_all(&rx, &mut BufWriter::new(host_out)) {
                 Ok(()) => EXIT_OK,
                 Err(e) => {
-                    eprintln!("scoter-broker: cannot write to host: {e}");
+                    eprintln!("{LOG_PREFIX}: cannot write to host: {e}");
                     EXIT_FAILURE
                 }
             };
@@ -360,7 +360,7 @@ where
             let code = match pump_host_input(BufReader::new(host_in), &data) {
                 Ok(()) => EXIT_OK,
                 Err(e) => {
-                    eprintln!("scoter-broker: bad input from host: {e}");
+                    eprintln!("{LOG_PREFIX}: bad input from host: {e}");
                     EXIT_FAILURE
                 }
             };
@@ -403,7 +403,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicUsize;
 
-    const TIMEOUT: Option<Duration> = Some(Duration::from_secs(10));
+    /// How long a test waits for the broker before failing.
+    const TIMEOUT_SECONDS: u64 = 10;
+    const TIMEOUT: Option<Duration> = Some(Duration::from_secs(TIMEOUT_SECONDS));
+
+    /// How often, and how many times, `start_broker` checks for the socket file.
+    const STARTUP_POLL_MILLIS: u64 = 5;
+    const STARTUP_POLL_ATTEMPTS: usize = 1000;
 
     /// A unique socket path for this test, removed when dropped.
     struct TempSocket(PathBuf);
@@ -434,7 +440,8 @@ mod tests {
     }
 
     fn recv_timeout<T>(rx: &Receiver<T>) -> T {
-        rx.recv_timeout(Duration::from_secs(10)).expect("timed out")
+        rx.recv_timeout(Duration::from_secs(TIMEOUT_SECONDS))
+            .expect("timed out")
     }
 
     /// Read from the client side until EOF.
@@ -456,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn add_proc_fails_when_host_output_gone() {
+    fn add_proc_fails_without_host() {
         let (data, rx) = InnerClientBroker::new();
         drop(rx);
         assert!(lock(&data).add_proc(0).is_err());
@@ -464,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn send_msg_forwards_only_open_processes() {
+    fn send_msg_only_open_procs() {
         let (data, rx) = InnerClientBroker::new();
         let _client = lock(&data).add_proc(1).unwrap();
         rx.try_recv().unwrap();
@@ -495,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn host_close_suppresses_client_terminated() {
+    fn host_close_hides_client_close() {
         let (data, rx) = InnerClientBroker::new();
         let client = lock(&data).add_proc(1).unwrap();
         rx.try_recv().unwrap();
@@ -506,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn host_message_and_close_delivered_in_order() {
+    fn host_messages_in_order() {
         let (data, _rx) = InnerClientBroker::new();
         let client = lock(&data).add_proc(4).unwrap();
         lock(&data).host_message(4, b"one".to_vec());
@@ -521,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn host_messages_for_unknown_or_gone_clients_are_ignored() {
+    fn host_message_unknown_proc() {
         let (data, _rx) = InnerClientBroker::new();
         lock(&data).host_message(9, b"x".to_vec());
         lock(&data).host_closed(9);
@@ -583,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn host_input_rejects_process_started() {
+    fn host_input_rejects_started() {
         let (data, _rx) = InnerClientBroker::new();
         let input = encode(&[Command::Started(0)]);
         let err = pump_host_input(Cursor::new(input), &data).unwrap_err();
@@ -591,14 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn host_input_rejects_bad_command() {
+    fn host_input_bad_command() {
         let (data, _rx) = InnerClientBroker::new();
         let err = pump_host_input(Cursor::new(vec![77]), &data).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
     #[test]
-    fn host_input_retries_interrupted() {
+    fn host_input_interrupted() {
         struct InterruptOnce {
             inner: Cursor<Vec<u8>>,
             interrupted: bool,
@@ -645,9 +652,9 @@ mod tests {
     }
 
     #[test]
-    fn client_bytes_reach_host_then_client_close_reported() {
+    fn client_bytes_then_close() {
         let (_data, rx, mut client, handle) = start_client();
-        let payload: Vec<u8> = (0..(CLIENT_CHUNK * 2 + 17))
+        let payload: Vec<u8> = (0..(CLIENT_CHUNK_BYTES * 2 + 17))
             .map(|i| (i % 253) as u8)
             .collect();
         client.write_all(&payload).unwrap();
@@ -657,7 +664,7 @@ mod tests {
         loop {
             match recv_timeout(&rx) {
                 Command::Message((0, bytes)) => {
-                    assert!(bytes.len() <= CLIENT_CHUNK);
+                    assert!(bytes.len() <= CLIENT_CHUNK_BYTES);
                     received.extend_from_slice(&bytes);
                 }
                 Command::Terminated((0, code)) => {
@@ -674,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn host_bytes_reach_client_then_host_close() {
+    fn host_bytes_then_close() {
         let (data, rx, client, handle) = start_client();
         lock(&data).host_message(0, b"hello ".to_vec());
         lock(&data).host_message(0, b"world".to_vec());
@@ -687,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn host_close_while_client_still_sending() {
+    fn host_close_while_sending() {
         let (data, rx, mut client, handle) = start_client();
         client.write_all(b"early").unwrap();
         assert_eq!(recv_timeout(&rx), Command::Message((0, b"early".to_vec())));
@@ -700,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn client_vanishes_without_reading() {
+    fn client_vanishes() {
         let (data, rx, client, handle) = start_client();
         drop(client);
         assert_eq!(recv_timeout(&rx), Command::Terminated((0, CLIENT_CLOSED)));
@@ -713,7 +720,7 @@ mod tests {
     // ---- SocketListener / BoundSocket ----
 
     #[test]
-    fn listener_assigns_increasing_process_ids() {
+    fn listener_increments_ids() {
         let path = TempSocket::new();
         let socket = BoundSocket::bind(&path.0).unwrap();
         let (data, rx) = InnerClientBroker::new();
@@ -738,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn listener_stops_when_host_output_gone() {
+    fn listener_stops_without_host() {
         let path = TempSocket::new();
         let socket = BoundSocket::bind(&path.0).unwrap();
         let (data, rx) = InnerClientBroker::new();
@@ -789,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_leaves_replacement_socket() {
+    fn remove_keeps_replacement() {
         let path = TempSocket::new();
         let old = BoundSocket::bind(&path.0).unwrap();
         let new = BoundSocket::bind(&path.0).unwrap();
@@ -815,11 +822,11 @@ mod tests {
         let socket_path = path.0.clone();
         let handle = thread::spawn(move || run(&socket_path, host_in, host_out));
         // Wait for the listener.
-        for _ in 0..1000 {
+        for _ in 0..STARTUP_POLL_ATTEMPTS {
             if path.0.exists() {
                 break;
             }
-            thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(STARTUP_POLL_MILLIS));
         }
         RunningBroker {
             path,
@@ -879,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn run_exits_on_malformed_host_input() {
+    fn run_exits_on_bad_input() {
         let mut broker = start_broker();
         let client = UnixStream::connect(&broker.path.0).unwrap();
         assert_eq!(
@@ -896,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn run_exits_when_host_stops_reading() {
+    fn run_exits_on_closed_output() {
         let broker = start_broker();
         drop(broker.from_broker);
         // The next event for the host fails to write.
@@ -906,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn run_fails_when_socket_cannot_be_bound() {
+    fn run_fails_on_bind_error() {
         let path = std::env::temp_dir()
             .join("scoter-broker-test-missing-dir")
             .join("x.sock");

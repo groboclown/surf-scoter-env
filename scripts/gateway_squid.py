@@ -18,10 +18,16 @@ import re
 import sys
 from collections.abc import Sequence
 
-from surf_scoter_lib import UserConfig, gateway
+from surf_scoter_lib import UserConfig, fileutil, gateway
 from surf_scoter_lib.err import SurfScoterErr
 
-MAX_UNIVERSAL_SIZE = 4 * 1024 * 1024
+MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
+# The only port the gateway's firewall lets out.
+FIREWALL_PORT = 443
+# The host list's mode: the gateway runs as its own user, which must read it.
+MODE_HOST_LIST = 0o644
+EXIT_REFUSED = 1
+EXIT_ERROR = 2
 
 # ---------------------------------------------------------------------
 # The translation
@@ -47,8 +53,8 @@ def refusal(rule: gateway.Rule) -> str | None:
             "plain `http` needs port 80 through the gateway's firewall and Squid's HTTP "
             "handling, which the Squid gateway doesn't have yet (use `tls` on 443 if the host has it)"
         )
-    if rule.port != 443:
-        return f"the gateway's firewall only lets TCP port 443 out, not {rule.port}"
+    if rule.port != FIREWALL_PORT:
+        return f"the gateway's firewall only lets TCP port {FIREWALL_PORT} out, not {rule.port}"
     if rule.methods:
         return "the gateway can't see the methods inside `tls`"
     return None
@@ -90,30 +96,30 @@ def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     if len(argv) != 3:
         print(f"Usage: {argv[0] if argv else 'gateway_squid.py'} UNIVERSAL.json OUTPUT", file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     try:
         with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_SIZE + 1)
-        if len(data) > MAX_UNIVERSAL_SIZE:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_SIZE} bytes")
+            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
+        if len(data) > MAX_UNIVERSAL_BYTES:
+            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
         rules = gateway.rules_from(UserConfig(suc))
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     report, text = translate(rules)
     print(json.dumps(report.to_json()))
     if report.refused:
-        return 1
+        return EXIT_REFUSED
     # The gateway runs as its own user, which must be able to read it; it
     # holds nothing secret.  Replaced whole, so it's never half-written.
     temp = argv[2] + ".tmp"
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | fileutil.O_NOFOLLOW, MODE_HOST_LIST)
     with os.fdopen(fd, "w", encoding="utf-8") as out:
         out.write(text)
-    os.chmod(temp, 0o644)
+    os.chmod(temp, MODE_HOST_LIST)
     os.replace(temp, argv[2])
     return 0
 

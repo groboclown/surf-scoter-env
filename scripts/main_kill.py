@@ -6,6 +6,7 @@ containers, fetches its workspace's changes into the project if asked,
 removes its workspace if asked, and forgets it (its entry in the running
 environments file, and `${scoter:state-dir}/environments/HOST`).
 """
+import enum
 import os
 import subprocess  # nosec: B404  # Runs the setup's own commands.
 import sys
@@ -21,10 +22,28 @@ from surf_scoter_lib import (
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
+from surf_scoter_lib.user_config import Capture, OnError
 
 # Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`
 # (as `main_run.py` has it).
 SUC_COPY_DIR = "environments"
+
+
+class Workspace(enum.Enum):
+    """What `run_kill` does with the environment's workspace."""
+
+    KEEP = "keep"
+    # Remove it (`--force-clean`), unless it is, or holds, something else.
+    REMOVE = "remove"
+
+
+class SshEntries(enum.Enum):
+    """What `run_kill` does with the environment's ssh entries."""
+
+    # Remove them as `ssh: values: config-cleanup` says.
+    RELEASE = "release"
+    # Leave them: `scoter cleanup` asks about them all at once.
+    KEEP = "keep"
 
 
 def run_kill(
@@ -32,13 +51,14 @@ def run_kill(
     *,
     host: str | None,
     fetch_branch: str | None,
-    force_clean: bool,
-    release_ssh: bool = True,
+    workspace: Workspace,
+    ssh: SshEntries = SshEntries.RELEASE,
 ) -> int:
     """Stop the environment `host`, or the project's one.
 
-    With `release_ssh`, its ssh entries go as `ssh: values: config-cleanup`
-    says; `scoter cleanup` leaves them out, to ask about them all at once.
+    With `SshEntries.RELEASE`, its ssh entries go as `ssh: values:
+    config-cleanup` says; `scoter cleanup` keeps them, to ask about them all
+    at once.
     """
     try:
         file = config.require_path("scoter", "running-envs")
@@ -58,7 +78,7 @@ def run_kill(
             print("Its compose files are gone; there are no containers to stop.", file=sys.stderr)
         else:
             res = recorded.run_command(
-                "docker", "compose-down", check=False, capture_stdout=False,
+                "docker", "compose-down", on_error=OnError.RETURN, capture=Capture.NONE,
                 template={"env-file": env.compose_env_file, "compose-file": env.compose_file},
             )
             if res.returncode != 0:
@@ -75,7 +95,7 @@ def run_kill(
     if fetch_branch and not _fetch(recorded, env, fetch_branch):
         print("Its workspace is kept, and it's still listed.", file=sys.stderr)
         return 1
-    if force_clean and env.workspace_dir:
+    if workspace == Workspace.REMOVE and env.workspace_dir:
         problem = _unsafe_to_remove(Path(env.workspace_dir), recorded)
         if problem:
             print(f"Not removing the workspace {env.workspace_dir}: {problem}.", file=sys.stderr)
@@ -95,7 +115,7 @@ def run_kill(
         print(f"Couldn't forget {env.host}: {err}", file=sys.stderr)
         return 1
     print(f"Stopped {env.host}.")
-    if release_ssh:
+    if ssh == SshEntries.RELEASE:
         try:
             if ssh_hosts.release(config, env.host):
                 print(f"Removed the ssh entries for {env.host}.")
@@ -154,7 +174,8 @@ def _fetch(config: UserConfig, env: EnvironmentDesc, branch: str) -> bool:
     print(f"Fetching {branch} from the workspace into {root}...")
     try:
         res = config.run_command(
-            section, "fetch-changes-into", cwd=Path(root), check=False, capture_stdout=False,
+            section, "fetch-changes-into", cwd=Path(root), on_error=OnError.RETURN,
+            capture=Capture.NONE,
             template={"workspace-dir": env.workspace_dir, "branch": branch},
         )
     except (OSError, subprocess.SubprocessError, SurfScoterErr) as err:
@@ -172,7 +193,7 @@ def _unsafe_to_remove(workspace: Path, config: UserConfig) -> str | None:
     real = Path(os.path.realpath(workspace))
     if not real.is_dir() or os.path.islink(workspace):
         return "it isn't a directory"
-    guarded = [
+    guarded: list[tuple[str, Path | None]] = [
         ("the project directory", config.active_location("project-dir")),
         ("the repository", config.active_location("vcs-root")),
         ("your home directory", Path.home()),
@@ -218,7 +239,7 @@ def main(argv: Sequence[str]) -> int:
         default=False,
         dest="force_clean",
         help=(
-            "Force delete of the workspace files.  Setting this can potentially"
+            "Force delete of the workspace files.  Setting this can potentially "
             "delete changes, so you should use this with the '--fetch' argument."
         ),
     )
@@ -228,8 +249,9 @@ def main(argv: Sequence[str]) -> int:
         config,
         host=args.host,
         fetch_branch=args.fetch_branch,
-        force_clean=args.force_clean,
+        workspace=Workspace.REMOVE if args.force_clean else Workspace.KEEP,
     )
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

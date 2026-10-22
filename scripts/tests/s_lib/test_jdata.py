@@ -46,8 +46,9 @@ class FindTest(unittest.TestCase):
 
     def test_not_there(self) -> None:
         for path in (("missing",), ("a", "missing"), ("a", "z"), ("a", "z", "deeper"), ("list", 5)):
-            self.assertIsNone(jdata.find(self.DATA, *path), path)
-            self.assertIsNone(jdata.find_str(self.DATA, *path), path)
+            with self.subTest(path=path):
+                self.assertIsNone(jdata.find(self.DATA, *path), path)
+                self.assertIsNone(jdata.find_str(self.DATA, *path), path)
         self.assertEqual(jdata.find_str_list(self.DATA, "missing"), [])
         self.assertEqual(jdata.find_dict_keys(self.DATA, "a", "z"), [])
         self.assertEqual(jdata.find_list_keys(self.DATA, "nope"), [])

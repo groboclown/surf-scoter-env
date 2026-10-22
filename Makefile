@@ -91,7 +91,7 @@ fmt: dev-env-rust-fmt
 dev-env-rust-fmt:
 	cd containers/dev-env && $(CARGO) fmt --all
 
-## dev-env-rust-lint        Run 'clippy' on the 'dev-env' container source files.
+## dev-env-rust-lint         Run 'clippy' on the 'dev-env' container source files.
 .PHONY: dev-env-rust-lint
 lint: dev-env-rust-lint
 dev-env-rust-lint:
@@ -151,7 +151,7 @@ host-build-release-aarch64-unknown-linux-gnu:
 	cd host && $(CARGO_BIN)/cross build --target aarch64-unknown-linux-gnu --release
 
 .PHONY: host-build-release-x86_64-apple-darwin
-# macOs builds not added to host-build-release-all, as it requires a custom
+# macOS builds not added to host-build-release-all, as it requires a custom
 # Cross.toml image with the macOS SDK license.
 host-build-release-x86_64-apple-darwin: dependencies-cross
 	cd host && $(CARGO_BIN)/cross build --target x86_64-apple-darwin --release
@@ -253,11 +253,10 @@ installer:
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 installer: mk-installer-x86_64-unknown-linux-gnu
 mk-installer-x86_64-unknown-linux-gnu: host-build-release-x86_64-unknown-linux-gnu
-	bash -x build-scripts/mk-install.sh target/surf-scoter-x86_64-unknown-linux-gnu-1.0.0 x86_64-unknown-linux-gnu
+	sh -x build-scripts/mk-install.sh target/surf-scoter-x86_64-unknown-linux-gnu-1.0.0 x86_64-unknown-linux-gnu
 
 ## installer-clean           Clean the installation build generated files.
 .PHONY: installer-clean
 clean: installer-clean
 installer-clean:
-	-rm -r target/work
-	-rm target/scoter-*.zip
+	-rm target/installer

@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Test staging the accepted copy of a project's files for the run (step 16)."""
+"""Test staging the accepted copy of a project's files for the run."""
 import datetime
 import json
 import os
@@ -103,7 +103,7 @@ class PrepareTest(DistTest):
         self.assertIsNone(plan)
         self.assertEqual(os.listdir(build), [])
 
-    def test_builds_from_the_accepted_copy(self) -> None:
+    def test_builds_from_accepted(self) -> None:
         """A change to the live files after the run read them doesn't reach the build."""
         suc = self.project_suc(self.accept())
         (self.files / "env" / "Dockerfile").write_text("FROM evil\n", encoding="utf-8")
@@ -125,7 +125,7 @@ class PrepareTest(DistTest):
         plan, _ = self.prepare(config.raw())
         self.assertIsNotNone(plan)
 
-    def test_changed_before_the_run_read_them(self) -> None:
+    def test_changed_before_read(self) -> None:
         """The run read files that aren't the accepted ones: it stops, and says to run again."""
         accepted = self.accept()
         (self.files / "env" / "dev-env.yaml").write_text(
@@ -257,7 +257,7 @@ class PrepareTest(DistTest):
         # The later runs start from the first one's setup: make it again.
         self.generate("--distribution-dir", str(self.dist), output=self.tmp / "first.json")
 
-    def test_verified_container_as_accepted(self) -> None:
+    def test_verified_as_accepted(self) -> None:
         """A `verification: verified-containers` container builds from the copy kept with the acceptance."""
         self.verified_parent()
         accepted = self.accept()
@@ -272,7 +272,7 @@ class PrepareTest(DistTest):
         self.assertTrue(parent.is_relative_to(build))
         self.assertEqual((parent / "Dockerfile").read_text(), "FROM debian:bookworm\n")
 
-    def test_verified_container_not_kept(self) -> None:
+    def test_verified_not_kept(self) -> None:
         """An acceptance from before the containers were kept with it: a new review."""
         self.verified_parent()
         accepted = self.accept()
@@ -281,7 +281,7 @@ class PrepareTest(DistTest):
             self.prepare(self.project_suc(accepted))
         self.assertTrue(caught.exception.reverify)
 
-    def test_users_container_with_images(self) -> None:
+    def test_user_container_images(self) -> None:
         """`use: {name}` with an `images` mapping: built from a copy, rewritten; the user's own is left."""
         (self.mine / "my-env").mkdir()
         (self.mine / "my-env" / "Dockerfile").write_text("FROM debian:bookworm\n", encoding="utf-8")

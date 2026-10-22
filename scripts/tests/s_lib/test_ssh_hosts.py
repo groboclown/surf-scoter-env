@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ...surf_scoter_lib import ssh_hosts
+from ...surf_scoter_lib import fileutil, ssh_hosts
 from ...surf_scoter_lib.err import ConfigErr
 from ...surf_scoter_lib.user_config import UserConfig
 
@@ -95,7 +95,7 @@ class SshHostsTest(unittest.TestCase):
         # Written again and again, the file doesn't grow.
         ssh_hosts.write_host(config, "scoter-p", "ubuntu", "20001")
         self.assertEqual(self.file.read_text(encoding="utf-8"), text)
-        if sys.platform != "win32":
+        if not fileutil.is_windows():
             self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
         with self.assertRaisesRegex(ConfigErr, "has a `Host mine` the tools didn't write"):
             ssh_hosts.write_host(config, "mine", "ubuntu", "20000")

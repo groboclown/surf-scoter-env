@@ -69,7 +69,8 @@ class StoreAcceptanceTest(TempDirTest):
         suggestion = json.loads((where / accept.SUGGESTION_FILE).read_text())
         self.assertEqual(suggestion["dev-container"]["user"], "me")
         for name in (accept.REVIEW_FILE, lookup.ACCEPTED_FILE, accept.SUGGESTION_FILE):
-            self.assertEqual(os.stat(where / name).st_mode & 0o777, 0o600)
+            with self.subTest(name=name):
+                self.assertEqual(os.stat(where / name).st_mode & 0o777, 0o600)
 
     def test_replaces_the_branchs(self) -> None:
         """Each acceptance replaces the branch's earlier one, and its files go."""

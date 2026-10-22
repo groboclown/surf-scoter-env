@@ -2,15 +2,14 @@
 """Test the checks module."""
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from ...surf_scoter_lib import checks, jdata
+from ...surf_scoter_lib import checks, fileutil, jdata
 from ...surf_scoter_lib.user_config import UserConfig
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 Severity = checks.Severity
 
 
@@ -364,7 +363,7 @@ class ProjectFilesTest(_Project):
         refused = sorted(k for _, k, _ in self.found(Severity.REFUSE))
         self.assertEqual(refused, ["env/Dockerfile", "env/pipe"])
 
-    def test_outside_container_dirs_are_trusted(self) -> None:
+    def test_outside_dirs_trusted(self) -> None:
         """A container directory outside the project files directory isn't checked here."""
         suc = self.suc()
         outside = self.tmp / "dist" / "base"
@@ -451,7 +450,7 @@ class ReviewTest(_Project):
                                                           or "isn't on this computer" in f.message)
         ]
 
-    def test_egress_refusal_and_override(self) -> None:
+    def test_egress_override(self) -> None:
         """An `egress-hosts` refusal is a policy refusal: the review's `$override` sets it aside."""
         self.egress_hosts["forbidden"] = {"action": "refuse", "reason": "no", "hosts": ["pastebin.com"]}
         egress = [{"host": "pastebin.com", "protocol": "tls", "port": 443, "methods": []}]
@@ -471,7 +470,7 @@ class ReviewTest(_Project):
         self.assertEqual([s for s, _ in found], ["note"])
         self.assertIn("You overrode `verification:forbidden`", found[0][1])
 
-    def test_policy_refusal_and_override(self) -> None:
+    def test_policy_override(self) -> None:
         """Refused without an override; a note with one naming the refusing check."""
         self.accepted_commands = [self.command(str(self.sh))]
         self.assertEqual(self.about(0), [("refuse", "because verification:shells")])
@@ -497,7 +496,7 @@ class ReviewTest(_Project):
             ("note", "You overrode `verification:shells` here: because verification:shells"), found,
         )
 
-    def test_safety_refusal_cant_be_overridden(self) -> None:
+    def test_safety_not_overridable(self) -> None:
         """A missing program stays refused, whatever the override says."""
         self.accepted_commands = [self.command(str(self.tmp / "gone"))]
         self.overrides = [{"index": 0, "checks": ["verification:shells"]}]
@@ -505,7 +504,7 @@ class ReviewTest(_Project):
         self.assertTrue(all(s == "refuse" for s in severities), self.about(0))
         self.assertTrue(any("Can't be overridden" in m for _, m in self.about(0)), self.about(0))
 
-    def test_own_container_skips_project_files(self) -> None:
+    def test_own_container_skips(self) -> None:
         """With one of the user's containers, the project's container files aren't checked."""
         os.mkfifo(self.project / ".surf-scoter.d" / "env" / "pipe")
         self.assertTrue(any(f.key == "env/pipe" for f in self.review().findings))

@@ -20,11 +20,16 @@ from collections.abc import Callable, Iterable
 from . import argutil, fileutil
 from .err import ConfigErr
 from .ssh_config import SshConfig
-from .user_config import UserConfig
+from .user_config import Capture, Echo, OnError, UserConfig
 
 # The first line in each block the tools write: how they tell theirs apart.
 MARKER = "# Surf Scoter environment"
-CLEANUP_MODES = ("no", "auto", "ask")
+# `ssh: values: config-cleanup`: keep an environment's entries, remove them,
+# or ask at a terminal.
+CLEANUP_NO = "no"
+CLEANUP_AUTO = "auto"
+CLEANUP_ASK = "ask"
+CLEANUP_MODES = (CLEANUP_NO, CLEANUP_AUTO, CLEANUP_ASK)
 # What a host name may hold: it names containers and images, and is an ssh `Host`.
 _HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 # A user name, as the container's `dev-env.yaml` gives it: it goes into the
@@ -50,7 +55,7 @@ def cleanup_mode(config: UserConfig) -> str:
     """`ssh: values: config-cleanup`: `no`, `auto` or `ask` (the default)."""
     raw = config.raw("resolved", "ssh", "values", "config-cleanup")
     # YAML reads a bare `no` as false.
-    value = "no" if raw is False else "ask" if raw is None else str(raw)
+    value = CLEANUP_NO if raw is False else CLEANUP_ASK if raw is None else str(raw)
     if value not in CLEANUP_MODES:
         raise ConfigErr(f"`ssh: values: config-cleanup` must be `no`, `auto` or `ask`, not `{value}`")
     return value
@@ -73,7 +78,7 @@ def _save(config: UserConfig, ssh_config: SshConfig) -> None:
     fileutil.backup(file, config.require_value("scoter", "backup-file-extension"))
     file.write_text(ssh_config.output(), encoding="utf-8")
     # Ensure the file mode wasn't changed.
-    fileutil.touch(file, 0o600)
+    fileutil.touch(file, fileutil.MODE_USER_RW)
 
 
 def write_host(config: UserConfig, host: str, user: str, port: str) -> None:
@@ -131,8 +136,8 @@ def remove_hosts(config: UserConfig, hosts: Iterable[str]) -> list[str]:
         _save(config, ssh_config)
     for host in removed:
         config.run_command(
-            "ssh", "remove-known-host", check=False, quiet=True,
-            capture_stderr=True, template={"host": host},
+            "ssh", "remove-known-host", on_error=OnError.RETURN, echo=Echo.QUIET,
+            capture=Capture.BOTH, template={"host": host},
         )
     return removed
 
@@ -145,9 +150,9 @@ def release(
     `ask` asks the user (by default, at the terminal, when there is one).
     """
     mode = cleanup_mode(config)
-    if mode == "no":
+    if mode == CLEANUP_NO:
         return False
-    if mode == "ask":
+    if mode == CLEANUP_ASK:
         if ask is None:
             if not argutil.can_ask():
                 print(

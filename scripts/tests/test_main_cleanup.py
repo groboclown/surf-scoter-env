@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Test the main_cleanup script, and the cleanup library it uses (step 23)."""
+"""Test the main_cleanup script, and the cleanup library it uses."""
 import contextlib
 import datetime
 import io
@@ -27,7 +27,7 @@ PREFIX = "local-surf-scoter/"
 
 def dead_pid() -> int:
     """The number of a process that has ended."""
-    child = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec: B603
+    child = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec: B603  # This interpreter, as a list.
     child.wait()
     return child.pid
 
@@ -134,7 +134,7 @@ class CleanupTest(StoreTest):
 
     def test_nothing(self) -> None:
         """Nothing left behind: said so."""
-        self.assertEqual(self.run_cleanup(force=True), (0, "Nothing to clean up.\n"))
+        self.assertEqual(self.run_cleanup(confirm=main_cleanup.Confirm.FORCE), (0, "Nothing to clean up.\n"))
 
     def test_stale_runs_and_state(self) -> None:
         """A record whose run is gone, and state no record uses, go; a running one's stay."""
@@ -147,7 +147,7 @@ class CleanupTest(StoreTest):
         hours_ago = (datetime.datetime.now() - datetime.timedelta(hours=2)).timestamp()
         os.utime(old, (hours_ago, hours_ago))
         (self.state / "exempt-new").mkdir()
-        code, out = self.run_cleanup(dry_run=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.DRY_RUN)
         self.assertEqual(code, 0)
         self.assertIn("scoter-me-2000-b  reserved", out)
         self.assertIn(str(self.state / "environments" / "scoter-me-2000-q"), out)
@@ -155,7 +155,7 @@ class CleanupTest(StoreTest):
         self.assertNotIn("exempt-new", out)
         self.assertIn("Nothing was removed (--dry-run).", out)
         self.assertEqual(self.hosts(), ["scoter-me-2000-a", "scoter-me-2000-b"])
-        code, out = self.run_cleanup(force=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertEqual(code, 0, out)
         self.assertIn("Stopped scoter-me-2000-b.", out)
         self.assertEqual(self.hosts(), ["scoter-me-2000-a"])
@@ -169,7 +169,7 @@ class CleanupTest(StoreTest):
         other = self.new_project("other")
         self.accept("FROM alpine\n", None, other)
         shutil.rmtree(other)
-        code, out = self.run_cleanup(force=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertEqual(code, 0, out)
         self.assertIn(f"{other}  (1 acceptance)", out)
         self.assertIn(f"Revoked 1 acceptance of {other}.", out)
@@ -212,22 +212,22 @@ class CleanupTest(StoreTest):
         self.assertEqual(self.hosts(), ["scoter-me-2000-b"])
 
     def test_workspaces(self) -> None:
-        """Only with `workspaces`: those no running environment uses, or is starting with."""
+        """Only with `Extras.WORKSPACES`: those no running environment uses, or is starting with."""
         root = self.state / "workspaces"
         for name in ("unused", "used", store.environment_id(self.project)):
             (root / name / "workspace").mkdir(parents=True)
         self.record_run("a", os.getpid(), workspace_dir=str(root / "used" / "workspace"))
         self.record_run("c", os.getpid(), project_dir=str(self.project))
-        self.assertEqual(self.run_cleanup(force=True)[1], "Nothing to clean up.\n")
-        code, out = self.run_cleanup(force=True, workspaces=True)
+        self.assertEqual(self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)[1], "Nothing to clean up.\n")
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, extras=main_cleanup.Extras.WORKSPACES)
         self.assertEqual(code, 0, out)
         self.assertIn(f"Removed {root / 'unused'}.", out)
         self.assertEqual(sorted(os.listdir(root)), sorted(["used", store.environment_id(self.project)]))
 
     def test_images(self) -> None:
-        """Only with `images`: those no running environment uses, then the dangling layers."""
+        """Only with `Extras.IMAGES`: those no running environment uses, then the dangling layers."""
         self.record_run("a", os.getpid())
-        code, out = self.run_cleanup(force=True, images=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, extras=main_cleanup.Extras.IMAGES)
         self.assertEqual(code, 0, out)
         self.assertIn(f"Removed {PREFIX}scoter-me-2000-z:latest.", out)
         log = self.docker_log.read_text(encoding="utf-8").splitlines()
@@ -246,15 +246,15 @@ class CleanupTest(StoreTest):
         self.record_run("a", os.getpid())
 
     def test_ssh_ask(self) -> None:
-        """`ask`: the stopped environment's entry is asked about on its own, even with `force`."""
+        """`ask`: the stopped environment's entry is asked about on its own, even with `Confirm.FORCE`."""
         self.write_ssh_hosts()
-        code, out = self.run_cleanup(force=True, ask=lambda prompt: "n")
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, ask=lambda prompt: "n")
         self.assertEqual(code, 0, out)
         self.assertIn("SSH config entries for environments that aren't running:\n  scoter-me-2000-z\n", out)
         self.assertIn("The ssh config entries were kept.", out)
         self.assertIn("Host scoter-me-2000-z", self.ssh_config())
         asked: list[str] = []
-        code, out = self.run_cleanup(force=True, ask=lambda prompt: asked.append(prompt) or "y")
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, ask=lambda prompt: asked.append(prompt) or "y")
         self.assertEqual(asked, [main_cleanup.SSH_PROMPT])
         self.assertIn("Removed the ssh entries for scoter-me-2000-z.", out)
         config = self.ssh_config()
@@ -267,11 +267,11 @@ class CleanupTest(StoreTest):
         """`auto`: removed with the rest; `no`: only counted."""
         self.write_ssh_hosts()
         self.ssh_mode = "no"
-        code, out = self.run_cleanup(force=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertIn("Your ssh config has 1 entry for environments that aren't running", out)
         self.assertIn("Host scoter-me-2000-z", self.ssh_config())
         self.ssh_mode = "auto"
-        code, out = self.run_cleanup(force=True)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertEqual(code, 0, out)
         self.assertIn("Removed the ssh entries for scoter-me-2000-z.", out)
         self.assertNotIn("Host scoter-me-2000-z", self.ssh_config())

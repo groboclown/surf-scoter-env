@@ -74,14 +74,14 @@ pub(super) fn write_u32<W: Write>(w: &mut W, data: u32) -> Result<()> {
     w.write_all(&bytes)
 }
 
-/// Read a i32 number.
+/// Read an i32 number.
 pub(super) fn read_i32<R: Read>(r: &mut R) -> Result<i32> {
     let mut bytes: [u8; 4] = [0; 4];
     r.read_exact(&mut bytes)?;
     Ok(i32::from_be_bytes(bytes))
 }
 
-/// Write a i32 number.
+/// Write an i32 number.
 pub(super) fn write_i32<W: Write>(w: &mut W, data: i32) -> Result<()> {
     let bytes = data.to_be_bytes();
     w.write_all(&bytes)
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_array_at_maximum_len_header_accepted() {
+    fn byte_array_maximum_len() {
         // Header claims exactly the maximum; data is missing so it's an EOF, not a format error.
         let buf = MAXIMUM_BYTE_ARRAY_LEN.to_be_bytes().to_vec();
         let err = read_byte_array(&mut Cursor::new(buf)).unwrap_err();
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn string_roundtrip() {
-        for s in ["", "plain", "ünïcødé 🦆"] {
+        for s in ["", "plain", "\u{fc}n\u{ef}c\u{f8}d\u{e9} \u{1f986}"] {
             let mut buf = Vec::new();
             write_string(&mut buf, s).unwrap();
             assert_eq!(read_string(&mut Cursor::new(buf)).unwrap(), s);

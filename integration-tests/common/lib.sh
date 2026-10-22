@@ -136,11 +136,21 @@ scoter() {
     ( cd "${IT_PROJECT}" && "${IT_DIST}/scoter" "$@" )
 }
 
+# it_tty COMMAND: run the shell COMMAND through a terminal, with `script`.
+# The util-linux `script` takes the command with `-c`; the BSD one (macOS)
+# takes it after the output file.
+it_tty() {
+    case "$( uname -s )" in
+        Linux) script -qec "$1" /dev/null ;;
+        *) script -q /dev/null sh -c "$1" ;;
+    esac
+}
+
 # it_accept: use the project's review as it stands, through a terminal (the
 # prompt refuses to ask without one).
 it_accept() {
     out="${IT_SANDBOX}/accept.log"
-    printf 'u\n' | script -qec "cd '${IT_PROJECT}' && '${IT_DIST}/scoter' verify" /dev/null \
+    printf 'u\n' | it_tty "cd '${IT_PROJECT}' && '${IT_DIST}/scoter' verify" \
         > "${out}" 2>&1 || true
     grep -q "Accepted (" "${out}" || { cat "${out}" >&2; it_fail "the review wasn't accepted"; }
 }

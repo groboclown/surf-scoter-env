@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""The earlier acceptance a new review compares with (step 17).
+"""The earlier acceptance a new review compares with.
 
 `main_verify.py` uses this to find what the project suggested last time,
 and what the user accepted, so the review can show what changed since,
@@ -63,7 +63,7 @@ def find(config: UserConfig, branch: str | None) -> Previous | None:
     on_branch = [a for a in candidates if branch is not None and a.branch == branch]
     for acceptance in on_branch or candidates:
         where = (env_id, records.ACCEPTANCES_DIR, acceptance.id)
-        data = verified_store.read_bytes(*where, accept.SUGGESTION_FILE, max_size=store.MAX_JSON_SIZE)
+        data = verified_store.read_bytes(*where, accept.SUGGESTION_FILE, max_size=store.MAX_JSON_BYTES)
         stored = json.loads(data) if data else None
         suggested = jdata.find_dict(stored, REVIEW_VIEW) if stored else None
         if suggested is None:

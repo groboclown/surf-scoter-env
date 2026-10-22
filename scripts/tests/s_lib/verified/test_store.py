@@ -44,9 +44,10 @@ class EnvironmentIdTest(unittest.TestCase):
             ("/no/such/" + "x" * 40 + "-y", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-06211fd163da"),
             ("/no/such/!!!", "project-b94ae0807dcf"),
         ):
-            self.assertEqual(store.environment_id(Path(directory)), expected, directory)
+            with self.subTest(directory=directory):
+                self.assertEqual(store.environment_id(Path(directory)), expected, directory)
 
-    def test_project_id_from_the_universal_file(self) -> None:
+    def test_project_id_from_suc(self) -> None:
         """The generator's id when the file has one; worked out the same way when it hasn't."""
         given = UserConfig({"active-config-locations": {"project-id": "given-0123456789ab"}})
         self.assertEqual(store.project_id(given, "/no/such/x"), "given-0123456789ab")
@@ -126,7 +127,7 @@ class StoreTest(TempDirTest):
         """Store paths are plain names."""
         verified = self.new_store()
         for name in ("..", "", "a/b", "c:d"):
-            with self.assertRaises(err.VerifiedStoreErr, msg=name):
+            with self.subTest(name=name), self.assertRaises(err.VerifiedStoreErr, msg=name):
                 verified.read_bytes(name, max_size=10)
 
     def test_relative_root(self) -> None:

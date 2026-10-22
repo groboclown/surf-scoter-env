@@ -85,7 +85,8 @@ class KillTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main_kill.run_kill(
-                UserConfig(self.suc(project=project)), host=host, fetch_branch=fetch, force_clean=clean,
+                UserConfig(self.suc(project=project)), host=host, fetch_branch=fetch,
+                workspace=main_kill.Workspace.REMOVE if clean else main_kill.Workspace.KEEP,
             )
         return code, out.getvalue() + err.getvalue()
 
@@ -97,7 +98,7 @@ class KillTest(unittest.TestCase):
     def listed(self) -> list[str]:
         return [e.host for e in ActiveEnvironmentSet.read(self.state / "running-env.json").environs.values()]
 
-    def test_the_projects_environment(self) -> None:
+    def test_projects_environment(self) -> None:
         """Without --host, the project's one: its containers stopped, it's forgotten, the workspace kept."""
         env = self.start()
         code, text = self.kill()
@@ -108,7 +109,8 @@ class KillTest(unittest.TestCase):
         self.assertTrue(self.workspace.is_dir())
         self.assertIn("The workspace is kept", text)
 
-    def test_by_host_outside_a_project(self) -> None:
+    def test_by_host_outside_project(self) -> None:
+        """--host stops it without a project."""
         env = self.start()
         code, _ = self.kill(host=env.host, project=False)
         self.assertEqual(code, 0)
@@ -154,7 +156,7 @@ class KillTest(unittest.TestCase):
         self.assertEqual(self.ran(), [["down", env.compose_file], ["fetch", str(self.workspace), "feature"]])
         self.assertFalse(self.workspace.exists())
 
-    def test_clean_never_removes_the_project(self) -> None:
+    def test_clean_keeps_the_project(self) -> None:
         """A workspace that is, or holds, the project isn't removed."""
         env = self.start()
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.json.lock") as envs:

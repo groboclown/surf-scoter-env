@@ -26,6 +26,7 @@ from surf_scoter_lib import (
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr, VerifiedStoreErr
+from surf_scoter_lib.user_config import Capture, OnError
 from surf_scoter_lib.verified import lookup, staging
 
 # The network gateway's configuration, in the resources directory.
@@ -36,6 +37,13 @@ SUC_COPY_DIR = "environments"
 SUC_COPY_FILE = "suc.json"
 # The accepted copy of the project's files, staged to build from, beside it.
 BUILD_DIR = "build"
+
+# The mode of the files in the settings directory the dev container mounts.
+MODE_SETTINGS_FILE = 0o666
+# How often to check whether the dev container started.
+CONTAINER_POLL_SECONDS = 1.0
+# `inspect-container`'s exit code while the container isn't there yet.
+EXIT_CONTAINER_NOT_FOUND = 125
 
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
@@ -123,17 +131,17 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
                 f"Make sure you ran user setup first."
             )
         pub_key_file.copy(setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME)
-        fileutil.touch(setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME, 0o666)
+        fileutil.touch(setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME, MODE_SETTINGS_FILE)
 
         # Create the host key.
         host_key_file = setup_dir / defaults.CONTAINER_HOST_KEY_FILE_NAME
         if not host_key_file.exists():
             print("Creating host key...")
             config.run_command(
-                "ssh", "mk-host-key", capture_stdout=True,
+                "ssh", "mk-host-key",
                 template={"host-key-file": str(host_key_file)},
             )
-        fileutil.touch(host_key_file, 0o666)
+        fileutil.touch(host_key_file, MODE_SETTINGS_FILE)
         # Add that as a known host
         # The file should already exist from the user setup.
         _add_known_host(config, host, host_key_file)
@@ -151,7 +159,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         gateway_config = _write_gateway_config(config, resources_dir / GATEWAY_CONFIG_FILE)
 
         # Setup the .env file in the resources directory.
-        _write_docker_compose_env_file(
+        _write_compose_env_file(
             config=config, file=resources_dir / defaults.COMPOSE_ENV_FILENAME,
             host=host, workspace_dir=workspace_dir,
             settings_dir=setup_dir, gateway_config=gateway_config,
@@ -174,7 +182,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             active_envs.update_environ(EnvironmentDesc(
                 host=host,
 
-                # See _write_docker_compose_env_file
+                # See _write_compose_env_file
                 dev_env_name=host,
                 firewall_router_name=f"{host}-fr",
                 network_gateway_name=f"{host}-ng",
@@ -191,7 +199,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
                 suc=json.loads(config.dumps()),  # expensive deep copy
                 pid=os.getpid(),
             ))
-    except:
+    except BaseException:
         print("Aborting execution.", file=sys.stderr)
         _release(config, host)
         raise
@@ -205,8 +213,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             "env-file": str(resources_dir / defaults.COMPOSE_ENV_FILENAME),
             "compose-file": str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
         },
-        capture_stdout=False,
-        capture_stderr=False,
+        capture=Capture.NONE,
     )
 
     failed = False
@@ -338,7 +345,7 @@ def _adopt_accepted(config: UserConfig) -> bool:
     False, having said why, if they can't be read.
     """
     state_dir = config.require_path("scoter", "state-dir")
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.mkdir(mode=fileutil.MODE_USER_RWX, parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="exempt-", dir=state_dir))
     try:
         staging.adopt_accepted(config, directory, generator.run, datetime.datetime.now(datetime.UTC))
@@ -413,7 +420,7 @@ def _build_containers(
             config.require_path("dev-env", "network-gateway"),
         ),
     ]
-    for kind,tag,path in containers:
+    for kind, tag, path in containers:
         if not path:
             print(f"No build directory set for {kind} container", file=sys.stderr)
             return None
@@ -421,8 +428,8 @@ def _build_containers(
         print(f"DEBUG {path}")
         res = config.run_command(
             "docker", "build",
-            check=False,
-            capture_stderr=True,
+            on_error=OnError.RETURN,
+            capture=Capture.BOTH,
             template={
                 "tag": tag,
                 "dir": str(path),
@@ -444,14 +451,13 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
     while time.time() < end_at:
         # Sleep at the start, because this should be called while the
         # containers are starting.
-        time.sleep(1.0)
+        time.sleep(CONTAINER_POLL_SECONDS)
         res = config.run_command(
             "docker", "inspect-container",
-            capture_stdout=True,
-            capture_stderr=True,
+            capture=Capture.BOTH,
             template={"name": host},
         )
-        if res.returncode == 125:
+        if res.returncode == EXIT_CONTAINER_NOT_FOUND:
             # Not found.
             continue
         elif res.returncode != 0:
@@ -480,9 +486,8 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
                 print("=========== Log Start")
                 config.run_command(
                     "docker", "image-logs",
-                    capture_stdout=False,
-                    capture_stderr=False,
-                    check=False,
+                    capture=Capture.NONE,
+                    on_error=OnError.RETURN,
                     template={"name": host},
                 )
                 print("=========== Log End")
@@ -557,7 +562,7 @@ def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -
     if not ignore_file_name:
         # No ignore possible.
         return
-    
+
     path.parent.mkdir(parents=True, exist_ok=True)
     ignore_file = path.parent / ignore_file_name
     ignore_lines: list[str]
@@ -614,8 +619,8 @@ def _add_known_host(config: UserConfig, host: str, host_key_file: Path) -> None:
         "ssh", "remove-known-host",
         template={"host": host},
         # If the host doesn't exist, that's fine.
-        capture_stdout=True,
-        capture_stderr=True,
+        capture=Capture.BOTH,
+        on_error=OnError.RETURN,
     )
     pub_key_file = Path(str(host_key_file) + defaults.PUB_KEY_EXT)
     pub_key = pub_key_file.read_text(encoding="utf-8")
@@ -642,12 +647,12 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
     """
     with tempfile.TemporaryDirectory(prefix="surf-scoter-") as directory:
         universal = Path(directory) / "universal.json"
-        fd = os.open(universal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(universal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, fileutil.MODE_USER_RW)
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             out.write(config.dumps())
         res = config.run_command(
             "dev-env", "network-gateway-write-config",
-            check=False,
+            on_error=OnError.RETURN,
             template={"universal": str(universal), "output": str(output)},
         )
     try:
@@ -673,13 +678,15 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
     return output
 
 
-def _write_docker_compose_env_file(
+def _write_compose_env_file(
     *,
     config: UserConfig, file: Path,
     host: str, workspace_dir: Path, settings_dir: Path, gateway_config: Path,
 ) -> None:
-    # Write all the settings to the docker-compose file.
-    # 90% of this have well-defined meanings that all docker-compose must use.
+    """Write the settings the docker-compose file uses to its `.env` file.
+
+    Most of them have well-defined meanings that every docker-compose file must use.
+    """
     mounts = config.dev_container_mounts()
     if "workspace" not in mounts or "setup" not in mounts:
         raise ConfigErr(f"dev-env does not have expected mounts; has {mounts}")
@@ -716,7 +723,7 @@ def _write_docker_compose_env_file(
         "SSHD_PORT_ENV": (config.dev_container_sshd_port_env() or "SSHD_PORT_ENV_UNSET"),
         "SSHD_PORT": (config.dev_container_sshd_port() or "not set"),
     }
-    file.write_text("\n".join([f"{k}={v}" for k,v in lines.items()]), encoding="utf-8")
+    file.write_text("\n".join([f"{k}={v}" for k, v in lines.items()]), encoding="utf-8")
 
 
 def main(argv: Sequence[str]) -> int:

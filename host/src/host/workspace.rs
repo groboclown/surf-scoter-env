@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_container_path_is_normalized() {
+    fn container_path_is_normalized() {
         let host = host_dir();
         for (given, expected) in [
             ("/workspace/", "/workspace"),
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_container_path_errors() {
+    fn container_path_errors() {
         let host = host_dir();
         for (given, expected) in [
             ("", "container path '' must be absolute"),
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_host_must_be_existing_directory() {
+    fn host_must_be_existing_dir() {
         assert!(
             workspace_error(Path::new("/nonexistent/scoter-ws"), "/workspace")
                 .starts_with("host directory '/nonexistent/scoter-ws': ")

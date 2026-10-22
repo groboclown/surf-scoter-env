@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Test the main_exempt script, and the exempt library it uses (step 21)."""
+"""Test the main_exempt script, and the exempt library it uses."""
 import contextlib
 import datetime
 import io
@@ -61,7 +61,8 @@ class ExemptTest(StoreTest):
     def run_exempt(self, length: str | None, *, end: bool = False) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main_exempt.run_exempt(self.config(branch="main"), length, end=end)
+            action = main_exempt.Action.END if end else main_exempt.Action.START
+            code = main_exempt.run_exempt(self.config(branch="main"), length, action=action)
         return code, out.getvalue(), err.getvalue()
 
     def test_nothing_to_exempt(self) -> None:

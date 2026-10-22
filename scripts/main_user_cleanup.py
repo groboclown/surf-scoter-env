@@ -24,5 +24,6 @@ def main(argv: Sequence[str]) -> int:
     _args = parser.parse_args(argv)
     return run_cleanup_user(config)
 
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

@@ -157,7 +157,7 @@ impl RefusedWildcards {
         let mut errors = Vec::new();
         let mut suffixes = public_suffix::SuffixList::default();
         for file in system.path_list(system::VERIFICATION_SECTION, PUBLIC_SUFFIX_LISTS) {
-            match read::read_limited_to(&file, read::MAX_UNIVERSAL_FILE_SIZE) {
+            match read::read_limited_to(&file, read::MAX_UNIVERSAL_FILE_BYTES) {
                 Ok(text) => suffixes.add(&text),
                 Err(m) => errors.push(ConfigError::new(
                     Some(&file),
@@ -278,7 +278,7 @@ impl UniversalInput {
 
 /// Read a universal configuration file made earlier.
 fn read_universal(path: &Path) -> Result<UniversalInput, ConfigError> {
-    let text = read::read_limited_to(path, read::MAX_UNIVERSAL_FILE_SIZE)
+    let text = read::read_limited_to(path, read::MAX_UNIVERSAL_FILE_BYTES)
         .map_err(|m| ConfigError::new(Some(path), "", m))?;
     serde_json::from_str(&text).map_err(|e| {
         ConfigError::new(
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn load_finds_the_project_file_with_the_setup() {
+    fn load_finds_project_with_setup() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         let project = "container:\n  dev-container-path: env\n";
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn load_dev_container_name_not_found() {
+    fn load_dev_container_not_found() {
         let dir = TempDir::new();
         let opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
         let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn load_gathers_errors_from_every_file() {
+    fn load_gathers_all_file_errors() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         dir.write(
@@ -1189,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn load_project_errors_skip_dev_container() {
+    fn project_errors_skip_container() {
         let dir = TempDir::new();
         let opts = options(
             &dir,
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn in_effect_values_carry_over_without_the_search() {
+    fn in_effect_kept_without_search() {
         let dir = TempDir::new();
         let user = dir.write(
             "home/.config/surf-scoter.d/setup.yaml",
@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn command_environments_are_worked_out() {
+    fn command_envs_are_worked_out() {
         let dir = TempDir::new();
         dev_container(&dir, "project/.surf-scoter.d/env");
         let opts = options(
@@ -1622,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_reads_no_other_file() {
+    fn universal_reads_no_other_file() {
         let dir = TempDir::new();
         let made_with = Env {
             vars: HashMap::from([("HOME".to_string(), "/home/me".to_string())]),
@@ -1679,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_contents_must_match_locations() {
+    fn universal_matches_locations() {
         let dir = TempDir::new();
         let (universal, _) = universal_for(&dir, Env::default());
         let edit = |change: &dyn Fn(&mut serde_json::Value)| {
@@ -1725,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn load_universal_runs_the_host_brokered_list() {
+    fn universal_runs_host_brokered() {
         let dir = TempDir::new();
         let (universal, _) = universal_for(&dir, Env::default());
         let load = |change: &dyn Fn(&mut serde_json::Value)| {
@@ -1789,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_a_bad_universal_file() {
+    fn load_from_bad_universal_file() {
         let dir = TempDir::new();
         let bad = dir.write("bad.json", "{\"resolved\": {}}");
         let options = LoadOptions {

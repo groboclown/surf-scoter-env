@@ -1,13 +1,12 @@
 #SPDX:MIT
 """Test the setup_check module."""
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import ClassVar
 
-from ...surf_scoter_lib import jdata, setup_check, user_config
+from ...surf_scoter_lib import fileutil, jdata, setup_check, user_config
 
 
 def _config(
@@ -66,7 +65,7 @@ class CheckProgramsTest(unittest.TestCase):
         )
         self.assertEqual(self.check(config), [])
 
-    def test_written_relative_to_the_project(self) -> None:
+    def test_written_relative(self) -> None:
         """A `./` value, or a reference to a project location, is reported."""
         config = _config({
             "a": "./venv/bin/python",
@@ -120,7 +119,7 @@ class CheckProgramsTest(unittest.TestCase):
         ])
 
 
-@unittest.skipIf(sys.platform == "win32", "modes")
+@unittest.skipIf(fileutil.is_windows(), "modes")
 class ProgramFindingsTest(unittest.TestCase):
     """Test program_findings: the setup's programs as found, as `scoter run` checks them."""
 
@@ -155,7 +154,7 @@ class ProgramFindingsTest(unittest.TestCase):
         config = _config({"a": "${x:a}"}, {"a": self.tool("a")})
         self.assertEqual(self.findings(config), [])
 
-    def test_check_programs_refuse_and_path_warns(self) -> None:
+    def test_refuse_and_path_warns(self) -> None:
         """`check_programs`' problems refuse; a relative PATH entry only warns."""
         config = _config({"a": "./venv/bin/python"})
         found = self.findings(config, os.pathsep.join(["/usr/bin", "bin"]))
@@ -232,7 +231,7 @@ class GuardedChangesTest(unittest.TestCase):
             '/u/setup.yaml sets `git-vcs: runs: local-clone` to "${exec} clone"; the default is "${exec} clone --no-local"',
         ])
 
-    def test_checks_replaced_removed_and_added(self) -> None:
+    def test_checks_replaced(self) -> None:
         """Every key of a `*` guard: a check replaced or removed is reported; a new one isn't."""
         self.assertEqual(self.changes({"verification": {"egress-hosts": {
             "code-hosts": None,

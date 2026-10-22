@@ -22,7 +22,7 @@ ssh:
     values:
         # The start of each environment's name: its dev container's, and its
         # `Host` in the ssh config, followed by its project's id
-        # (`scoter-my-project-c593c7ec2d55`).  Lowercase letters, digits, `.`
+        # (`scoter-my-project-c593c7ec2d55`).  Lowercase letters, digits, `.`,
         # and `-`.
         host-prefix: scoter-
         # Each run writes its environment's `Host` block to the ssh config, so
@@ -115,7 +115,7 @@ workspace:
 # the file or directory that marks a checkout:
 #   vcs_root_nearest.py MARKER START: the nearest directory, at or above
 #       START, holding MARKER: `.git` (a directory, or a file in a worktree or
-#       submodule), `.hg` or `.svn`.
+#       submodule), `.hg`, or `.svn`.
 #   vcs_root_outermost.py MARKER START: the highest directory of the unbroken
 #       run holding MARKER, for a VCS that keeps a directory in every directory
 #       of a checkout (CVS, with `CVS`).
@@ -156,7 +156,7 @@ git-vcs:
     value-lists:
         # The environment variables these commands don't get.  A project can set
         # them as you enter its directory (a `.envrc`, say), and Git's own point
-        # it at another repository (`GIT_DIR`), configuration (`GIT_CONFIG_*`)
+        # it at another repository (`GIT_DIR`), configuration (`GIT_CONFIG_*`),
         # or program (`GIT_SSH_COMMAND`).  Set them in your Git configuration
         # instead; `core.sshCommand` takes the place of `GIT_SSH_COMMAND`.
         # Note, though, that scoter shouldn't be performing remote pulls or
@@ -231,7 +231,7 @@ dev-env:
 #
 # `host-commands`: the checks on the commands a project asks to run on your
 # computer (its host commands).  Every check is here, so none is missed by
-# being somewhere else.  Each check has an `action` (refuse, warn or allow), a
+# being somewhere else.  Each check has an `action` (refuse, warn, or allow), a
 # `reason`, and what it matches.  When several checks match a command, the most
 # restrictive wins.
 #
@@ -456,7 +456,7 @@ verification:
     paths:
         # Where your acceptances of projects' settings are kept.  They decide what
         # each project may do, so this must be an absolute path outside any
-        # project, its workspace and its repository.
+        # project, its workspace, and its repository.
         store: ~/.config/surf-scoter.d/verified
 
     path-lists:
@@ -487,7 +487,7 @@ verification:
     # Checks on the files in a project's container directories: everything there
     # goes into the image, where the container can read it.  Each check has an
     # `action`, a `reason`, and `patterns`: names of files (and, ending in `/`,
-    # directories), with `*`, `?` and `[...]`, matched against each name.  As with
+    # directories), with `*`, `?`, and `[...]`, matched against each name.  As with
     # `host-commands`, the most restrictive action wins, and a check can
     # `overrides: [verification:NAME]` another for the names it matches.
     project-files:

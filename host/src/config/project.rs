@@ -1062,13 +1062,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_entry_requires_command_and_args() {
+    fn entry_needs_command_and_args() {
         assert!(error(&format!("{CONTAINER}commands:\n  - args: []\n")).contains("command"));
         assert!(error(&format!("{CONTAINER}commands:\n  - command: aws\n")).contains("args"));
     }
 
     #[test]
-    fn parse_entry_rejects_unknown_keys() {
+    fn entry_rejects_unknown_keys() {
         // Including the worked-out environment, which only the tool sets.
         let err = error(&format!(
             "{CONTAINER}commands:\n  - command: aws\n    args: []\n    env-plan: {{}}\n"
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_old_map_form_is_rejected() {
+    fn old_map_form_is_rejected() {
         assert_eq!(
             error(&format!("{CONTAINER}commands:\n  aws:\n    - [s3]\n")),
             "commands: must be a list of entries"
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_placeholder_options_are_kebab_case() {
+    fn placeholder_options_kebab() {
         assert_eq!(
             args("[{any: {allow-leading-dash: true, allow-empty: true}}]"),
             vec![Token::Any(opts("", true, true))]
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_args_and_block_style() {
+    fn empty_args_and_block_style() {
         assert_eq!(args("[]"), vec![]);
         let config = parse_text(&format!(
             "{CONTAINER}commands:\n  - command: cmd\n    args:\n      - version\n      - path:\n          within: temp\n"
@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn text_without_control_characters() {
+    fn text_without_control_chars() {
         let text =
             format!("{CONTAINER}vcs: \"git\\n# reviewed: safe\"\nenv:\n  set:\n    \"A\\tB\": x\n");
         let errors = parse_text(&text).unwrap_err();
@@ -1337,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_cwd_section_uses_workspace_patterns() {
+    fn cwd_uses_workspace_patterns() {
         let config = parse_text(&format!(
             "{CONTAINER}commands:\n  - command: docker\n    args: [compose, up]\n    cwd:\n      allowed-workspace-dirs:\n        - services/*\n        - .\n        - '**'\n",
         ))

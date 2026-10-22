@@ -7,6 +7,7 @@ its id, kind, branch, fingerprint, expiry and any exemption.  Give an id to
 `scoter revoke $(scoter list-accepted -q)` revokes them all.
 """
 import datetime
+import enum
 import os
 import sys
 from collections.abc import Sequence
@@ -16,8 +17,18 @@ from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.verified import revoke
 
 
-def run_list(config: UserConfig, *, quiet: bool) -> int:
-    """List the accepted projects and their acceptances; with `quiet`, only the acceptances' ids."""
+class Listing(enum.Enum):
+    """How much `run_list` shows."""
+
+    # The projects, their acceptances, and a summary.
+    FULL = "full"
+    # Only the acceptances' ids, one per line (`--quiet`).
+    IDS = "ids"
+
+
+def run_list(config: UserConfig, *, listing: Listing = Listing.FULL) -> int:
+    """List the accepted projects and their acceptances; with `Listing.IDS`, only the acceptances' ids."""
+    quiet = listing == Listing.IDS
     now = datetime.datetime.now(datetime.UTC)
     try:
         verified_store = revoke.open_store(config)
@@ -72,7 +83,7 @@ def main(argv: Sequence[str]) -> int:
         help="Show only the acceptances' ids, one per line, for `scoter revoke`.",
     )
     args = parser.parse_args(argv)
-    return run_list(config, quiet=args.quiet)
+    return run_list(config, listing=Listing.IDS if args.quiet else Listing.FULL)
 
 
 if __name__ == "__main__":

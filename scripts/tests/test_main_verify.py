@@ -17,12 +17,13 @@ from pathlib import Path
 SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import main_verify
+from surf_scoter_lib import fileutil
 from surf_scoter_lib.user_config import UserConfig
 from surf_scoter_lib.verified import exempt, lookup, records, store
 
 from .dist_helper import HAVE_GENERATOR, NEEDS_GENERATOR, PROJECT_FILE, DistTest
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 
 
 def quiet() -> contextlib.ExitStack:
@@ -60,7 +61,7 @@ class NoTerminalTest(unittest.TestCase):
         config = UserConfig({"current-project-setup": {"commands": []}})
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(main_verify.run_verify(config, None, interactive=False), 1)
+            self.assertEqual(main_verify.run_verify(config, None, terminal=main_verify.Terminal.ABSENT), 1)
         self.assertIn("needs a terminal", err.getvalue())
 
 
@@ -119,9 +120,9 @@ class PageTest(_TempDir):
                 os.environ["PAGER"] = old
 
     def test_split_command(self) -> None:
-        self.assertEqual(main_verify.split_command("less -R", windows=False), ["less", "-R"])
+        self.assertEqual(main_verify.split_command("less -R", platform=main_verify.Platform.POSIX), ["less", "-R"])
         self.assertEqual(
-            main_verify.split_command('"C:\\Tools\\less.exe" -R', windows=True), ["C:\\Tools\\less.exe", "-R"],
+            main_verify.split_command('"C:\\Tools\\less.exe" -R', platform=main_verify.Platform.WINDOWS), ["C:\\Tools\\less.exe", "-R"],
         )
 
 
@@ -130,20 +131,20 @@ class EditorCommandTest(unittest.TestCase):
 
     def test_visual_then_editor(self) -> None:
         both = {"VISUAL": "code --wait", "EDITOR": "vi"}
-        self.assertEqual(main_verify.editor_command(both, windows=False), ["code", "--wait"])
-        self.assertEqual(main_verify.editor_command({"EDITOR": "vi"}, windows=False), ["vi"])
-        self.assertEqual(main_verify.editor_command({"VISUAL": "", "EDITOR": "vi"}, windows=False), ["vi"])
+        self.assertEqual(main_verify.editor_command(both, platform=main_verify.Platform.POSIX), ["code", "--wait"])
+        self.assertEqual(main_verify.editor_command({"EDITOR": "vi"}, platform=main_verify.Platform.POSIX), ["vi"])
+        self.assertEqual(main_verify.editor_command({"VISUAL": "", "EDITOR": "vi"}, platform=main_verify.Platform.POSIX), ["vi"])
 
     def test_neither(self) -> None:
         """Elsewhere, nothing is guessed; on Windows, Notepad, by its full path."""
         with self.assertRaisesRegex(main_verify.ReviewFileErr, "VISUAL or EDITOR"):
-            main_verify.editor_command({}, windows=False)
+            main_verify.editor_command({}, platform=main_verify.Platform.POSIX)
         self.assertEqual(
-            main_verify.editor_command({"SystemRoot": "D:\\Win"}, windows=True),
+            main_verify.editor_command({"SystemRoot": "D:\\Win"}, platform=main_verify.Platform.WINDOWS),
             [os.path.join("D:\\Win", "System32", "notepad.exe")],
         )
         self.assertEqual(
-            main_verify.editor_command({}, windows=True),
+            main_verify.editor_command({}, platform=main_verify.Platform.WINDOWS),
             [os.path.join("C:\\Windows", "System32", "notepad.exe")],
         )
 
@@ -151,7 +152,7 @@ class EditorCommandTest(unittest.TestCase):
         """Backslashes stay, and quotes around a path with spaces go."""
         command = '"C:\\Program Files\\Editor\\ed.exe" --wait'
         self.assertEqual(
-            main_verify.editor_command({"EDITOR": command}, windows=True),
+            main_verify.editor_command({"EDITOR": command}, platform=main_verify.Platform.WINDOWS),
             ["C:\\Program Files\\Editor\\ed.exe", "--wait"],
         )
 
@@ -185,7 +186,7 @@ class ReadOnceTest(_TempDir):
 
     def test_too_large(self) -> None:
         path = self.tmp / "review.yaml"
-        path.write_bytes(b"#" * (main_verify.MAX_REVIEW_SIZE + 1))
+        path.write_bytes(b"#" * (main_verify.MAX_REVIEW_BYTES + 1))
         with self.assertRaisesRegex(main_verify.ReviewFileErr, "larger"):
             main_verify.read_once(path)
 
@@ -239,7 +240,8 @@ class PromptTest(DistTest):
         suggestion = json.loads((where / "suggestion.json").read_text(encoding="utf-8"))
         self.assertEqual(suggestion["project"]["commands"][1]["command"], "sh")
         for path in (where / "accepted.json", where / "review.yaml", where / "suggestion.json"):
-            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with self.subTest(path=path):
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
     def test_view(self) -> None:
         """The review is shown first, and again on `view`."""
@@ -261,7 +263,7 @@ class PromptTest(DistTest):
         self.assertEqual(self.prompt()[0], 1)
         self.assertEqual(self.stored(), [])
 
-    def test_edit_adds_a_refused_program(self) -> None:
+    def test_edit_adds_refused(self) -> None:
         """Uncommenting the refused shell, without its override: checked again, and refused."""
         seen: list[tuple[Path, int]] = []
 

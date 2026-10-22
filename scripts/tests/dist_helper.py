@@ -8,15 +8,16 @@ import json
 import os
 import shutil
 import subprocess  # nosec: B404  # Runs the generator to make the tests' universal files.
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from ..surf_scoter_lib import fileutil
+
 SCRIPTS = Path(__file__).parents[1]
 REPO = SCRIPTS.parent
 GENERATOR = REPO / "host" / "target" / "debug" / "gen-scoter-uc"
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 HAVE_GENERATOR = POSIX and GENERATOR.is_file()
 NEEDS_GENERATOR = "needs the generator (cd host && cargo build)"
 

@@ -26,8 +26,6 @@ from .store import VerifiedStore, canonical_json, check_private, json_id
 
 DEV_ENV_FILE = "dev-env.yaml"
 
-_O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
-
 
 class SnapshotErr(VerifiedStoreErr):
     """A project file can't go into a snapshot."""
@@ -286,7 +284,7 @@ class _Reader:
     def read(self, path: Path, rel: str, *, links_ok: bool) -> None:
         """Read the file."""
         check_relative(rel)
-        flags = os.O_RDONLY | fileutil.O_NOFOLLOW | fileutil.O_BINARY | _O_NONBLOCK
+        flags = os.O_RDONLY | fileutil.O_NOFOLLOW | fileutil.O_BINARY | fileutil.O_NONBLOCK
         try:
             fd = os.open(path, flags)
         except OSError as err:

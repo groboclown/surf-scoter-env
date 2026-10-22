@@ -10,15 +10,13 @@ An acceptance records what the user accepted, and what it holds for:
 A run looks for an acceptance with the same `setup` id whose `suggestion`
 matches the project's files now: exactly, or on meaning (the same but for
 comments and the like), which carries it forward.  Failing those, an
-exemption the user started (`scoter exempt`, step 21) on the environment
+exemption the user started (`scoter exempt`) on the environment
 holds for its branch: the run then uses the exemption's acceptance, with
 the container files as they are.
 
 An environment keeps one acceptance per branch (`branch`, None without
 one): a new one replaces the branch's last, which is what the next review
-compares with (step 17), so nothing piles up.
-
-See docs/contributors/projects-v1.md, step 5.
+compares with, so nothing piles up.
 """
 import datetime
 import secrets
@@ -34,6 +32,8 @@ from .store import VerifiedStore, json_id
 ENVIRONMENT_SCHEMA = "surf-scoter-verified-environment-1"
 ENVIRONMENT_FILE = "environment.json"
 ACCEPTANCES_DIR = "acceptances"
+# The random part of an acceptance id, in bytes (twice as many hex digits).
+ACCEPTANCE_ID_RANDOM_BYTES = 4
 
 
 class Kind(StrEnum):
@@ -157,7 +157,7 @@ class Acceptance:
 
 def new_acceptance_id(now: datetime.datetime) -> str:
     """A new acceptance id: the time, and a random part."""
-    return now.strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
+    return now.strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(ACCEPTANCE_ID_RANDOM_BYTES)
 
 
 def _check_id(acceptance_id: str) -> None:
@@ -177,7 +177,7 @@ class MatchKind(StrEnum):
 
 @dataclass(frozen=True)
 class Exemption:
-    """A window in which the environment's runs don't stop for a review (step 21).
+    """A window in which the environment's runs don't stop for a review.
 
     It holds for `branch` (when the VCS gave one), until `until`, and uses
     the acceptance `acceptance`: its settings, its project file and
@@ -372,7 +372,7 @@ def save_environment(store: VerifiedStore, record: EnvironmentRecord) -> None:
     """Write the environment's record, and list it in the index.
 
     The store must be locked.  Nothing is pruned: an expired acceptance is
-    still what the next review compares with (step 17), so it stays until
+    still what the next review compares with, so it stays until
     it's replaced or revoked.
     """
     store.register(record.project_dir, record.id)

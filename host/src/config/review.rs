@@ -1,5 +1,5 @@
 //! The review file: the user's answer to a project's suggestion, as they
-//! left it in their editor.  See step 12 of `docs/contributors/projects-v1.md`.
+//! left it in their editor.
 //!
 //! ```yaml
 //! review: "surf-scoter-review-1"
@@ -21,8 +21,8 @@
 //!   images: {"debian:bookworm": "debian@sha256:..."}
 //! ```
 //!
-//! It's parsed as the project file is (step 7's rules: no tags, merge keys,
-//! duplicate keys or control characters), and its `egress`, `env` and
+//! It's parsed as the project file is (no tags, merge keys, duplicate keys or
+//! control characters), and its `egress`, `env` and
 //! `commands` are checked as the project file's are, with these differences:
 //! each `program` is the absolute executable the user accepts; values are
 //! as accepted (a `${...}` isn't expanded, and is refused, so nothing is
@@ -96,7 +96,7 @@ pub struct Review {
     /// Each image the build starts from, and what to build from instead.
     pub images: BTreeMap<String, String>,
     /// The file's data as the user left it, `$comment`s and `$override`s
-    /// included: what a later review starts from (step 17).
+    /// included: what a later review starts from.
     pub as_written: Json,
 }
 
@@ -203,7 +203,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Review, Vec<ConfigError>> {
         _ => {
             problems.push((
                 "expires-at".to_string(),
-                "must be a time such as 2026-11-19T15:04:05+00:00".to_string(),
+                format!("must be a time such as {}", accepted::TIME_EXAMPLE),
             ));
             None
         }
@@ -619,7 +619,7 @@ mod tests {
                 "dev-container.images.a: must map an image to the image to build from instead, both without spaces",
             ]
         );
-        // Step 7's rules: merge keys, duplicate keys, control characters.
+        // The project file's rules: merge keys, duplicate keys, control characters.
         let errors = review("env:\n  set:\n    <<: {A: b}\n").unwrap_err();
         assert!(errors[0].contains("merge key"), "{errors:?}");
         let errors = review("expires-at: \"2031-01-01T00:00:00Z\"\n").unwrap_err();

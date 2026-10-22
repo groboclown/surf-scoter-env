@@ -10,6 +10,8 @@ from pathlib import Path
 
 import scoter
 
+from ..surf_scoter_lib import fileutil
+
 
 def _config(sub_command: object) -> scoter.DictJsonData:
     """A universal configuration with the python sub-command run as given."""
@@ -141,7 +143,7 @@ class FindVcsRootTest(unittest.TestCase):
 class CommandEnvTest(unittest.TestCase):
     """The VCS's `find-root` runs without the section's `drop-env` variables."""
 
-    def test_find_root_without_git_variables(self) -> None:
+    def test_find_root_drops_git_vars(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(os.path.realpath(tmp.name))
@@ -274,7 +276,7 @@ class CheckProjectVcsTest(unittest.TestCase):
 class TempFileTest(unittest.TestCase):
     """Test the private temporary configuration files."""
 
-    @unittest.skipIf(sys.platform == "win32", "modes")
+    @unittest.skipIf(fileutil.is_windows(), "modes")
     def test_private(self) -> None:
         """In a directory of its own, only the user's; removed with it."""
         file = scoter.save_to_tmp({"a": 1})
@@ -354,12 +356,12 @@ class HelpTest(unittest.TestCase):
         `verify` and `revoke` load the project as it suggests, without the
         user's accepted settings; `run` loads them too.
         """
-        seen: list[tuple[bool, bool]] = []
+        seen: list[scoter.ConfigScope] = []
 
         def fake_load(
-            args: object, *, with_project: bool = True, with_acceptance: bool = True,
+            args: object, *, scope: scoter.ConfigScope = scoter.ConfigScope.ACCEPTED,
         ) -> scoter.DictJsonData:
-            seen.append((with_project, with_acceptance))
+            seen.append(scope)
             raise scoter.ConfigErr("stop here")
 
         original = scoter.load_config
@@ -373,5 +375,8 @@ class HelpTest(unittest.TestCase):
                 scoter.main(["scoter", "list-accepted"])
         finally:
             scoter.load_config = original  # type: ignore[assignment]
-        self.assertEqual([p for p, _ in seen], [False, True, True, True, False])
-        self.assertEqual([a for _, a in seen[1:4]], [False, False, True])
+        scope = scoter.ConfigScope
+        self.assertEqual(
+            seen,
+            [scope.SETUP, scope.SUGGESTED, scope.SUGGESTED, scope.ACCEPTED, scope.SETUP],
+        )

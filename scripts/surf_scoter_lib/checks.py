@@ -9,14 +9,12 @@ data out.  Nothing is hard-coded but the rules for reading them.
 
 Each finding has a severity (`refuse`, `warn`, or `note` for what the
 review should show without judging it), where it is in the project file,
-and an explanation for the review's generated comments.  See step 11 of
-docs/contributors/projects-v1.md.
+and an explanation for the review's generated comments.
 """
 import fnmatch
 import os
 import re
 import stat
-import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -172,7 +170,7 @@ def _real(path: str | None) -> str | None:
 
 def _base_name(path: str) -> str:
     name = os.path.basename(path)
-    return os.path.splitext(name)[0] if sys.platform == "win32" else name
+    return os.path.splitext(name)[0] if fileutil.is_windows() else name
 
 
 def _matches_name(check: jdata.DictJsonData, name: str, real: str | None) -> bool:
@@ -247,7 +245,7 @@ def check_host_commands(
 
     For each command, the checks without `overrides` that match it count,
     the most restrictive action winning; then each override for the command
-    takes the place of the check it overrides (step 4).
+    takes the place of the check it overrides.
     """
     checks = config.host_command_checks()
     if commands is None:
@@ -738,7 +736,7 @@ def check_review(config: UserConfig, path_env: str | None = None) -> Report:
     each command's program as given (an absolute path, nothing looked up),
     its whole environment plan, the egress rules, and the project's
     container directories when the review uses the project's container.
-    Then the review's `$override`s (step 12): a refusal from the setup's
+    Then the review's `$override`s: a refusal from the setup's
     checks that the override names, every one of them, is set aside, as a
     note; a refusal for safety (the program's missing, in the project, or
     writable by others; a container file that's a link) never is; and an

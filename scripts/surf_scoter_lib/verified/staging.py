@@ -3,8 +3,7 @@
 
 `main_run.py` builds the dev container from the files the user accepted,
 restored from the verified store, never from the live `.surf-scoter.d`,
-which can change between the check and the build.  See
-docs/contributors/projects-v1.md, step 16.
+which can change between the check and the build.
 
 * `find_accepted` finds the acceptance whose `accepted.json` the generator
   loaded, from the environment's record, not by looking at the live files:
@@ -13,7 +12,7 @@ docs/contributors/projects-v1.md, step 16.
 * `stage` restores its snapshot, laid out like a project.
 * `build_plan` checks that the generator's view of the copy is what the
   universal file holds, and says what to build from.
-* Under an exemption (step 21; `exempt.py`), when the run's acceptance is
+* Under an exemption (`exempt.py`), when the run's acceptance is
   the exemption's, `adopt_accepted` first gives the run the accepted
   project file's and `dev-env.yaml` files' settings in place of the live
   ones, and `stage` lays the live container files over the accepted copy:
@@ -28,7 +27,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import checks, jdata
+from .. import checks, fileutil, jdata
 from ..err import VerifiedStoreErr
 from ..user_config import CURRENT_PROJECT_SETUP, UserConfig
 from . import accept, lookup, records, snapshot, store
@@ -114,9 +113,9 @@ def stage(config: UserConfig, accepted: Accepted, dest: Path) -> Path:
     """
     files_dir = _files_dir(config)
     project = dest / STAGED_PROJECT
-    project.mkdir(mode=0o700)
+    project.mkdir(mode=fileutil.MODE_USER_RWX)
     target = project / files_dir
-    target.mkdir(mode=0o700)
+    target.mkdir(mode=fileutil.MODE_USER_RWX)
     limits = lookup.limits(config)
     if accepted.exemption is None or config.accepted_container_name() is not None:
         snapshot.restore(accepted.store, accepted.manifest, target, limits)
@@ -207,7 +206,7 @@ def _generate(
     generate: Callable[[UserConfig, list[str], Path], tuple[jdata.DictJsonData | None, list[str]]],
 ) -> UserConfig:
     work = dest / "generator"
-    work.mkdir(mode=0o700)
+    work.mkdir(mode=fileutil.MODE_USER_RWX)
     staged, problems = generate(config, ["--project-dir", str(staged_project)], work)
     if staged is None:
         raise StagingErr(
@@ -315,7 +314,7 @@ def stage_containers(
             raise StagingErr(f"{real}: isn't among the containers your acceptance kept")
         count += 1
         target = dest / "containers" / str(count)
-        target.mkdir(mode=0o700, parents=True)
+        target.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
         snapshot.restore(accepted.store, manifest, target, lookup.limits(config))
         return target
 

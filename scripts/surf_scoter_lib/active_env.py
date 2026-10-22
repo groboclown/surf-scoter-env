@@ -26,7 +26,7 @@ from pathlib import Path
 from . import fileutil, jdata
 from .err import ActiveEnvErr, LockTimeoutErr
 
-MAX_FILE_SIZE = 1024 * 1024 * 10  # 10 MB
+MAX_FILE_BYTES = 1024 * 1024 * 10
 LOCK_TIMEOUT_SECONDS = 30.0
 
 # ---------------------------------------------------------------------
@@ -243,9 +243,9 @@ class ActiveEnvironmentSet:
         with os.fdopen(fd, "rb") as inp:
             if not stat.S_ISREG(os.fstat(inp.fileno()).st_mode):
                 raise ActiveEnvErr(f"{file}: isn't a regular file")
-            raw = inp.read(MAX_FILE_SIZE + 1)
+            raw = inp.read(MAX_FILE_BYTES + 1)
         # Put a cap on file size.
-        if len(raw) > MAX_FILE_SIZE:
+        if len(raw) > MAX_FILE_BYTES:
             raise ActiveEnvErr(
                 f"{file}: file too large.  You have too many parallel environments "
                 f"marked as running.  Either environments haven't cleaned up right, "

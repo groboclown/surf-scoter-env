@@ -111,10 +111,10 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
     };
     let json = universal::to_json(&universal);
     // A file the tools would refuse to read is no use.
-    if json.len() as u64 > read::MAX_UNIVERSAL_FILE_SIZE {
+    if json.len() as u64 > read::MAX_UNIVERSAL_FILE_BYTES {
         eprintln!(
             "gen-scoter-uc: cannot write the configuration: {}",
-            read::size_error(read::MAX_UNIVERSAL_FILE_SIZE)
+            read::size_error(read::MAX_UNIVERSAL_FILE_BYTES)
         );
         return EXIT_FAILURE;
     }

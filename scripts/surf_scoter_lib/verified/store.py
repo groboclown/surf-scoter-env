@@ -14,13 +14,13 @@ Every read checks that; every write replaces the file whole.  On Windows,
 which has no mode bits, the checks are left to the user profile's ACLs.
 """
 import contextlib
+import enum
 import hashlib
 import json
 import os
 import re
 import shutil
 import stat
-import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
@@ -39,7 +39,14 @@ MODE_DIR = fileutil.MODE_USER_RWX
 MODE_FILE = fileutil.MODE_USER_RW
 
 # The store's own JSON files are small; this is only a guard.
-MAX_JSON_SIZE = 16 * 1024 * 1024
+MAX_JSON_BYTES = 16 * 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 30.0
+# The prefix of the temporary files a write makes beside its file.
+TEMP_PREFIX = ".tmp-"
+# An environment id's parts: its name, cut to this, and its hash's hex digits.
+MAX_ID_NAME_CHARS = 32
+ID_HASH_CHARS = 12
+MODE_NOT_PRIVATE = fileutil.MODE_NOT_PRIVATE
 
 _NAME_CHARS = re.compile(r"[^a-z0-9-]+")
 _HEX = re.compile(r"[0-9a-f]{64}")
@@ -55,8 +62,8 @@ def environment_id(project_dir: Path) -> str:
     stored state.
     """
     canonical = os.path.realpath(project_dir)
-    name = _NAME_CHARS.sub("-", os.path.basename(canonical).lower())[:32].strip("-")
-    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()[:12]
+    name = _NAME_CHARS.sub("-", os.path.basename(canonical).lower())[:MAX_ID_NAME_CHARS].strip("-")
+    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()[:ID_HASH_CHARS]
     return f"{name or 'project'}-{digest}"
 
 
@@ -80,21 +87,24 @@ def json_id(data: jdata.JsonData) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(data)).hexdigest()
 
 
-def _is_windows() -> bool:
-    return sys.platform == "win32"
-
-
 def check_private(st: os.stat_result, path: Path) -> None:
     """Refuse a store entry another user owns, or that others can use."""
-    if _is_windows():
+    if fileutil.is_windows():
         return
     if st.st_uid != os.getuid():
         raise VerifiedStoreErr(f"{path}: belongs to another user")
-    if stat.S_IMODE(st.st_mode) & 0o077:
+    if stat.S_IMODE(st.st_mode) & MODE_NOT_PRIVATE:
         raise VerifiedStoreErr(
             f"{path}: others can use it (mode {stat.S_IMODE(st.st_mode):o}); "
             f"the verified store must be private to you"
         )
+
+
+class IfMissing(enum.Enum):
+    """What `VerifiedStore.open` does when there's no store yet."""
+
+    REFUSE = "refuse"
+    CREATE = "create"
 
 
 class VerifiedStore:
@@ -108,14 +118,14 @@ class VerifiedStore:
         self._locked = False
 
     @staticmethod
-    def open(root: Path, *, create: bool = False) -> "VerifiedStore":
+    def open(root: Path, *, if_missing: IfMissing = IfMissing.REFUSE) -> "VerifiedStore":
         """The store at `root`, which must be an absolute path.
 
-        With `create`, a missing store is made (its parents as needed).
+        With `IfMissing.CREATE`, a missing store is made (its parents as needed).
         """
         if not root.is_absolute():
             raise VerifiedStoreErr(f"{root}: the verified store must be an absolute path")
-        if create and not os.path.lexists(root):
+        if if_missing == IfMissing.CREATE and not os.path.lexists(root):
             root.mkdir(mode=MODE_DIR, parents=True)
             os.chmod(root, MODE_DIR)
         store = VerifiedStore(root)
@@ -125,7 +135,7 @@ class VerifiedStore:
     # ---- locking
 
     @contextlib.contextmanager
-    def locked(self, timeout: float = 30.0) -> Generator[None]:
+    def locked(self, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[None]:
         """Hold the store's lock."""
         def waiting() -> None:
             print(f"Waiting for another Surf Scoter command to finish with {self.root} ...")
@@ -214,7 +224,7 @@ class VerifiedStore:
         assert directory is not None  # nosec: B101  # created above.
         _check_part(parts[-1])
         path = directory / parts[-1]
-        fd, temp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
+        fd, temp = tempfile.mkstemp(dir=directory, prefix=TEMP_PREFIX)
         try:
             os.chmod(temp, MODE_FILE)
             with os.fdopen(fd, "wb") as out:
@@ -250,11 +260,11 @@ class VerifiedStore:
         directory = self._dir(parts, create=False)
         if directory is None:
             return []
-        return sorted(name for name in os.listdir(directory) if not name.startswith(".tmp-"))
+        return sorted(name for name in os.listdir(directory) if not name.startswith(TEMP_PREFIX))
 
     def read_json(self, *parts: str, schema: str) -> jdata.DictJsonData | None:
         """The store JSON file `parts`, checked for its `$schema`; None if it's missing."""
-        data = self.read_bytes(*parts, max_size=MAX_JSON_SIZE)
+        data = self.read_bytes(*parts, max_size=MAX_JSON_BYTES)
         if data is None:
             return None
         where = self.root.joinpath(*parts)
@@ -359,7 +369,7 @@ class VerifiedStore:
         found: list[Path] = []
         for directory, dirs, files in os.walk(self.root):
             # `os.walk` doesn't follow directory symlinks; the store has none.
-            found.extend(Path(directory) / name for name in files if name.startswith(".tmp-"))
+            found.extend(Path(directory) / name for name in files if name.startswith(TEMP_PREFIX))
             dirs.sort()
         return sorted(found)
 

@@ -95,7 +95,7 @@ class RequireValueTest(unittest.TestCase):
         self.assertEqual(config.require_value("dev-env", "cpus"), "4")
         self.assertEqual(config.require_value("dev-env", "ratio"), "0.5")
         for name in ("flag", "unset", "missing"):
-            with self.assertRaises(user_config.ConfigErr, msg=name):
+            with self.subTest(name=name), self.assertRaises(user_config.ConfigErr, msg=name):
                 config.require_value("dev-env", name)
 
     def test_sshd_port(self) -> None:

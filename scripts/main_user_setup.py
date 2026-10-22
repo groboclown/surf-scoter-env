@@ -1,6 +1,7 @@
 #SPDX:MIT
 """Surf Scoter Sub-command: user-setup"""
 import argparse
+import enum
 import os
 import sys
 from collections.abc import Sequence
@@ -15,9 +16,19 @@ from surf_scoter_lib import (
     gen_parser,
     setup_check,
 )
+from surf_scoter_lib.user_config import Capture
 
 # ---------------------------------------------------------------------
 # User-space setup.
+
+
+class Interaction(enum.Enum):
+    """How the setup answers its questions."""
+
+    # Ask the user at the terminal.
+    ASK = "ask"
+    # Take each question's default answer (`--non-interactive`).
+    DEFAULTS = "defaults"
 
 
 def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int:
@@ -26,15 +37,16 @@ def user_space_setup_runner(config: UserConfig, args: argparse.Namespace) -> int
     This performs:
         1. a check of the setup files' programs.
         2. key file construction, if it doesn't exist.
-        3. Ensure the ssh config file exists.
-    
+        3. Ensure the ssh config and known-hosts files exist.
+        4. Ensure the user's configuration directory exists.
+
     This doesn't construct the Host entry in the config file, because
     that can vary from container to container.
 
     Problems with the setup files are reported, and make the command fail,
     but don't stop the rest of the setup.
     """
-    interactive = bool(args.interactive)
+    interactive = Interaction.ASK if args.interactive else Interaction.DEFAULTS
     setup_ok = check_setup(config)
     report_host_command_checks(config)
     report_guarded_settings(config)
@@ -50,7 +62,6 @@ def check_setup(config: UserConfig) -> bool:
 
     `scoter run` refuses to start on the same refusals.
     """
-    # Step 1: the setup files' programs.
     findings = setup_check.program_findings(config)
     refused = [f for f in findings if f.severity == checks.Severity.REFUSE]
     warned = [f for f in findings if f.severity == checks.Severity.WARN]
@@ -113,13 +124,13 @@ def ensure_private_dir(directory: Path) -> None:
     One that's there is left as it is.
     """
     if not directory.exists():
-        directory.mkdir(mode=0o700, parents=True)
+        directory.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
         if not fileutil.is_windows():
-            os.chmod(directory, 0o700)
+            os.chmod(directory, fileutil.MODE_USER_RWX)
 
 
-def gen_key_pair(config: UserConfig, interactive: bool) -> None:
-    # Step 2: generate the key pair.
+def gen_key_pair(config: UserConfig, interactive: Interaction) -> None:
+    """Generate the ssh key pair, if it isn't there."""
     key_file = config.require_path("ssh", "key-file")
     pub_key_file = Path(str(key_file) + defaults.PUB_KEY_EXT)
     if key_file.is_file() and pub_key_file.is_file():
@@ -155,7 +166,7 @@ def gen_key_pair(config: UserConfig, interactive: bool) -> None:
         if answer and answer[0] == "y":
             print("Generating the key pair.")
             ensure_private_dir(key_file.parent)
-            config.run_command("ssh", "mk-key", capture_stdout=False)
+            config.run_command("ssh", "mk-key", capture=Capture.NONE)
         else:
             print(
                 f"The ssh key pair ('{key_file}' and '{pub_key_file}') "
@@ -163,8 +174,8 @@ def gen_key_pair(config: UserConfig, interactive: bool) -> None:
             )
 
 
-def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
-    # Step 3: Ensure the ssh config file exists.
+def ensure_ssh_config(config: UserConfig, interactive: Interaction) -> None:
+    """Ensure the ssh config file exists, private to the user."""
     ssh_config_file = config.require_path("ssh", "config-file")
     if ssh_config_file.is_file():
         print(f"Good.  You already have the ssh config file ({ssh_config_file})")
@@ -181,7 +192,7 @@ def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
     if ssh_config_file.is_file() and not fileutil.is_windows():
         # Check its permissions.
         mode = os.stat(ssh_config_file).st_mode
-        if mode & 0o0077 != 0:
+        if mode & fileutil.MODE_NOT_PRIVATE != 0:
             answer = _read_user_input(
                 f"Your ssh config file ({ssh_config_file}) exists (excellent!), but has "
                 f"wrong permissions ({mode:o}). Do you want me to fix that? [yN]",
@@ -189,7 +200,7 @@ def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
                 "n",
             )
             if answer and answer[0] == "y":
-                os.chmod(ssh_config_file, 0o600)
+                os.chmod(ssh_config_file, fileutil.MODE_USER_RW)
                 mode = os.stat(ssh_config_file).st_mode
                 print(f"Changed the file ({ssh_config_file}) permissions to {mode:o}")
         else:
@@ -205,12 +216,12 @@ def ensure_ssh_config(config: UserConfig, interactive: bool) -> None:
         )
         if answer and answer[0] == "y":
             ensure_private_dir(ssh_config_file.parent)
-            fileutil.touch(ssh_config_file, 0o600)
+            fileutil.touch(ssh_config_file, fileutil.MODE_USER_RW)
             print(f"Created an empty ssh config file ({ssh_config_file})")
 
 
-def ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
-    # Step 4: Ensure the known-hosts file exists.
+def ensure_ssh_known_hosts(config: UserConfig, interactive: Interaction) -> None:
+    """Ensure the ssh known-hosts file exists, private to the user."""
     known_hosts_file = config.require_path("ssh", "known-hosts")
     if known_hosts_file.exists() and not known_hosts_file.is_file():
         answer = _read_user_input(
@@ -241,9 +252,8 @@ def ensure_ssh_known_hosts(config: UserConfig, interactive: bool) -> None:
         fileutil.touch(known_hosts_file, fileutil.MODE_USER_RW)
 
 
-def try_user_home(config: UserConfig, interactive: bool) -> None:
-    # Step 5: Create the ~/.config/surf-scoter.d directory + basic setup
-    #  if the user-dir isn't set.
+def try_user_home(config: UserConfig, interactive: Interaction) -> None:
+    """Create the `~/.config/surf-scoter.d` directory and a stub setup file, if the user-dir isn't set."""
     user_dir = config.optional_path("scoter", "user-dir")
     if not user_dir:
         answer = _read_user_input(
@@ -274,11 +284,11 @@ def try_user_home(config: UserConfig, interactive: bool) -> None:
 
 def _read_user_input(
     prompt: str,
-    interactive: bool,
+    interactive: Interaction,
     default: str,
 ) -> str | None:
     """Used for reading simple multiple-choice questions, not free-form text."""
-    if interactive:
+    if interactive == Interaction.ASK:
         try:
             line = input(prompt + " ")
         except EOFError:

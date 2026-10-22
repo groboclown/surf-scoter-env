@@ -16,11 +16,11 @@ SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import main_list_accepted
 import main_revoke
-from surf_scoter_lib import jdata
+from surf_scoter_lib import fileutil, jdata
 from surf_scoter_lib.user_config import UserConfig
 from surf_scoter_lib.verified import accept, lookup, records, revoke, store
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 
 
 class StoreTest(unittest.TestCase):
@@ -104,13 +104,15 @@ class RevokeTest(StoreTest):
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main_revoke.run_revoke(self.config(outside=outside), names, everything=everything)
+            pick = revoke.Pick.ALL if everything else revoke.Pick.NAMED
+            code = main_revoke.run_revoke(self.config(outside=outside), names, pick=pick)
         return code, out.getvalue(), err.getvalue()
 
     def run_list(self, *, quiet: bool = False) -> tuple[int, str]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = main_list_accepted.run_list(self.config(outside=True), quiet=quiet)
+            listing = main_list_accepted.Listing.IDS if quiet else main_list_accepted.Listing.FULL
+            code = main_list_accepted.run_list(self.config(outside=True), listing=listing)
         return code, out.getvalue()
 
     def test_nothing_accepted(self) -> None:
@@ -148,7 +150,7 @@ class RevokeTest(StoreTest):
         first = self.accept("FROM scratch\n", "main")
         second = self.accept("FROM debian\n", "dev")
         third = self.accept("FROM alpine\n", None)
-        assert first.suggestion and second.suggestion and third.suggestion  # nosec: B101
+        assert first.suggestion and second.suggestion and third.suggestion  # nosec: B101  # narrowing for the type checker
         whole = first.suggestion.id
         short = second.suggestion.id.removeprefix("sha256:")[:12].upper()
         self.assertEqual(self.run_revoke(whole, short)[0], 0)
@@ -171,7 +173,7 @@ class RevokeTest(StoreTest):
         self.assertEqual(self.run_revoke("main")[0], 0)
         self.assertEqual(store.VerifiedStore.open(self.verified).index(), {})
 
-    def test_unmatched_revokes_nothing(self) -> None:
+    def test_unmatched_revokes_none(self) -> None:
         """A name that chooses nothing (a typo, say): nothing is revoked, and the list is shown."""
         main = self.accept("FROM scratch\n", "main")
         code, _, err = self.run_revoke("main", "mian")
@@ -211,7 +213,7 @@ class RevokeTest(StoreTest):
             store.VerifiedStore.open(self.verified).index(), {str(other): store.environment_id(other)},
         )
 
-    def test_unknown_id_outside_a_project(self) -> None:
+    def test_unknown_id_outside(self) -> None:
         """An id no acceptance has, outside a project: said so, and nothing revoked."""
         kept = self.accept("FROM scratch\n", "main")
         code, _, err = self.run_revoke(kept.id, "20000101T000000Z-00000000", outside=True)
@@ -239,7 +241,7 @@ class RevokeTest(StoreTest):
         self.assertIn("2 acceptances of 2 projects", lines[4])
         self.assertEqual(self.run_list(quiet=True), (0, f"{second.id}\n{first.id}\n"))
 
-    def test_list_shows_exemption_and_gone_projects(self) -> None:
+    def test_list_exemption_and_gone(self) -> None:
         """An exemption is shown, and so is a project whose directory has gone."""
         acceptance = self.accept("FROM scratch\n", "main")
         verified_store = store.VerifiedStore.open(self.verified)
@@ -256,7 +258,7 @@ class RevokeTest(StoreTest):
         self.assertIn(f"{self.project}  (the directory is gone)", out)
         self.assertIn(f"exempt until {exempt.isoformat()} (holds)  branch main  from {acceptance.id}", out)
 
-    def test_revoking_ends_the_exemption(self) -> None:
+    def test_revoke_ends_exemption(self) -> None:
         """Revoking the acceptance an exemption uses ends the exemption; revoking another doesn't."""
         first = self.accept("FROM scratch\n", "dev")
         second = self.accept("FROM alpine\n", "main")

@@ -4,8 +4,8 @@
 # `inet` table (IPv4 + IPv6) so Docker's own tables and chains are untouched.
 table inet egress {
   # Destinations that must never be reached: private, loopback, link-local,
-  # multicast and other special-purpose IPv4 ranges.  Blocking these keeps the
-  # proxy from being used to reach the host, Docker networks, the LAN or cloud
+  # multicast, and other special-purpose IPv4 ranges.  Blocking these keeps the
+  # proxy from being used to reach the host, Docker networks, the LAN, or cloud
   # metadata services; only the public internet remains.
   set blocked_v4 {
     type ipv4_addr
@@ -40,8 +40,8 @@ table inet egress {
     # No IPv6 egress; the blocklist above only covers IPv4.
     meta nfproto ipv6 drop
     # The container's resolvers (Docker's embedded 127.0.0.11, or Podman's
-    # per-network DNS); restrict to DNS only.  `dns_servers` is defined by
-    # entrypoint.sh from /etc/resolv.conf.
+    # per-network DNS); restrict to DNS only.  entrypoint.sh defines
+    # `dns_servers` from /etc/resolv.conf.
     ip daddr $dns_servers udp dport 53 accept
     ip daddr $dns_servers tcp dport 53 accept
     # Never connect to private or special-purpose addresses.
@@ -59,9 +59,9 @@ table inet egress {
     iifname "lo" accept
     # Replies to our own outbound connections (e.g. DNS answers, HTTPS responses).
     ct state established,related accept
-    # Proxy connections only from the isolated network.  `isolated_if` is
-    # defined by entrypoint.sh, since the network's subnet and interface are
-    # assigned per environment.
+    # Proxy connections only from the isolated network.  entrypoint.sh defines
+    # `isolated_if`, since Docker assigns the network's subnet and interface
+    # per environment.
     iifname $isolated_if tcp dport 3128 accept
     # Count, then drop, everything else.
     counter drop

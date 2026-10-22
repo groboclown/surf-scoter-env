@@ -2,8 +2,7 @@
 """Find the user's acceptance for a project, from the universal configuration file.
 
 `verified_find.py` runs this for `scoter`, between the generator's second
-run (with the project) and its third (with the accepted settings).  See
-docs/contributors/projects-v1.md, step 8.
+run (with the project) and its third (with the accepted settings).
 
 The project's files are snapshotted, and the setup values worked out, from
 the universal configuration file; the environment's record gives the
@@ -130,7 +129,6 @@ def exempt_notice(
             + " until you run `scoter verify --with-exemption`"
         )
     return text + "."
-
 
 
 def no_match_reason(config: UserConfig, now: datetime.datetime | None = None) -> str:
@@ -265,7 +263,7 @@ def _carry_forward(
         carried, replaced = record.carry_forward(found, manifest, records.now_utc(), found.acceptance.branch)
         source = (env_id, records.ACCEPTANCES_DIR, found.acceptance.id)
         for name in verified_store.list_dir(*source):
-            data = verified_store.read_bytes(*source, name, max_size=store.MAX_JSON_SIZE)
+            data = verified_store.read_bytes(*source, name, max_size=store.MAX_JSON_BYTES)
             if data is not None:
                 verified_store.write_bytes(
                     env_id, records.ACCEPTANCES_DIR, carried.id, name, data=data,

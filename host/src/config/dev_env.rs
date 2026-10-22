@@ -146,12 +146,14 @@ pub fn find(
         ContainerRef::Name(name) => {
             for dir in lookup {
                 let candidate = dir.join(name);
-                if candidate.join(DOCKERFILE).is_file() && candidate.join(DEV_ENV_FILE).is_file() {
-                    if !within(&candidate, &roots) {
-                        return Err(outside("container.dev-container", &candidate));
-                    }
-                    return load(&candidate, &roots, lookup);
+                if !candidate.join(DOCKERFILE).is_file() || !candidate.join(DEV_ENV_FILE).is_file()
+                {
+                    continue;
                 }
+                if !within(&candidate, &roots) {
+                    return Err(outside("container.dev-container", &candidate));
+                }
+                return load(&candidate, &roots, lookup);
             }
             let message = if lookup.is_empty() {
                 format!(
@@ -1087,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn load_published_parent_with_overrides() {
+    fn published_parent_overrides() {
         let dir = TempDir::new();
         // A published image's parents are already in it: not built.
         container(&dir, "published-base");
@@ -1124,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn load_local_parent_without_dev_env() {
+    fn local_parent_without_dev_env() {
         let dir = TempDir::new();
         // Say, the project's CI build image: only a Dockerfile.
         dir.write("ci/Dockerfile", "FROM scratch\n");
@@ -1147,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn load_parent_graph_in_build_order() {
+    fn parent_graph_in_build_order() {
         let dir = TempDir::new();
         // root <- a, root <- b, and env builds on both, then `c` on a file.
         let root = container(&dir, "root").canonicalize().unwrap();
@@ -1255,7 +1257,7 @@ mod tests {
     // ---- `name` parents ----
 
     #[test]
-    fn load_name_parent_from_the_second_search_directory() {
+    fn name_parent_from_second_dir() {
         let dir = TempDir::new();
         // Not a container: no Dockerfile.
         dir.write("first/base/dev-env.yaml", DEV_ENV);
@@ -1319,7 +1321,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn load_name_parent_through_a_symlink_outside() {
+    fn name_parent_symlink_outside() {
         let dir = TempDir::new();
         let outside = container(&dir, "elsewhere/base");
         fs::create_dir_all(dir.path().join("search")).unwrap();
@@ -1339,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn load_name_parent_with_dir_and_file_parents_in_build_order() {
+    fn mixed_parents_in_build_order() {
         let dir = TempDir::new();
         let low = container_with(&dir, "search/low", "sshd-port: 1\n");
         let named = container_with(

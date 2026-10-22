@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from surf_scoter_lib import BAD_EXECUTION_ARGS_CODE, UserConfig, gen_parser, log
 
 
-def run_fetch(config: UserConfig, *, branch: bool | None) -> int:
-    """Run the fetch operation"""
+def run_fetch(config: UserConfig, *, branch: str | None) -> int:
+    """Run the fetch operation."""
     log.error("Not implemented")
     return 1
 
@@ -33,6 +33,7 @@ def main(argv: Sequence[str]) -> int:
 
     args = parser.parse_args(argv)
     return run_fetch(config, branch=args.branch)
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

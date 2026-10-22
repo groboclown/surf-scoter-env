@@ -41,8 +41,7 @@ class SshConfigLine:
             return SshConfigLine(
                 line=line, line_no=line_no, valid=True, host=host, key=None, value=None
             )
-        idx = 0
-        for val in in_scope:
+        for idx, val in enumerate(in_scope):
             # Because of the strip() at the start and the 'if not in_scope' line,
             # idx will always be > 0 here, which means the extracted key is
             # already stripped.
@@ -57,7 +56,6 @@ class SshConfigLine:
                 return SshConfigLine(
                     line=line, line_no=line_no, valid=bool(value), host=host, key=key, value=value
                 )
-            idx += 1  # noqa: SIM113
         return SshConfigLine(
             line=line, line_no=line_no, valid=False, host=host, key=None, value=None
         )
@@ -223,9 +221,7 @@ class SshConfig:
         """Parse a whole ssh_config file."""
         ret: dict[str | None, list[SshConfigLine]] = {}
         host: str | None = None
-        line_no = 0
-        for line in contents.splitlines(keepends=True):
-            line_no += 1  # noqa: SIM113
+        for line_no, line in enumerate(contents.splitlines(keepends=True), 1):
             parsed = SshConfigLine.parse_line(host, line, line_no)
             host = parsed.host
             lines = ret.get(parsed.host)
@@ -260,7 +256,7 @@ class SshConfig:
                 ssh_config = SshConfig.parse_file(inp.read())
             format_errs = ssh_config.format_errors()
             if format_errs:
-                log.error(f"Thee ssh config file ({ssh_config_file}) has problems:")
+                log.error(f"The ssh config file ({ssh_config_file}) has problems:")
                 for line in format_errs:
                     log.error(f"  {line.line_no}: {line.line.rstrip()}")
                 has_error = True

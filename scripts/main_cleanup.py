@@ -9,9 +9,10 @@ store's leftovers.  With `--workspaces`, the workspaces no running
 environment uses; with `--images`, the images it built that none uses.
 The ssh config entries of environments that aren't running go as `ssh:
 values: config-cleanup` says: with `ask`, they're asked about on their own,
-even with `--force`.  See step 23 of docs/contributors/projects-v1.md, and docs/cleaning-up.md.
+even with `--force`.  See docs/cleaning-up.md.
 """
 import datetime
+import enum
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,27 @@ PROMPT = "Remove these? [y/N]: "
 SSH_PROMPT = "Remove these ssh config entries? [y/N]: "
 
 
+class Extras(enum.Flag):
+    """What else the cleanup looks for, besides what nothing else removes."""
+
+    NONE = 0
+    # The workspaces no running environment uses (`--workspaces`).
+    WORKSPACES = enum.auto()
+    # The images no running environment uses (`--images`).
+    IMAGES = enum.auto()
+
+
+class Confirm(enum.Enum):
+    """Whether the cleanup removes what it finds."""
+
+    # Remove it when the user says so.
+    ASK = "ask"
+    # Only list it (`--dry-run`).
+    DRY_RUN = "dry-run"
+    # Remove it without asking (`--force`); the ssh entries are still asked about.
+    FORCE = "force"
+
+
 @dataclass
 class Found:
     """What the cleanup found."""
@@ -49,7 +71,7 @@ class Found:
     # The ssh config's entries for environments that aren't running, and
     # `ssh: values: config-cleanup`; with `no`, only how many there are.
     ssh: list[str] = field(default_factory=list)
-    ssh_mode: str = "ask"
+    ssh_mode: str = ssh_hosts.CLEANUP_ASK
     ssh_kept: int = 0
     ssh_problem: str | None = None
 
@@ -63,7 +85,7 @@ class Found:
         return self.others() or bool(self.ssh)
 
 
-def find(config: UserConfig, now: datetime.datetime, *, workspaces: bool, images: bool) -> Found:
+def find(config: UserConfig, now: datetime.datetime, *, extras: Extras) -> Found:
     """Everything there is to clean up; it's only read."""
     runs = cleanup.find_runs(config)
     found = Found(stale=runs.stale, state=cleanup.find_orphaned_state(config, now))
@@ -72,9 +94,9 @@ def find(config: UserConfig, now: datetime.datetime, *, workspaces: bool, images
         found.gone = cleanup.find_gone_projects(found.verified_store)
         found.leftovers = cleanup.find_store_leftovers(found.verified_store)
     # The stale runs go first, so what they used is free.
-    if workspaces:
+    if Extras.WORKSPACES in extras:
         found.workspaces = cleanup.find_workspaces(config, runs.running)
-    if images:
+    if Extras.IMAGES in extras:
         found.images = cleanup.find_images(config, runs.running)
     found.ssh_mode = ssh_hosts.cleanup_mode(config)
     try:
@@ -82,7 +104,7 @@ def find(config: UserConfig, now: datetime.datetime, *, workspaces: bool, images
     except SurfScoterErr as err:
         found.ssh_problem = str(err)
         hosts = []
-    if found.ssh_mode == "no":
+    if found.ssh_mode == ssh_hosts.CLEANUP_NO:
         found.ssh_kept = len(hosts)
     else:
         found.ssh = hosts
@@ -120,7 +142,7 @@ def show(found: Found) -> None:
     section("Images no running environment uses", found.images)
     section(
         "SSH config entries for environments that aren't running"
-        + (" (asked about on their own)" if found.ssh_mode == "ask" and found.others() else ""),
+        + (" (asked about on their own)" if found.ssh_mode == ssh_hosts.CLEANUP_ASK and found.others() else ""),
         found.ssh,
     )
     if found.ssh_kept:
@@ -150,7 +172,8 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
             # Only if it's still stale: its run may have been started again meanwhile.
             # Its ssh entries are asked about with the others, below.
             if cleanup.is_stale(config, env.host) and main_kill.run_kill(
-                config, host=env.host, fetch_branch=None, force_clean=False, release_ssh=False,
+                config, host=env.host, fetch_branch=None,
+                workspace=main_kill.Workspace.KEEP, ssh=main_kill.SshEntries.KEEP,
             ) != 0:
                 failed = True
         step(env.host, stop)
@@ -177,7 +200,7 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
             for name in cleanup.remove_images(config, found.images):
                 print(f"Removed {name}.")
         step("the images", images)
-    if found.ssh and found.ssh_mode == "auto":
+    if found.ssh and found.ssh_mode == ssh_hosts.CLEANUP_AUTO:
         step("the ssh config entries", lambda: _say_ssh_removed(config, found.ssh))
     return 1 if failed else 0
 
@@ -210,16 +233,14 @@ def _say_removed(paths: Sequence[Path]) -> None:
 def run_cleanup(
     config: UserConfig,
     *,
-    workspaces: bool = False,
-    images: bool = False,
-    dry_run: bool = False,
-    force: bool = False,
+    extras: Extras = Extras.NONE,
+    confirm: Confirm = Confirm.ASK,
     ask: Callable[[str], str] | None = None,
 ) -> int:
-    """List what there is to clean up, then remove it: with `force`, or when the user says so."""
+    """List what there is to clean up, then remove it: with `Confirm.FORCE`, or when the user says so."""
     now = datetime.datetime.now(datetime.UTC)
     try:
-        found = find(config, now, workspaces=workspaces, images=images)
+        found = find(config, now, extras=extras)
     except (OSError, SurfScoterErr) as err:
         print(f"Couldn't look for what to clean up: {review.clean(str(err))}", file=sys.stderr)
         return 1
@@ -229,17 +250,17 @@ def run_cleanup(
         show(found)
         return 0
     show(found)
-    if dry_run:
+    if confirm == Confirm.DRY_RUN:
         print("Nothing was removed (--dry-run).")
         return 0
     code = 0
-    if found.others() or (found.ssh and found.ssh_mode == "auto"):
-        if force or _ask(ask, PROMPT, "Nothing was removed: give --force to remove these without being asked."):
+    if found.others() or (found.ssh and found.ssh_mode == ssh_hosts.CLEANUP_AUTO):
+        if confirm == Confirm.FORCE or _ask(ask, PROMPT, "Nothing was removed: give --force to remove these without being asked."):
             code = remove(config, found, now)
         else:
             print("Nothing was removed.")
             return 0
-    if found.ssh and found.ssh_mode == "ask":
+    if found.ssh and found.ssh_mode == ssh_hosts.CLEANUP_ASK:
         # `ask` is the user's say over their ssh config: `--force` doesn't answer for them.
         if _ask(ask, SSH_PROMPT, "The ssh config entries were kept: there's no terminal to ask at."):
             try:
@@ -283,9 +304,17 @@ def main(argv: Sequence[str]) -> int:
         "--force", action="store_true", help="Remove what's found without asking.",
     )
     args = parser.parse_args(argv)
-    return run_cleanup(
-        config, workspaces=args.workspaces, images=args.images, dry_run=args.dry_run, force=args.force,
-    )
+    extras = Extras.NONE
+    if args.workspaces:
+        extras |= Extras.WORKSPACES
+    if args.images:
+        extras |= Extras.IMAGES
+    confirm = Confirm.ASK
+    if args.dry_run:
+        confirm = Confirm.DRY_RUN
+    elif args.force:
+        confirm = Confirm.FORCE
+    return run_cleanup(config, extras=extras, confirm=confirm)
 
 
 if __name__ == "__main__":

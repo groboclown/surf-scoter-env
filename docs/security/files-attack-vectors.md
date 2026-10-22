@@ -53,7 +53,7 @@ When the workspace already exists, `scoter run` (unless given `--no-workspace-fe
 ### FILE-2: Object files shared with the project repository
 
 **Severity:** High.  **Status:** Mitigated, for workspaces created after the fix.
-**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in [`run-container.sh`](../../run-container.sh).
+**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py).
 
 By default, `git clone` of a local path hard-links the object files when it can, and the workspace sits on the same file system as the project.  The project and the workspace then share each object file's inode, owned by the developer.  With `keep-id`, the container runs as that owner, so it can make an object file writable and replace its contents.  The developer's real repository then returns the attacker's content under the original, already-reviewed hash.
 

@@ -49,7 +49,7 @@ services:
     # It should have the `containers/dev-env/Dockerfile` built image
     # as its parent.
     image: ${DEV_ENV}
-    # Set by run-container.sh: the name you connect to with `ssh`, and that the
+    # Set by `scoter run`: the name you connect to with `ssh`, and that the
     # host connects to with `docker exec`.
     container_name: ${CONTAINER_NAME}
     networks: [isolated]
@@ -59,7 +59,7 @@ services:
     # container's rootless user (1000) instead.
     # This is a generalization, where most containers map the rootless user
     # to uid 1000.
-    # The 'keep-id' is podman-only.  Remove if you're using docker.
+    # The 'keep-id' is Podman-only.  Remove it if you're using Docker.
     userns_mode: "keep-id:uid=1000,gid=1000"
 
     environment:
@@ -78,7 +78,7 @@ services:
       - no-new-privileges:true
     pids_limit: ${PIDS_LIMIT}     # stops fork bombs
     mem_limit: ${MEM_LIMIT}       # mem + cpu limit: set to taste.
-    cpus: ${CPUS}             
+    cpus: ${CPUS}
     memswap_limit: ${MEM_LIMIT}   # same as mem_limit, so no extra swap on top of it.
     logging:
       options:
@@ -89,7 +89,7 @@ services:
     # Should also put some file size limits on things like tmpfs.
 networks:
   isolated:
-    # The subnet is assigned per environment; the firewall finds it at startup.
+    # Docker assigns the subnet per environment; the firewall finds it at startup.
     internal: true
   uplink:
     driver: bridge

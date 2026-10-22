@@ -1018,6 +1018,15 @@ fn is_location(section: &str, key: &str) -> bool {
     is_tool_only(section, key) || (section == SCOTER_SECTION && key == DISTRIBUTION_DIR)
 }
 
+/// The most characters of the directory name in a project's id.
+const ID_NAME_MAX_CHARS: usize = 32;
+/// The id's name when the directory's name leaves nothing.
+const ID_FALLBACK_NAME: &str = "project";
+/// How many bytes of the path's SHA-256 the id's hash holds (two hex digits each).
+const ID_HASH_BYTES: usize = 6;
+/// The most characters `path_part` keeps.
+const PATH_PART_MAX_CHARS: usize = 64;
+
 /// The project's id: `NAME-HASH`, from the project directory's canonical path,
 /// exactly as the verified store works it out (`store.environment_id` in the
 /// scripts' library).
@@ -1046,7 +1055,7 @@ pub fn environment_id(project_dir: &Path) -> String {
             in_run = true;
         }
     }
-    let name: String = name.chars().take(32).collect();
+    let name: String = name.chars().take(ID_NAME_MAX_CHARS).collect();
     let name = name.trim_matches('-');
     #[cfg(unix)]
     let bytes = {
@@ -1056,8 +1065,19 @@ pub fn environment_id(project_dir: &Path) -> String {
     #[cfg(not(unix))]
     let bytes = canonical.to_string_lossy().into_owned().into_bytes();
     let digest = Sha256::digest(&bytes);
-    let hash: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
-    format!("{}-{hash}", if name.is_empty() { "project" } else { name })
+    let hash: String = digest
+        .iter()
+        .take(ID_HASH_BYTES)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "{}-{hash}",
+        if name.is_empty() {
+            ID_FALLBACK_NAME
+        } else {
+            name
+        }
+    )
 }
 
 /// `text` made safe as one path part, or None if nothing's left.
@@ -1078,7 +1098,7 @@ pub fn path_part(text: &str) -> Option<String> {
             in_run = true;
         }
     }
-    let cut: String = out.chars().take(64).collect();
+    let cut: String = out.chars().take(PATH_PART_MAX_CHARS).collect();
     let part = cut.trim_matches(|c| c == '-' || c == '.');
     (!part.is_empty()).then(|| part.to_string())
 }
@@ -2771,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn no_setup_file_found_in_the_project() {
+    fn no_setup_file_in_project() {
         let dir = TempDir::new();
         dir.write("proj/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let project_dir = dir.path().join("proj");
@@ -2837,7 +2857,7 @@ mod tests {
     const PROJECT_FILES_SETUP: &str = "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n";
 
     #[test]
-    fn environment_id_matches_the_store() {
+    fn environment_id_matches_store() {
         // The same as the scripts' `store.environment_id` gives for these.
         for (dir, id) in [
             (
@@ -2874,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn no_user_setup_from_the_project() {
+    fn no_user_setup_from_project() {
         let dir = TempDir::new();
         // A repository, with the project in `client`.
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
@@ -2949,7 +2969,7 @@ mod tests {
     }
 
     #[test]
-    fn no_user_setup_from_the_project_found_earlier() {
+    fn no_user_setup_found_earlier() {
         // Found before the project was known, the file is in the record.
         let dir = TempDir::new();
         let file = dir.write("proj/conf/setup.yaml", PROJECT_FILES_SETUP);
@@ -2977,7 +2997,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_dir_outside_the_project() {
+    fn verified_dir_outside_project() {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
         let repo = dir.path().join("repo");
@@ -3053,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_partly_works_out_missing_parts() {
+    fn resolve_partly_fills_missing() {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join("repo/client")).unwrap();
         let at = |p: &str| dir.path().join(p);
@@ -3212,7 +3232,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_container_path_is_set_later() {
+    fn dev_container_path_set_later() {
         let dir = TempDir::new();
         let setup = dir.write(
             "setup.yaml",
@@ -3305,7 +3325,7 @@ mod tests {
     }
 
     #[test]
-    fn shape_old_flat_sections_are_refused() {
+    fn old_flat_sections_refused() {
         assert_eq!(
             one_error("ssh:\n  home: ~/.ssh\n"),
             "ssh.home: unknown key; a section has `paths`, `programs`, `runs`, `path-lists`, `value-lists`, `values`, `host-commands`, `project-files` and `egress-hosts`"
@@ -3334,7 +3354,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_file_doesnt_hide_the_others() {
+    fn bad_file_doesnt_hide_others() {
         let dir = TempDir::new();
         let cli = dir.write("home-setup/setup.yaml", "a: [\n");
         dir.write("dist/setup.yaml", "b: text\n");
@@ -3346,7 +3366,7 @@ mod tests {
     // ---- merging ----
 
     #[test]
-    fn lists_are_replaced_sections_merged() {
+    fn lists_replace_sections_merge() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -3499,7 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_has_one_kind_of_value() {
+    fn key_has_one_kind_of_value() {
         let errors = load_one(concat!(
             "a:\n",
             "  paths:\n    x: /p\n    y: /q\n",
@@ -3517,7 +3537,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_keeps_its_kind_across_files() {
+    fn key_keeps_kind_across_files() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -3544,7 +3564,7 @@ mod tests {
     }
 
     #[test]
-    fn references_to_any_kind_of_value() {
+    fn references_to_any_kind() {
         let config = load_one(concat!(
             "a:\n",
             "  paths:\n    home: /h\n",
@@ -3669,7 +3689,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_name_the_file_that_set_the_value() {
+    fn errors_name_the_setting_file() {
         let dir = TempDir::new();
         let cli = dir.write("home-setup/setup.yaml", "a:\n  paths:\n    x: ${a:bad}\n");
         dir.write(
@@ -3863,7 +3883,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn section_refers_to_other_sections_programs() {
+    fn section_uses_others_programs() {
         let dir = TempDir::new();
         let python = tool(&dir, "bin/python3");
         let file = dir.write(
@@ -3906,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn programs_and_paths_are_different_kinds() {
+    fn programs_and_paths_differ() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -4028,7 +4048,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn executables_must_be_executable_files() {
+    fn executable_files_required() {
         let dir = TempDir::new();
         let plain = dir.write("plain-file", "#!/bin/sh\n");
         std::fs::create_dir_all(dir.path().join("a-dir")).unwrap();
@@ -4084,7 +4104,7 @@ mod tests {
     }
 
     #[test]
-    fn section_defaults_and_not_found() {
+    fn section_defaults_not_found() {
         let config = load_one("").unwrap();
         let defaults = SectionDefaults {
             programs: &[("exec", "no-such-docker")],
@@ -4130,7 +4150,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_are_checked_when_loading() {
+    fn commands_checked_on_load() {
         let errors = load_one(concat!(
             "t:\n",
             "  programs:\n    exec: tool {x:no}\n",
@@ -4158,7 +4178,7 @@ mod tests {
     // ---- starting from a setup record ----
 
     #[test]
-    fn record_is_expanded_again_without_reading_the_files() {
+    fn record_expands_without_reads() {
         let dir = TempDir::new();
         let file = dir.write(
             "setup.yaml",
@@ -4210,7 +4230,7 @@ mod tests {
     }
 
     #[test]
-    fn record_is_a_base_layer_for_the_search() {
+    fn record_is_search_base_layer() {
         let dir = TempDir::new();
         let cli = dir.write(
             "home-setup/setup.yaml",
@@ -4290,7 +4310,7 @@ mod tests {
     }
 
     #[test]
-    fn record_keeps_a_history_of_inputs() {
+    fn record_keeps_input_history() {
         let dir = TempDir::new();
         dir.write("dist1/setup.yaml", "");
         dir.write("dist2/setup.yaml", "");
@@ -4345,7 +4365,7 @@ mod tests {
     }
 
     #[test]
-    fn record_duplicates_are_allowed_and_removed() {
+    fn record_duplicates_removed() {
         let record = SetupRecord::default();
         let history = LoadedFrom {
             distribution_dir: vec!["/a".to_string(), "/b".to_string(), "/a".to_string()],
@@ -4505,7 +4525,7 @@ mod tests {
     // ---- host-commands ----
 
     #[test]
-    fn host_commands_nothing_refers_to_a_check() {
+    fn host_checks_not_referable() {
         let check = "  host-commands:\n    c: {action: warn, reason: r, commands: [x]}\n";
         assert_eq!(
             one_error(&format!("a:\n  values:\n    v: 'is ${{a:c}}'\n{check}")),
@@ -4556,7 +4576,7 @@ mod tests {
     }
 
     #[test]
-    fn host_commands_kind_cant_change() {
+    fn host_commands_kind_fixed() {
         let dir = TempDir::new();
         let dist = dir.write(
             "dist/setup.yaml",

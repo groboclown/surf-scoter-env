@@ -40,7 +40,10 @@ it_expect "${IT_SANDBOX}/long.log" "at most 7 days"
 
 it_say "changing the files: the Dockerfile, the project file and dev-env.yaml"
 it_overlay "${IT_ROOT}/02-re-review/changed"
-sed -i 's/^user: ubuntu$/user: root/' "${IT_PROJECT}/.surf-scoter.d/env/dev-env.yaml"
+# Not `sed -i`: it takes different arguments on macOS.
+dev_env="${IT_PROJECT}/.surf-scoter.d/env/dev-env.yaml"
+sed 's/^user: ubuntu$/user: root/' "${dev_env}" > "${dev_env}.new"
+mv "${dev_env}.new" "${dev_env}"
 
 it_say "a run on the branch: the container files as they are, the settings as accepted"
 scoter run > "${IT_SANDBOX}/run.log" 2>&1 && it_fail "the stand-in build succeeded"

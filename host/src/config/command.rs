@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn split_keeps_windows_backslashes() {
+    fn split_keeps_backslashes() {
         assert_eq!(
             words(r"C:\tools\podman.exe exec"),
             [r"C:\tools\podman.exe", "exec"]
@@ -337,7 +337,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn relative_path_entries_are_skipped() {
+    fn relative_path_entries_skipped() {
         let dir = TempDir::new();
         let tool = dir.write("bin/tool", "#!/bin/sh\n");
         make_executable(&tool, true);

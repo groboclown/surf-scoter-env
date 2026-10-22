@@ -1,4 +1,4 @@
-# Dynamically replace the SSHD listening port.
+# entrypoint.sh fills in the SSHD listening port when the container starts.
 Port ${SCOTER_SSHD_PORT}
 ListenAddress 127.0.0.1
 

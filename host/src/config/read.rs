@@ -15,16 +15,19 @@ use yaml_serde::Value;
 
 use super::{child_key, index_key};
 
+/// Bytes in a megabyte, as the size limits count them.
+const BYTES_PER_MB: u64 = 1024 * 1024;
+
 /// The largest configuration file the tools read.
-pub const MAX_CONFIG_FILE_SIZE: u64 = 2 * 1024 * 1024;
+pub const MAX_CONFIG_FILE_BYTES: u64 = 2 * BYTES_PER_MB;
 
 /// The largest universal configuration file the tools read (or write): it
 /// holds the other files' contents, and more.
-pub const MAX_UNIVERSAL_FILE_SIZE: u64 = 4 * 1024 * 1024;
+pub const MAX_UNIVERSAL_FILE_BYTES: u64 = 4 * BYTES_PER_MB;
 
-/// Read a whole configuration file, refusing anything over `MAX_CONFIG_FILE_SIZE`.
+/// Read a whole configuration file, refusing anything over `MAX_CONFIG_FILE_BYTES`.
 pub fn read_limited(path: &Path) -> Result<String, String> {
-    read_limited_to(path, MAX_CONFIG_FILE_SIZE)
+    read_limited_to(path, MAX_CONFIG_FILE_BYTES)
 }
 
 /// Read a whole file, refusing anything over `max` bytes.  The limit applies
@@ -40,7 +43,7 @@ pub fn read_limited_to(path: &Path, max: u64) -> Result<String, String> {
 /// device is refused before anything is read from it, as reading one could
 /// hang or have side effects.
 pub fn read_regular_file(path: &Path) -> Result<String, String> {
-    read_regular_file_to(path, MAX_CONFIG_FILE_SIZE)
+    read_regular_file_to(path, MAX_CONFIG_FILE_BYTES)
 }
 
 /// `read_regular_file`, refusing anything over `max` bytes.
@@ -113,7 +116,7 @@ fn read_file(file: File, max: u64) -> Result<String, String> {
 pub fn size_error(max: u64) -> String {
     format!(
         "the file is larger than the {} MB limit",
-        max / (1024 * 1024)
+        max / BYTES_PER_MB
     )
 }
 
@@ -164,28 +167,28 @@ mod tests {
     fn read_limit() {
         let dir = TempDir::new();
         let at_limit = dir.path().join("at-limit.yaml");
-        fs::write(&at_limit, vec![b'#'; MAX_CONFIG_FILE_SIZE as usize]).unwrap();
+        fs::write(&at_limit, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize]).unwrap();
         assert_eq!(
             read_limited(&at_limit).unwrap().len(),
-            MAX_CONFIG_FILE_SIZE as usize
+            MAX_CONFIG_FILE_BYTES as usize
         );
 
         let over = dir.path().join("over.yaml");
-        fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_SIZE as usize + 1]).unwrap();
+        fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(
             read_limited(&over).unwrap_err(),
             "the file is larger than the 2 MB limit"
         );
         // The universal configuration file has a larger limit.
-        assert!(read_limited_to(&over, MAX_UNIVERSAL_FILE_SIZE).is_ok());
+        assert!(read_limited_to(&over, MAX_UNIVERSAL_FILE_BYTES).is_ok());
         let universal_over = dir.path().join("over.json");
         fs::write(
             &universal_over,
-            vec![b' '; MAX_UNIVERSAL_FILE_SIZE as usize + 1],
+            vec![b' '; MAX_UNIVERSAL_FILE_BYTES as usize + 1],
         )
         .unwrap();
         assert_eq!(
-            read_limited_to(&universal_over, MAX_UNIVERSAL_FILE_SIZE).unwrap_err(),
+            read_limited_to(&universal_over, MAX_UNIVERSAL_FILE_BYTES).unwrap_err(),
             "the file is larger than the 4 MB limit"
         );
     }
@@ -213,7 +216,7 @@ mod tests {
         assert_eq!(read_regular_file(&file).unwrap(), "a: 1\n");
 
         let over = dir.path().join("over.yaml");
-        fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_SIZE as usize + 1]).unwrap();
+        fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(
             read_regular_file(&over).unwrap_err(),
             "the file is larger than the 2 MB limit"

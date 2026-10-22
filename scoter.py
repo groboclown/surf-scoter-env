@@ -7,6 +7,7 @@ distribution script for processing.
 """
 # Compatibility: Python 3.12+
 import argparse
+import enum
 import json
 import os
 import platform
@@ -30,6 +31,10 @@ CURRENT_PROJECT_SETUP = "current-project-setup"
 SUB_CMD_PREFIX = "main_"
 SUB_CMD_SUFFIX = ".py"
 VCS_SECTION_SUFFIX = "-vcs"
+# How long a VCS section's `runs` command may take.
+VCS_COMMAND_TIMEOUT_SECONDS = 60
+# The exit code for a sub-command that couldn't start, as shells use it.
+EXIT_CANNOT_START = 127
 
 # Note: these lists hard-code sub-command usage.  That puts a limit on
 # what user-supplied sub-commands can do.  This should use
@@ -53,16 +58,22 @@ class ConfigErr(Exception):
     """A problem with the configuration file or arguments that control it."""
 
 
-def load_config(
-    args: argparse.Namespace, *, with_project: bool = True, with_acceptance: bool = True,
-) -> DictJsonData:
-    """Load the SUC based on the arguments.
+class ConfigScope(enum.Enum):
+    """How much of the configuration `load_config` loads."""
 
-    Without `with_project`, only the setup is loaded: for commands, such as
-    `help`, that don't need a project.  Without `with_acceptance`, the
-    project is loaded as it suggests, without the user's accepted settings:
-    for `verify`, which reviews the suggestion.
-    """
+    # The setup alone: for commands, such as `help`, that don't need a project.
+    SETUP = "setup"
+    # The project as it suggests, without the user's accepted settings: for
+    # `verify`, which reviews the suggestion.
+    SUGGESTED = "suggested"
+    # The project with the user's accepted settings, if they accepted it.
+    ACCEPTED = "accepted"
+
+
+def load_config(
+    args: argparse.Namespace, *, scope: ConfigScope = ConfigScope.ACCEPTED,
+) -> DictJsonData:
+    """Load the SUC based on the arguments, as far as `scope` says."""
     dist_dir = require_global_dist_dir(args.distribution_dir)
     # Phase 1: the setup alone, which says how to find the project.
     settings = generate_config(
@@ -74,7 +85,7 @@ def load_config(
         no_setup_search=False,
     )
 
-    if not with_project:
+    if scope == ConfigScope.SETUP:
         return settings
 
     # Look from `--project-dir`, or the current directory, up to the root of
@@ -96,7 +107,7 @@ def load_config(
             project_branch=branch,
         )
         check_project_vcs(settings, vcs_root)
-    if project_dir and with_acceptance:
+    if project_dir and scope == ConfigScope.ACCEPTED:
         # Phase 3: with the user's accepted settings, if they accepted it.
         found = find_acceptance(settings)
         accepted = found.get("accepted-settings") if found else None
@@ -130,7 +141,7 @@ def vcs_current_branch(settings: DictJsonData, vcs_root: tuple[Path, str]) -> st
            for part in _command(template, f"{section}/runs/current-branch", "{x:root}")]
     try:
         res = subprocess.run(  # nosec: B603  # The setup's command, as a list.
-            cmd, stdout=subprocess.PIPE, check=False, shell=False, timeout=60,
+            cmd, stdout=subprocess.PIPE, check=False, shell=False, timeout=VCS_COMMAND_TIMEOUT_SECONDS,
             env=command_env(settings, section),
         )
     except (OSError, subprocess.SubprocessError):
@@ -179,7 +190,7 @@ def find_vcs_root(settings: DictJsonData, start: Path) -> tuple[Path, str] | Non
             stdout=subprocess.PIPE,
             check=False,
             shell=False,
-            timeout=60,
+            timeout=VCS_COMMAND_TIMEOUT_SECONDS,
             env=command_env(settings, name + VCS_SECTION_SUFFIX),
         )
         if res.returncode != 0:
@@ -346,7 +357,7 @@ def save_to_tmp(data: DictJsonData) -> str:
         finally:
             os.close(fd)
         return file
-    except:
+    except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
 
@@ -401,7 +412,7 @@ def command_env(settings: DictJsonData, section: str) -> dict[str, str]:
         return dict(os.environ)
 
     def fold(name: str) -> str:
-        return name.upper() if sys.platform == "win32" else name
+        return name.upper() if _is_windows() else name
 
     texts = [p for p in patterns if isinstance(p, str)]
     exact = {fold(p) for p in texts if not p.endswith("*")}
@@ -534,6 +545,7 @@ def _require_exe(name: str | Path) -> Path:
 
 
 def _is_windows() -> bool:
+    """Whether this runs on Windows."""
     return platform.system() == "Windows"
 
 
@@ -605,7 +617,7 @@ def run_sub_command(config: DictJsonData, argv: Sequence[str]) -> int:
         return run_to_end(cmd_args)
     except OSError as err:
         print(f"Failed to start sub-command {argv[0]} at {cmd_file}: {err}", file=sys.stderr)
-        return 127
+        return EXIT_CANNOT_START
     finally:
         remove_tmp(config_file)
 
@@ -681,16 +693,21 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
 # ---------------------------------------------------------------------
 # CLI code.
 
+def config_scope(sub_cmd: str | None) -> ConfigScope:
+    """How much of the configuration the sub-command needs."""
+    if sub_cmd in NO_PROJECT_CMDS:
+        return ConfigScope.SETUP
+    if sub_cmd in NO_ACCEPTANCE_CMDS:
+        return ConfigScope.SUGGESTED
+    return ConfigScope.ACCEPTED
+
+
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        config = load_config(
-            args,
-            with_project=args.cmd not in NO_PROJECT_CMDS,
-            with_acceptance=args.cmd not in NO_ACCEPTANCE_CMDS,
-        )
+        config = load_config(args, scope=config_scope(args.cmd))
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1

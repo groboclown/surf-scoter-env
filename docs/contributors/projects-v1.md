@@ -943,7 +943,7 @@ Completed:
 
 * **Absolute programs only.**  `scoter-host` runs `host-brokered`'s `program` as it is: `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs) refuses one that isn't absolute, or isn't an executable file any more (removed or changed since acceptance), and never looks it up; `find_on_host` is gone.  Loading the universal file refuses a `program` that isn't absolute or `null`, too.  This closes [BRIDGE-11](../security/host-bridge-attack-vectors.md#bridge-11-the-hosts-path-lookup).
 * **No relative `PATH` entries.**  `find_executable` skips relative and empty `PATH` entries, so the generator (finding the setup's programs, the host command checks' programs, and, until step 15, the unreviewed commands') never resolves a program against the directory it runs in.
-* **Names.**  The handshake name (the client's `argv[0]`, its last path part) is matched exactly against the accepted `command` names, and nothing else (the existing `denies_lookalike_command_names` test covers `AWS` and `aws.exe` against `aws`).  On Windows too: names are case sensitive (step 4), and `PATHEXT` doesn't apply at run time, as the accepted program is an absolute path with its extension.
+* **Names.**  The handshake name (the client's `argv[0]`, its last path part) is matched exactly against the accepted `command` names, and nothing else (the existing `denies_lookalike_commands` test covers `AWS` and `aws.exe` against `aws`).  On Windows too: names are case sensitive (step 4), and `PATHEXT` doesn't apply at run time, as the accepted program is an absolute path with its extension.
 
 **Tests:** in `exec.rs`: only absolute executables run (a bare name, a relative path, a missing program, one removed after acceptance, one not executable).  In `command.rs`: relative `PATH` entries are skipped, and a later absolute one still counts.  In `config.rs`: a relative `host-brokered` program is refused when the universal file loads.  The host's own tests now give their commands absolute programs, as the universal file does.
 
@@ -1253,7 +1253,7 @@ Completed:
   * `build_plan`: runs the generator on the copy ([`generator.py`](../../scripts/surf_scoter_lib/generator.py), now shared with `main_verify.py`).  Its `current-project-setup` must equal the SUC's, and, for the project's container, so must its `dev-container-path` and `dev-container` with `parent-builds` mapped back to the live files directory.  A difference stops the run with "the project's files changed while `scoter` was starting ... run again" (no new review needed).  The project's container and its parents inside `.surf-scoter.d` build from the copy; parents outside it from where they are.
   * `apply_images`: each `images` mapping that isn't to itself rewrites the `FROM` word in the staged Dockerfiles (`rewrite_images`); local parents' tags and earlier stages are left alone, and a `FROM` continued over lines is refused when its image would change.  Only for the project's container.
 * **`use: {name}`.**  The generator, given accepted settings naming a container, makes it the dev container (`dev-container-path` and `dev-container`) in place of the project's.  It, and its parents by name, are looked for only in `dev-containers-search` directories outside the project directory and the VCS root (the default list starts with the project's own files directory), and the review check (step 13) uses the same rule.  The run builds it from where it is, and never builds the project's container.
-* **`scoter verify`** loads without the accepted settings (`load_config(with_acceptance=False)`), so it reviews the project's suggestion even when an acceptance uses the user's container.
+* **`scoter verify`** loads without the accepted settings (`load_config(scope=ConfigScope.SUGGESTED)`), so it reviews the project's suggestion even when an acceptance uses the user's container.
 
 **Tests:** in [`test_main_run_staging.py`](../../scripts/tests/test_main_run_staging.py), with the generator and acceptances made through the review prompt: the step's two (a change to `.surf-scoter.d` after the run read it doesn't reach the build, and one before it stops the run; an expired acceptance asks for a review), no acceptance, an `accepted.json` outside the store, a parent inside the project, `images` rewriting only the copy, and the user's own container.  `rewrite_images` on flags, stages, local tags, a mapping to itself, and continued lines.  In `universal.rs`: accepted settings using the user's container (with its parent the user's, not the project's same-named one), the project's, and a name only found in the project refused.  In `test_snapshot.py`: the restored modes.  In `test_scoter.py`: `verify` loads without the acceptance.  By hand: `scoter run` on a project with no acceptance stops with the message.  A full run wasn't tried: the scratch setup's state directory is the real one in `~/.config`.
 
@@ -1603,140 +1603,30 @@ Reuse existing helper functions that make clear what's happening, even if it's j
 
 Clean up the code to remove references to steps from this document.
 
-## 25. Clean up this file.
-
-Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.
-
-# Future Tasks
-
-## Choosing the setup for a project run
-
-`--user-setup` was removed: with the egress rules in the project file, and the accepted settings in the user's own storage, a project no longer needs its own setup file.  The remaining need is to run a project with a different docker-compose file and related images (say, an alternate gateway, or extra service containers).
-
-Instead of reading another setup file, let the user choose, for a project run, which setup section to use for those parts, from sections their own setup files (or the distribution's) define.  The choice is the user's, recorded with the project's accepted settings, never the project's.
-
-This also bears on the accepted egress rules: they were reviewed for one gateway (step 9), so a section with a different gateway, or a different compose file, may enforce them differently.  Switching sections should check the accepted rules against what the chosen section's gateway can enforce, and ask for a new review when it can't enforce them, or enforces them differently.  This also applies to the host command blocking rules.
-
-## ~~Naming by the environment id~~
-
-Step 5 gives each environment an id (the project directory's name and a hash of its canonical path), and uses it for the verified storage.  Use it for the rest of what's named per environment, so more than one `.surf-scoter.d` in a repository can run at once:
-
-* the container names, in place of the `ssh: values: host-prefix` and a reserved suffix (part of ticket #12);
-* ~~the workspace path, which then moves out of the project, as `${scoter:state-dir}/workspaces/${scoter:environment-id}` (FILE-9).~~  Done in step 19, as `${scoter:project-id}`.
-
-~~That needs the generator to work out the id, as a tool-set `${scoter:environment-id}`, with exactly the same result as step 5's Python code (or the Python code to read it from the SUC).~~  Done in step 19: the generator works out `${scoter:project-id}`, and the store reads it from the SUC.
-
-What's left is the container names.  They're still `host-prefix`, the container's user and sshd port, and a suffix the running environments file reserves (`scoter-ubuntu-20000-a`), so two runs of one project get different names, and the names say nothing of which project they're for.  Naming them by `project-id` (with the branch, or a suffix, for a second run of the same project) changes `scoter run`, `scoter kill`, the running environments file, and the ssh configuration's `Host` patterns, which are per user and port today.
-
-Ticket #12 asks for the same from the ssh side: `~/.ssh/config` has one `Host scoter-USER-PORT-*` block, shared by the runs, so a tool that offers the hosts it reads there (VS Code's Remote-SSH) can't offer the running one; the user types its name.  One block per running environment, named as its containers are, fixes that, and lets the tools remove the block (and its `known_hosts` key) when the environment goes.  Writing a block per run fills the file unless something removes them, so the user decides how much the tools may touch it: `ssh: values: config-cleanup: no | auto | ask`.
-
-### Draft: the names
-
-* **The host** (the dev container's name, the ssh `Host`, and the base of the other containers' and the image's names) is `${ssh:values:host-prefix}${scoter:project-id}`: `scoter-my-project-c593c7ec2d55`; the router and gateway add `-fr` and `-ng` as now.  A project id is lowercase letters, digits and `-`, at most 45 characters, so the names stay valid container names and DNS labels (63).
-* **One run per project.**  The workspace is the project's (`workspaces/${scoter:project-id}`), so two runs of a project would share it; a second `scoter run` of a running project stops, naming the running one (`scoter kill`, or `scoter cleanup` if its run is gone).  The user and port no longer name anything.
-* **The running environments file** keys environments by host; the reserved suffixes go.
-
-### Draft: the ssh block
-
-Each run writes its own block, replacing any block of that name the tools wrote before:
-
-```text
-Host scoter-my-project-c593c7ec2d55
-  # Surf Scoter: /home/me/src/my-project
-  User ubuntu
-  IdentityFile ~/.ssh/scoter-dev-container
-  IdentitiesOnly yes
-  StrictHostKeyChecking yes
-  ProxyCommand docker exec -i %h socat STDIO TCP:127.0.0.1:20000
-```
-
-The tools only touch blocks they can tell they wrote: `Host` starting with `host-prefix`, and the `# Surf Scoter:` marker line inside the block (a comment above a `Host` line belongs to the block before it).  A block of that name without the marker is the user's, and the run stops rather than replace it.  The port is the run's choice (from `dev-env: values: start-sshd-port`, avoiding the running environments'), as it's in the block, not in the name; reusing ports from the ssh configuration goes.
-
-### Draft: `config-cleanup`
-
-When an environment goes (`scoter run` ending, `scoter kill`, `scoter cleanup` stopping a stale one), its block and its `known_hosts` key (`ssh: runs: remove-known-host`):
-
-* `no`: are kept; the user removes them.
-* `auto`: are removed.
-* `ask` (the default): the tool asks at a terminal, and keeps them without one.
-
-`scoter cleanup` also lists the marked blocks whose environment isn't running (left by `no`, `ask` answered no, or a crash): with `auto` they're removed with the rest (`--force` included); with `ask` it asks about them on their own, even with `--force` or after a yes to the rest, and keeps them without a terminal; with `no` it only mentions how many there are.
-
 ### Design decisions
 
-* **One run per project**: a second `scoter run` of a running project is refused.
-* **`config-cleanup`** as drafted, `ask` by default; under `ask`, `scoter run` asks at its end.
-* The old shared `scoter-USER-PORT-*` blocks aren't looked for: nothing's released.
+* Booleans become enums for public APIs only: functions called from another module, the scripts' `run_*` functions, Rust `pub fn`s.  Private helpers keep their booleans; struct and dataclass fields aren't parameters.
+* Every function name is under 30 characters, tests included; test names don't start with an article.
+* The broker crate (`containers/dev-env/src`) follows the same rules.
 
 ### Completed
 
-* **The names** ([`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py)): `host_name` is `${ssh:host-prefix}${scoter:project-id}`, checked against `[a-z0-9][a-z0-9.-]{0,62}` (a container name and an ssh `Host`).  The running environments file ([`active_env.py`](../../scripts/surf_scoter_lib/active_env.py)) keys environments by `host`; `host_prefix`, `host_suffix`, the reserved suffixes and the host id lookups are gone, and `reserve_environ` refuses a host already listed, naming it and how to free it (`scoter kill`, or `scoter cleanup`).  The containers, image tag, compose files and state directory follow the host as before.
-* **The port** (`main_run._configure_sshd_port`): the first from `start-sshd-port` that no running environment has; the ssh configuration isn't read for ports any more.
-* **The block**: `write_host` writes the environment's own block (a `# Surf Scoter environment` line first, then `User`, `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`, `ProxyCommand`), under the running environments' lock, in place of a marked block of that name; an unmarked one is the user's, and the run stops.  It refuses a `user` that isn't a plain user name, and a port that isn't a number: DEV-1 is mitigated where it's written.  `SshConfig.remove_host` removes a block with the blank lines after it, keeping the comments after its last setting (they're about the next `Host`), so a block written again doesn't grow the file.
-* **`ssh: values: config-cleanup: no | auto | ask`** (default `ask`; a bare YAML `no` reads as false, and counts as `no`): `release` removes the block and the known host key (`ssh: runs: remove-known-host`) for `auto`, asks for `ask` (keeping them without a terminal), and keeps them for `no`.  `scoter run` releases at its end, and when a run that didn't start gives up its reservation; `scoter kill` after it forgets the environment (`release_ssh`, which `scoter cleanup` turns off).  `scoter cleanup` lists the marked blocks no running environment has (`leftover_hosts`): with `auto` they go with the rest, with `ask` they get their own question, asked even with `--force` (and not when there's no terminal), and with `no` it says how many.  A question is only asked when both the input and the output are a terminal (`argutil.can_ask`, as `scoter verify` checks): `input` writes its prompt to the output, so with the output going to a file (as integration test 03 sends `scoter kill`'s) the question went unseen, and the command waited.
-* **Docs**: [the system configuration file](../system-config-file.md) (`host-prefix`, `config-cleanup`), the README's SSH and VS Code steps (no more "Add new SSH Host"), [`through-wsl.md`](../through-wsl.md), [`cleaning-up.md`](../cleaning-up.md), and DEV-1 in [the dev container attack vectors](../security/dev-container-attack-vectors.md).
+* **Step references** are gone from the code, comments and docstrings (about 52, in Python and `host/`; none in the broker, shell or YAML); where one carried meaning, the text says the thing itself.
+* **Names**: every function is under 30 characters: in Python, `main_run._write_docker_compose_env_file` became `_write_compose_env_file` and 27 test methods were renamed; in `host/`, 110 tests; in the broker, 41 tests.  No Rust public function changed.  Test names no longer start with an article.
+* **Enums for public booleans** (Python; no Rust public function took one):
+  * `scoter.load_config(scope=ConfigScope.SETUP | SUGGESTED | ACCEPTED)`, with `config_scope(sub_cmd)`.
+  * `UserConfig.run_command(on_error=OnError.RAISE | RETURN, capture=Capture.NONE | STDOUT | STDERR | BOTH, echo=Echo.SHOW | QUIET)`; `search_path(kind=PathKind.FILE | DIR)`.
+  * `fileutil.restore(without_backup=WithoutBackup.KEEP | DELETE)`; `VerifiedStore.open(if_missing=IfMissing.REFUSE | CREATE)`; `revoke.select(pick=Pick.NAMED | ALL)`, which `main_revoke.run_revoke` takes too.
+  * `main_kill.run_kill(workspace=Workspace.KEEP | REMOVE, ssh=SshEntries.RELEASE | KEEP)`; `main_cleanup.run_cleanup(extras=Extras.WORKSPACES | IMAGES, confirm=Confirm.ASK | DRY_RUN | FORCE)`; `main_exempt.run_exempt(action=Action.START | END)`; `main_list_accepted.run_list(listing=Listing.FULL | IDS)`; `main_user_setup`'s `Interaction.ASK | DEFAULTS`; `main_verify.run_verify(terminal=Terminal..., setup_notes=SetupNotes..., via=AcceptVia.REVIEW | EXEMPTION)` and `Platform.POSIX | WINDOWS` for the editor command.  The command-line flags are unchanged: each script converts them.
+* **Helpers**: `fileutil.is_windows()` everywhere in the library and tests (`scoter.py`, which can't import the library, has its own `_is_windows`); new `fileutil.O_NONBLOCK` and `MODE_NOT_PRIVATE`, and `MODE_USER_RW`/`MODE_USER_RWX` in place of `0o600`/`0o700`; `argutil.can_ask()` and `records.now_utc()` reused.  `jdata` wasn't brought in: the hand-written lookups skip a value of the wrong type, which `jdata`'s `find_*` would raise on.
+* **Constants**: about 30 in Python (sizes as `*_BYTES`, timeouts as `*_SECONDS`, the id and fingerprint lengths, exit codes, ports, modes), 14 in `host/` (among them `system.rs`'s `ID_NAME_MAX_CHARS`, `ID_HASH_BYTES` and `PATH_PART_MAX_CHARS`, which must match the Python store's; `read.rs`'s `MAX_CONFIG_FILE_BYTES` and `MAX_UNIVERSAL_FILE_BYTES`), and 6 in the broker (`STDIN_CHUNK_BYTES`, `CLIENT_CHUNK_BYTES`, `SOCKET_UMASK`, ...); the wire protocol's are unchanged.
+* **Python rules**: every `noqa` and `nosec` says why (the two `SIM113` counters became `enumerate`); 15 data-driven test loops use `subTest`; missing type hints added (and `main_fetch.run_fetch`'s `branch` corrected to `str | None`); bare `except:` became `except BaseException:`.
+* **Non-ASCII**: test data in both Rust crates uses `\u{...}` escapes (an egress test's comment named the wrong Cyrillic letter, and now says U+043E); [`project-configuration-file.md`](../project-configuration-file.md)'s example is an escape too.
+* **Shell and config**: `${...}` for variables; quoted `$( dirname "$0" )`; a new `it_tty` in `integration-tests/common/lib.sh` gives the review prompt a terminal with util-linux's or BSD's `script`; `sed -i` out of `04-exempt`; the `Makefile` runs `mk-install.sh` with `sh`; comment fixes throughout (one said `ls` for `ln -s`, another named a script that doesn't exist); `defaults/setup.yaml` parses to the same values.  `03-run-and-kill` still needs `setsid`, which macOS lacks; it says so.
+* **Docs**: the broker's `broker_host` docs said exit code 1 for a socket I/O error, where the broker sends 122; stale `run-container.sh` references in [`future-ideas.md`](future-ideas.md) and [`files-attack-vectors.md`](../security/files-attack-vectors.md); the renamed names in the security docs and this file.
 
-**Tests:** [`test_ssh_hosts.py`](../../scripts/tests/s_lib/test_ssh_hosts.py): the host name (and refused prefixes, no project id), `config-cleanup` (default, a YAML false, a bad value), writing and rewriting a block (the file doesn't grow; mode 0600), refusing the user's own block and a hostile `user` or port, the leftovers (only the tools' blocks with the prefix), removing (with the known host key), and `release` in each mode.  [`test_ssh_config.py`](../../scripts/tests/s_lib/test_ssh_config.py): removing a block, keeping the next block's comment.  [`test_active_env.py`](../../scripts/tests/s_lib/test_active_env.py): a second reservation of a host refused.  [`test_main_cleanup.py`](../../scripts/tests/test_main_cleanup.py): the ssh leftovers with `ask` (asked on their own, with `--force`; no, then yes), `auto` and `no`.  All five integration tests pass; `03` now checks the environment's name, its block, a second run refused, and its entry kept without a terminal and listed by `scoter cleanup`.
+**Tests:** both Rust crates' suites (`host/`: 207 + 7 + 111; the broker: 48 + 29 + 24), `cargo fmt --check` and clippy with no warnings; the 257 Python tests, ruff and bandit clean; integration tests 01, 02, 04 and 05.  `03` got as far as building the dev-env image, where this network's TLS interception refused crates.io again (the broker's sources changed, so the build couldn't use its cached layer); it needs a run on a network that reaches crates.io.
 
-## ~~Additional declarative prohibitions to include project files and egress hosts~~
+## 25. Clean up this file.
 
-Done (after step 19): `project-files` and `egress-hosts` are check kinds of their own, in [`simple_checks.rs`](../../host/src/config/simple_checks.rs), which the generator checks, merges key by key across the setup files (`null` removes one), and writes to the universal file's resolved sections as written; it also refuses an override that names a check that isn't set, or one that's an override itself.  The review's checks apply them (`checks.simple_findings`) as `host-commands` work: the matching checks without `overrides` count, each matching override takes the place of the checks it names, and every check that counts is a finding with its action's severity.  The defaults' `verification` section has `project-files: secret-files` (the old `secret-file-patterns`) and `egress-hosts` checks for each of the old `egress-data-out-hosts` groups (`code-hosts`, `paste-sites`, `object-storage`, `user-content`, `webhooks`, `file-sharing`), all `warn`, as before.
-
-So egress `$override`s (step 13) now mean something: an egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check, and uncommenting it with that override accepts it (`apply_overrides`, as for commands); the override is recorded in `accepted.json`.
-
-~~Still to do: `scoter user-setup` reports the host command checks a setup removes, replaces or overrides, but not these.~~  Done in step 20: `verification:project-files:*` and `verification:egress-hosts:*` are guarded, and their overrides are listed.
-
-**Tests:** in `simple_checks.rs`: parsing, and each problem (an empty `reason`, a bad pattern or host, the other kind's field, a bad `overrides` name, `${...}`).  In `universal.rs`: the checks in the universal file, replaced and removed by a higher priority file, an override that names nothing, or an override; a reference to one.  In `test_checks.py`: egress hosts exactly and by wildcard, the actions' severities, every check that counts shown, an override for one host, and an override that does nothing; project files by pattern and action; an egress refusal set aside by the review's `$override`.  In `test_review.py`: a refused egress rule commented out with its `$override`.  In `test_main_verify.py`, with the generator: an egress rule the user's setup refuses, accepted with its `$override`, recorded in `accepted.json`.
-
-## The gateway's other protocols and ports
-
-From steps 7 and 9: the Squid gateway enforces only `tls` on 443.  `http` (with `methods`) needs port 80 in the firewall's rules and Squid's HTTP handling; other ports need firewall changes (N4); `protocol: https`, and `methods` on it, need a gateway that looks inside TLS.  Each is refused until then.  A test that runs the gateway containers belongs with this work too (step 18's batch C has the first one).
-
-## Windows
-
-Left from steps 4, 5, 11 and 15, for a pass with a Windows machine to test on:
-
-* Matching `name-patterns` against the real file's name drops its extension, whatever it is, rather than only a `PATHEXT` one.
-* The verified store's owner and mode checks, and the path checks' owner and mode checks, are skipped; the store design's "under the user's profile" check isn't written.
-* Case-insensitive file systems: the environment id doesn't fold the path's case.
-* The review prompt's `read_once` has no `O_NOFOLLOW`, and skips the owner check.
-
-## Accepting a review file without the prompt (`--accept-file`)
-
-For automation, out of scope for now (moved from step 18; step 12's design names it).  The draft:
-
-`scoter verify --accept-file FILE`, for automation: no terminal and no prompt.  The file, a review the user wrote earlier (`scoter verify --output`, then edited), is read once as the prompt reads an edit (no link, a regular file of the user's), parsed and checked the same way (the generator's `--review`, then `checks.check_review`), and stored if it can be used; otherwise the command fails, listing why.  It never accepts a project's suggestion by itself: only a file the user gives.
-
-The review has to be for the files as they are now.  The prompt has that by construction (it snapshots the files, then writes the review from them); a file written earlier doesn't.  So the format gains a `snapshot` key: the snapshot id the review was made from, written by every review, read-only like `project-dir`.  `--accept-file` refuses a file whose `snapshot` isn't the current one ("the project's files changed since this review was written"), or that has none.  The prompt checks it too, for an edit that changed it.  An earlier acceptance's `review.yaml` (`--previous-review`) may lack it.
-
-## A `drop-env` for Docker
-
-Step 18 (batch B) added `value-lists: drop-env` and gave `git-vcs` one (`GIT_*`), but not `docker`.  A project's `.envrc` could set `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` (whose credential helpers run programs) for the tools' Docker commands.  Dropping them by default would break Podman and remote-daemon setups, which set `DOCKER_HOST` themselves; [the system configuration file](../system-config-file.md#value-lists) suggests one for setups that don't.  Consider a default that keeps working for them: say, the `docker` section's `runs` passing the daemon explicitly (`--host ${docker:host}`, from a `values: host` the user sets once), so `DOCKER_HOST` can be dropped.
-
-## Matching `env` patterns against patterns
-
-From step 4: `env` entries match a command's `allow` entries as exact text.  Matching patterns against patterns (does `allow: [GIT_*]` pass `GIT_SSH_COMMAND`?) is future work.
-
-## ~~Remove the `--bin-dir` and `--sub-cmd-dir` arguments~~
-
-~~With the updates to self-hosting, these two arguments are now not needed.  The corresponding resolved values in the SUC are still necessary, though.~~
-
-Done: [`scoter.py`](../../scoter.py) has neither option.  The generator runs from the distribution's `bin` (`--distribution-dir`, or the directory `scoter` is in), and the sub-commands are found, and listed by `help`, in the universal file's `distribution-bin-dir`, which the generator sets to the distribution directory's `bin`.  `scoter.py` no longer overwrites that value after the generator's runs; the generator's `distribution-bin-dir` setting, and its carrying a universal file's value over for the same distribution directory, are unchanged.  `find_bin_dir`, and the `bin_dir` and `script_dir` parameters of `generate_config`, `reprocess_config`, `list_sub_commands` and `run_sub_command`, are gone.  **Tests:** the Python and Rust suites, and integration tests 01 and 05, which run the sandbox's `scoter` end to end.
-
-## ~~Compare the "egress-refused-wildcards" setting with Browser public suffix list~~
-
-~~The handling of the "egress-refused-wildcards" setting aligns closely with the [public suffix list](https://publicsuffix.org/learn/).  This means the list should be loadable from a file (not url) so that the long list can match the pulled file.~~
-
-Done (with the step 19 `verification` changes): `verification: path-lists: public-suffix-lists` names Public Suffix List files (none by default; the defaults say how to download the published one), which the generator reads ([`public_suffix.rs`](../../host/src/config/public_suffix.rs): plain, `*.` wildcard and `!` exception rules, the private section too, comments skipped; entries outside ASCII skipped, as egress hosts must be in `xn--` form and nothing converts to it).  An egress `*.DOMAIN` is refused when `DOMAIN` is a public suffix by those rules, or in `value-lists: egress-refused-wildcards`, which stays as the setup's own additions; the message says which.  `config::RefusedWildcards` applies it to the project file's rules, and now also to a review's (a typed wildcard) and to accepted settings at each run (a refreshed list refuses one accepted before), which were unchecked.  A named file that can't be read is an error.  The old message's `scoter: value-lists` (from before step 19) is corrected.
-
-Still possible: shipping the list with the distribution (it's MPL 2.0, and changes often), or a `scoter` command to refresh it; and converting the list's internationalized entries to `xn--` names.
-
-**Tests:** in `public_suffix.rs`: the rule kinds, case, a wildcard's exception, a name two labels under a wildcard, the internationalized entry.  In `universal.rs`: the setup's own list; a suffix list file (a suffix refused, a wildcard rule's name refused, its exception allowed); a missing file; a review's typed wildcard.  By hand, with the published list: `*.fly.dev`, `*.onrender.com`, `*.myshopify.com`, `*.gov.au` and `*.foo.ck` refused by it; `*.www.ck`, `*.example.org` and `*.pkg.dev` allowed.
-
-## Allow `scoter user-setup` to work with automation
-
-The current defaults with `--non-interactive` use the safest approach.  Automation tooling should have an option to perform the "needs to exist but requires modifications" actions to run.  Similar to the `--force` versus `--dry-run` with the cleanup sub-command.
-
-## Allow `scoter user-setup` to download and update the public-suffix-lists
-
-Because the tool shouldn't ship with the public suffix list, instead it should give the end-user the opportunity to download it and updat ethe public-suffix-lists to point to that local download.
+Remove these steps from this file, and move the design and reasoning made in the steps into a separate file to indicate what exists.

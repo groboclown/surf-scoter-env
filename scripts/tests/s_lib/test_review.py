@@ -3,15 +3,14 @@
 import datetime
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from ...surf_scoter_lib import checks, jdata, review
+from ...surf_scoter_lib import checks, fileutil, jdata, review
 from ...surf_scoter_lib.user_config import UserConfig
 
-POSIX = sys.platform != "win32"
+POSIX = not fileutil.is_windows()
 NOW = datetime.datetime(2026, 10, 20, 12, 0, tzinfo=datetime.UTC)
 
 
@@ -187,7 +186,7 @@ class BuildTest(unittest.TestCase):
         )
         self.assertIn("  images: {}", lines)
 
-    def test_values_cant_pose_as_comments(self) -> None:
+    def test_values_not_comments(self) -> None:
         """A newline in a value stays inside its quotes, on one line."""
         text = self.build()
         self.assertIn('    NOTE: "x\\n# reviewed: safe"', text.splitlines())
@@ -235,7 +234,7 @@ class BranchTest(unittest.TestCase):
 
 
 class CompareTest(unittest.TestCase):
-    """Test comparing items across the three versions (step 17)."""
+    """Test comparing items across the three versions."""
 
     def kinds(self, section: str, old: list, mine: list, new: list) -> list[tuple[str, int | None]]:
         return [(c.kind, c.index) for c in review.compare(section, old, mine, new)]
@@ -287,7 +286,7 @@ class SetupChangesTest(unittest.TestCase):
 
 
 class MergeEnvTest(unittest.TestCase):
-    """Test merging the top-level `env` by variable (step 17)."""
+    """Test merging the top-level `env` by variable."""
 
     def test_merge(self) -> None:
         old = {"allow": ["LANG", "TZ"], "set": {"A": "1", "B": "2", "C": "/h/.ssh/config", "D": "4"}}

@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""Find, and remove, what Surf Scoter leaves behind (`scoter cleanup`, step 23).
+"""Find, and remove, what Surf Scoter leaves behind (`scoter cleanup`).
 
 `scoter kill` and `scoter revoke` work on what the user names.  This finds
 what nothing else removes:
@@ -7,8 +7,8 @@ what nothing else removes:
 * stale run records: environments whose `scoter run` process is gone (the
   script stops them as `scoter kill` does);
 * orphaned state: a run's `environments/HOST` directory with no record, and
-  the `exempt-*` directories a run makes for a moment (step 21) that one
-  stopped part way left;
+  the `exempt-*` directories a run under an exemption makes for a moment
+  that one stopped part way left;
 * gone projects: the verified store's projects whose directory is gone;
 * the store's leftovers: directories no record names, blobs nothing uses,
   temporary files;
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from . import fileutil
 from .active_env import ActiveEnvironmentSet, EnvironmentDesc
-from .user_config import UserConfig
+from .user_config import Echo, OnError, UserConfig
 from .verified import records, revoke, store
 
 # Where the run keeps each environment's files (`main_run.SUC_COPY_DIR`),
@@ -341,7 +341,7 @@ def images_in_use(config: UserConfig, envs: Iterable[EnvironmentDesc]) -> set[st
 def find_images(config: UserConfig, keep: Iterable[EnvironmentDesc]) -> list[str]:
     """The run's images (`REPOSITORY:TAG`) the runs `keep` don't use, from the container tool."""
     res = config.run_command(
-        "docker", "list-images", check=False, quiet=True,
+        "docker", "list-images", on_error=OnError.RETURN, echo=Echo.QUIET,
         template={"pattern": image_prefix(config) + "*"},
     )
     if res.returncode != 0:
@@ -363,11 +363,12 @@ def remove_images(config: UserConfig, names: Iterable[str]) -> list[str]:
         if name in used:
             continue
         res = config.run_command(
-            "docker", "remove-image", check=False, quiet=True, template={"name": name},
+            "docker", "remove-image", on_error=OnError.RETURN, echo=Echo.QUIET,
+            template={"name": name},
         )
         if res.returncode == 0:
             removed.append(name)
         else:
             print(f"Couldn't remove the image {name}.", file=sys.stderr)
-    config.run_command("docker", "prune-images", check=False, quiet=True)
+    config.run_command("docker", "prune-images", on_error=OnError.RETURN, echo=Echo.QUIET)
     return removed

@@ -48,7 +48,7 @@ it_expect "${IT_SANDBOX}/ask.log" "give --force"
 [ "$( scoter list-accepted -q | wc -l )" -eq 2 ] || it_fail "an acceptance went without --force"
 
 it_say "asked at a terminal, no removes nothing"
-printf 'n\n' | script -qec "'${IT_DIST}/scoter' cleanup" /dev/null > "${IT_SANDBOX}/no.log" 2>&1 || true
+printf 'n\n' | it_tty "'${IT_DIST}/scoter' cleanup" > "${IT_SANDBOX}/no.log" 2>&1 || true
 it_expect "${IT_SANDBOX}/no.log" "Remove these?"
 it_expect "${IT_SANDBOX}/no.log" "Nothing was removed."
 
