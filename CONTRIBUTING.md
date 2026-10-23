@@ -11,6 +11,13 @@ You'll need these things installed to get building:
 * `make` 
 * Podman or Docker.
 
+To generate the SBOM and scan those, you'll need [`cdxgen`](https://github.com/cdxgen/cdxgen#installing) and [`osv-scanner`](https://google.github.io/osv-scanner/installation/):
+
+* Don't have them but have NPM and Go installed?  Run `make dev-install` to put them on your computer.  `cdxgen` will go into a local directory, `osv-scanner` will go into your `$HOME/go/bin` directory.
+* Have them installed?  Run:
+    * `make CDXGEN=$( where cdxgen ) OSVSCANNER=$( where osv-scanner ) sbom scan`
+
+
 ## Working on Surf Scoter With Surf Scoter
 
 So you've cloned down the `surf-scoter-env` project, and want to kick off a local test so you can contribute back to this project.  Thanks!
@@ -73,6 +80,7 @@ The copy finds itself as the distribution directory, so it doesn't need `--distr
 
 Don't point a `scoter: paths: distribution-dir` setting at the checkout either: the tools refuse a `distribution-dir` from the setup files that's inside the project's repository.
 
+
 ## Releasing
 
 New releases must pass these gates:
@@ -86,6 +94,7 @@ New releases must pass these gates:
 * Bump version numbers:
     * [host + generator](host/Cargo.toml)
     * [client + bridge](containers/dev-env/Cargo.toml)
+    * [`version.txt`](version.txt)
     * TODO scoter.py and the install bundler.
 * Changelog updated.
 * **All builds pass.** All builds pass.  Includes lint and tests.

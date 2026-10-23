@@ -1,6 +1,6 @@
 # Contributors' Handbook
 
-*This acts to fill in the details summarized in the [main contributor guide](../../CONTRIBUTORS.md).*
+*This acts to fill in the details summarized in the [main contributor guide](../../CONTRIBUTING.md).*
 
 * [Code Style Guide](code-style.md)
 * [V0 Architecture](architecture-v0.md)

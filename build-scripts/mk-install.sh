@@ -41,11 +41,6 @@ cp "${base}/host/${target_dir}/scoter-host${ext}" "${workdir}/bin/."
 cp "${base}/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
 cp "${base}/scripts/"*.py "${workdir}/bin/."
 cp -R "${base}/scripts/surf_scoter_lib" "${workdir}/bin/."
-rm -r \
-    "${workdir}/bin/__pycache__" \
-    "${workdir}/bin/"*/__pycache__ \
-    "${workdir}/bin/"*/*/__pycache__ \
-    2>/dev/null || true
 
 cp -R "${base}/containers" "${workdir}/."
 rm -r "${workdir}/containers/dev-env/target"
@@ -60,6 +55,21 @@ mkdir -p "${workdir}/docs"
 cp "${base}/docs"/* "${workdir}/docs/." || true
 
 cp "${base}/LICENSE" "${workdir}/."
+
+mkdir -p "${workdir}/sbom"
+cp \
+    "${base}/host/"*.cdx.json \
+    "${base}/containers/dev-env/"*.cdx.json \
+    "${workdir}/sbom/."
+
+# Remove potential build left-overs.
+rm -r \
+    "${workdir}/bin/__pycache__" \
+    "${workdir}/bin/"*/__pycache__ \
+    "${workdir}/bin/"*/*/__pycache__ \
+    "${workdir}/containers/dev-env/"*.cdx.json \
+    2>/dev/null || true
+
 
 if [ -z "${ext}" ] ; then
     cp "${base}/scoter.py" "${workdir}/scoter"
