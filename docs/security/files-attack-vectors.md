@@ -99,7 +99,7 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 * `.vscode/`, `.idea/` and other settings tools act on when they open a folder;
 * symlinks, which point at host files once checked out on the host;
 * `.gitmodules` entries pointing at attacker-controlled repositories.
-* when the project is Surf Scoter itself, its own scripts, `setup.yaml`, containers and host programs, which run on the host if the tools run from that checkout (see [Working on Surf Scoter With Surf Scoter](../../CONTRIBUTORS.md#working-on-surf-scoter-with-surf-scoter)).
+* when the project is Surf Scoter itself, its own scripts, `setup.yaml`, containers and host programs, which run on the host if the tools run from that checkout (see [Working on Surf Scoter With Surf Scoter](../../CONTRIBUTING.md#working-on-surf-scoter-with-surf-scoter)).
 
 **Red team:** get a change from each category through a realistic review.
 

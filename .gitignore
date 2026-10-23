@@ -92,3 +92,7 @@ coverage.xml
 *.mo
 *.pot
 
+
+# SBOMs
+
+*.cdx.json

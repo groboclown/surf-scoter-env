@@ -7,11 +7,22 @@ DOCKER ?= docker
 CARGO_BIN ?= ~/.cargo/bin
 PYTHON ?= python3
 
+# Used if you don't have osvscanner installed
+GO ?= go
+
 LOCAL_CONTAINER_TAG_PREFIX ?= local-surf-scoter-env/
 DEV_ENV_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)dev-env:build
 FIREWALL_ROUTER_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)firewall-router:build
 NETWORK_GATEWAY_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway:build
 
+PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
+# See https://github.com/cdxgen/cdxgen#installing
+CDXGEN := $(PROJECT_DIR)/target/sbom-gen/node_modules/.bin/cdxgen
+# See https://google.github.io/osv-scanner/installation/
+OSVSCANNER := $$HOME/go/bin/osv-scanner
+
+VERSION := $(file < version.txt)
 
 # ---------------------------------------------------------------------
 # Top-level tasks.
@@ -50,11 +61,18 @@ lint:
 
 
 ## dev-install               Install development dependencies (non-OS distribution files)
+##                           You may not want everything here.  See the CONTRIBUTING.md file for
+##                           details.
 .PHONY: dev-install
 dev-install:
 
+
+## installer                 Create the zip files for distribution.
+.PHONY: installer
+installer:
+
 # ---------------------------------------------------------------------
-# Running Surf Scoter on itself.  See CONTRIBUTORS.md.
+# Running Surf Scoter on itself.  See CONTRIBUTING.md.
 
 SELF_HOST_REF ?= main
 SELF_HOST_DIR ?= $(HOME)/.local/share/surf-scoter-self-host
@@ -139,7 +157,9 @@ host-build-release:
 build: host-build-release-all
 host-build-release-all:
 
-
+# Cross-build targets.
+# TODO look at moving these to a method that allows for multiple targets
+# without duplicating them out.
 .PHONY: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-all: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-x86_64-unknown-linux-gnu: dependencies-cross
@@ -171,9 +191,14 @@ dependencies-cross:
 # ---------------------------------------------------------------------
 # Container tasks
 
+## image                     Build all included images.  Uses the internal tag name.
+.PHONY: image
+image:
+
 ## dev-env-image             Build the dev-env image.
 .PHONY: dev-env-image
 build: dev-env-image
+image: dev-env-image
 dev-env-image:
 	cd containers/dev-env && $(DOCKER) build -t $(DEV_ENV_TAG) .
 
@@ -187,6 +212,7 @@ dev-env-clean:
 ## firewall-router-image     Build the firewall-router image.
 .PHONY: firewall-router-image
 build: firewall-router-image
+image: firewall-router-image
 firewall-router-image:
 	cd containers/firewall-router && $(DOCKER) build -t $(FIREWALL_ROUTER_TAG) .
 
@@ -200,6 +226,7 @@ firewall-router-clean:
 ## network-gateway-image     Build the network-gateway image.
 .PHONY: network-gateway-image
 build: network-gateway-image
+image: network-gateway-image
 network-gateway-image:
 	cd containers/network-gateway && $(DOCKER) build -t $(NETWORK_GATEWAY_TAG) .
 
@@ -243,20 +270,171 @@ python-bandit:
 # ---------------------------------------------------------------------
 # Installation tasks
 
-## installer                 Create the installation zip file.
-.PHONY: installer
-installer:
-
 # TODO come up with an approach to handle all platforms,
 # rather than a onsey-twosy.
 
 .PHONY: mk-installer-x86_64-unknown-linux-gnu
 installer: mk-installer-x86_64-unknown-linux-gnu
 mk-installer-x86_64-unknown-linux-gnu: host-build-release-x86_64-unknown-linux-gnu
-	sh -x build-scripts/mk-install.sh target/surf-scoter-x86_64-unknown-linux-gnu-1.0.0 x86_64-unknown-linux-gnu
+	sh -x build-scripts/mk-install.sh target/surf-scoter-x86_64-unknown-linux-gnu-$(VERSION) x86_64-unknown-linux-gnu
 
 ## installer-clean           Clean the installation build generated files.
 .PHONY: installer-clean
 clean: installer-clean
 installer-clean:
 	-rm target/installer
+
+
+# ---------------------------------------------------------------------
+# Bill of Materials and related security tasks
+
+## sbom                      Generate the Software Bill of Materials report
+##                           This requires an installation of 'cdxgen' to use.
+# Currently, the Python libraries have no dependencies other than Python std lib.
+.PHONY: sbom
+sbom:
+
+
+sbom: target/sboms/surf-scoter-host.cdx.json
+target/sboms/surf-scoter-host.cdx.json: target/sboms
+	$(CDXGEN) -t rust --no-recurse --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--output $@ \
+		host
+
+sbom: target/sboms/surf-scoter-bridge.cdx.json
+target/sboms/surf-scoter-bridge.cdx.json: target/sboms
+	$(CDXGEN) -t rust --no-recurse --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--output $@ \
+		containers/dev-env
+
+sbom: target/sboms/surf-scoter-python-dev.cdx.json
+# cdxgen expects a directory for python, not a file.
+target/sboms/surf-scoter-python-dev.cdx.json: target/sboms
+	$(CDXGEN) -t python --no-recurse --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter Python dev tools" \
+		--output $@ \
+		.
+
+sbom: target/sboms/surf-scoter-dev-env.cdx.json
+target/sboms/surf-scoter-dev-env.cdx.json: target/images/dev-env.tar
+	$(CDXGEN) -t docker --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter dev-env" \
+		--output $@ \
+		$<
+
+target/images/dev-env.tar: dev-env-image target/images
+	test -f $@ && rm $@ || true
+	$(DOCKER) save -o $@ $(DEV_ENV_TAG)
+
+sbom: target/sboms/surf-scoter-firewall-router.cdx.json
+target/sboms/surf-scoter-firewall-router.cdx.json: target/images/firewall-router.tar
+	$(CDXGEN) -t docker --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter firewall-router" \
+		--output $@ \
+		$<
+
+target/images/firewall-router.tar: network-gateway-image target/images
+	test -f $@ && rm $@ || true
+	$(DOCKER) save -o $@ $(FIREWALL_ROUTER_TAG)
+
+sbom: target/sboms/surf-scoter-network-gateway.cdx.json
+target/sboms/surf-scoter-network-gateway.cdx.json: target/images/network-gateway.tar
+	$(CDXGEN) -t docker --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter network-gateway" \
+		--output $@ \
+		$<
+
+target/images/network-gateway.tar: network-gateway-image target/images
+	test -f $@ && rm $@ || true
+	$(DOCKER) save -o $@ $(NETWORK_GATEWAY_TAG)
+
+target/sboms:
+	mkdir -p target/sboms
+target/images:
+	mkdir -p target/images
+target/sbom-gen/package.json:
+	mkdir -p target/sbom-gen
+	echo '{"name": "1","version": "1"}' > target/sbom-gen/package.json
+
+
+.PHONY: install-cdxgen
+dev-install: install-cdxgen
+install-cdxgen: target/sbom-gen/package.json
+	cd target/sbom-gen && npm install --save-dev @cdxgen/cdxgen
+
+
+## scan                      Scan the SBOM files for issues.  Requires `osv-scanner`.
+# Scanning SBOMs with osv-scanner requires an exact filename.
+.PHONY: scan
+sbom: scan
+scan: target/sboms/surf-scoter-host.scan.json
+target/sboms/surf-scoter-host.scan.json: target/sboms/surf-scoter-host.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-bridge.scan.json
+target/sboms/surf-scoter-bridge.scan.json: target/sboms/surf-scoter-bridge.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+# This doesn't work as expected.
+# osv-scanner starts walking /, and fails
+#scan: target/sboms/surf-scoter-python-dev.scan.json
+target/sboms/surf-scoter-python-dev.scan.json: target/sboms/surf-scoter-python-dev.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-dev-env.scan.json
+target/sboms/surf-scoter-dev-env.scan.json: target/sboms/surf-scoter-dev-env.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-firewall-router.scan.json
+target/sboms/surf-scoter-firewall-router.scan.json: target/sboms/surf-scoter-firewall-router.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-network-gateway.scan.json
+target/sboms/surf-scoter-network-gateway.scan.json: target/sboms/surf-scoter-network-gateway.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+
+.PHONY: install-osvscanner
+dev-install: install-osvscanner
+install-osvscanner:
+	go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
