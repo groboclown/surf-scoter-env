@@ -26,6 +26,9 @@
 //!   dev-container-path: ./dev-env
 //!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers-search`.
 //!   # dev-container: dev-env
+//!   # optional; where under the workspace the project is cloned, as a
+//!   # relative path (default: the workspace itself)
+//!   workspace-subdir: src/my-project
 //!
 //! # The environment of the host processes, for every command (optional).
 //! env:
@@ -117,7 +120,7 @@ use yaml_serde::Value;
 
 use super::egress::{self, EgressRule};
 use super::environment::{EnvPlan, EnvRules};
-use super::host_commands::command_name_problem;
+use super::host_commands::{command_name_problem, windows_name_problem};
 use super::pattern::WorkspacePattern;
 use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
@@ -128,6 +131,10 @@ pub struct ProjectConfig {
     /// The file, as an absolute path.
     pub path: PathBuf,
     pub container: ContainerRef,
+    /// `container: workspace-subdir`: where under the workspace the project
+    /// is cloned, as written: relative, `/`-separated, each part a plain
+    /// name.  `None` is the workspace itself.
+    pub workspace_subdir: Option<String>,
     /// How the project's files are kept, for the `scoter` script: any
     /// non-empty text.
     pub vcs: Option<String>,
@@ -170,6 +177,8 @@ struct ContainerSection {
     dev_container_path: Option<String>,
     #[serde(default)]
     dev_container: Option<String>,
+    #[serde(default)]
+    workspace_subdir: Option<String>,
 }
 
 pub type Commands = Vec<CommandRule>;
@@ -399,6 +408,7 @@ fn parse_checked(
     };
 
     let mut container = None;
+    let mut workspace_subdir = None;
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
     let mut env = EnvRules::default();
@@ -409,7 +419,7 @@ fn parse_checked(
         match key.as_str() {
             Some("container") => {
                 has_container = true;
-                container = parse_container(value, &mut problems);
+                (container, workspace_subdir) = parse_container(value, &mut problems);
             }
             Some("commands") => {
                 (commands, raw_commands) = parse_commands(value, "commands", &mut problems);
@@ -435,6 +445,7 @@ fn parse_checked(
         Some(container) if problems.is_empty() => Ok(ProjectConfig {
             path: path.to_path_buf(),
             container: container.clone(),
+            workspace_subdir,
             vcs,
             egress: egress_rules,
             env,
@@ -540,7 +551,12 @@ pub fn wildcard_errors<'a>(
         .collect()
 }
 
-fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option<ContainerRef> {
+/// The dev container, and the `workspace-subdir`; each `None` when it has a
+/// problem (or, for the subdir, isn't given).
+fn parse_container(
+    value: Value,
+    problems: &mut Vec<(String, String)>,
+) -> (Option<ContainerRef>, Option<String>) {
     let mut problem =
         |key: &str, message: String| problems.push((child_key("container", key), message));
     if value.is_null() {
@@ -548,35 +564,86 @@ fn parse_container(value: Value, problems: &mut Vec<(String, String)>) -> Option
             "",
             "needs `dev-container-path` or `dev-container`".to_string(),
         );
-        return None;
+        return (None, None);
     }
     let section: ContainerSection = match yaml_serde::from_value(value) {
         Ok(section) => section,
         Err(e) => {
             problem("", e.to_string());
-            return None;
+            return (None, None);
         }
     };
-    match (section.dev_container_path, section.dev_container) {
+    let workspace_subdir = match section.workspace_subdir {
+        Some(subdir) => match workspace_subdir_problem(&subdir) {
+            Some(message) => {
+                problem("workspace-subdir", message);
+                None
+            }
+            None => Some(subdir),
+        },
+        None => None,
+    };
+    let container = match (section.dev_container_path, section.dev_container) {
         (Some(path), None) if path.is_empty() => {
-            problem("dev-container-path", "must not be empty".to_string())
+            problem("dev-container-path", "must not be empty".to_string());
+            None
         }
-        (Some(path), None) => return Some(ContainerRef::Path(path)),
-        (None, Some(name)) if !valid_name(&name) => problem(
-            "dev-container",
-            format!("'{name}' must be a directory name, without '/' or '\\'"),
-        ),
-        (None, Some(name)) => return Some(ContainerRef::Name(name)),
-        (Some(_), Some(_)) => problem(
-            "",
-            "set only one of `dev-container-path` and `dev-container`".to_string(),
-        ),
-        (None, None) => problem(
-            "",
-            "needs `dev-container-path` or `dev-container`".to_string(),
-        ),
+        (Some(path), None) => Some(ContainerRef::Path(path)),
+        (None, Some(name)) if !valid_name(&name) => {
+            problem(
+                "dev-container",
+                format!("'{name}' must be a directory name, without '/' or '\\'"),
+            );
+            None
+        }
+        (None, Some(name)) => Some(ContainerRef::Name(name)),
+        (Some(_), Some(_)) => {
+            problem(
+                "",
+                "set only one of `dev-container-path` and `dev-container`".to_string(),
+            );
+            None
+        }
+        (None, None) => {
+            problem(
+                "",
+                "needs `dev-container-path` or `dev-container`".to_string(),
+            );
+            None
+        }
+    };
+    (container, workspace_subdir)
+}
+
+/// Why `subdir` can't be a `workspace-subdir`, if it can't.  It's joined to
+/// the workspace on every host, so it's relative, `/`-separated, and each
+/// part is a plain name: not empty, `.` or `..`; ASCII without spaces or
+/// control characters; no `\` or leading `-`; and nothing Windows reads as
+/// more than a file name.
+fn workspace_subdir_problem(subdir: &str) -> Option<String> {
+    if subdir.is_empty() {
+        return Some("must not be empty; leave it out for the workspace itself".to_string());
     }
-    None
+    if subdir.starts_with('/') {
+        return Some(format!("'{subdir}' must be relative to the workspace"));
+    }
+    subdir.split('/').find_map(|part| {
+        let problem = if part.is_empty() {
+            "has an empty part; separate names with one `/`".to_string()
+        } else if part == "." || part == ".." {
+            format!("can't have a `{part}` part")
+        } else if !part.chars().all(|c| c.is_ascii_graphic()) {
+            "must be ASCII, without spaces or control characters".to_string()
+        } else if part.contains('\\') {
+            "must separate names with `/`, not `\\`".to_string()
+        } else if part.starts_with('-') {
+            format!("can't have a part starting with `-` ('{part}')")
+        } else {
+            // It names the part itself.
+            return windows_name_problem(part).map(|problem| format!("'{subdir}': {problem}"));
+        };
+        Some(format!("'{subdir}' {problem}"))
+    })
 }
 
 pub(crate) fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
@@ -777,6 +844,7 @@ mod tests {
             ProjectConfig {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
+                workspace_subdir: None,
                 vcs: None,
                 egress: Vec::new(),
                 env: EnvRules::default(),
@@ -828,6 +896,46 @@ mod tests {
         // The old form, and unknown keys.
         assert!(error("container:\n  command: [docker]\n").contains("command"));
         assert!(error("container: [a]\n").starts_with("container: "));
+    }
+
+    #[test]
+    fn parse_workspace_subdir() {
+        let with = |subdir: &str| {
+            format!("container:\n  dev-container: dev-env\n  workspace-subdir: {subdir}\n")
+        };
+        for subdir in ["my-project", "src/my-project", "a.b/c_d"] {
+            let config = parse_text(&with(subdir)).unwrap();
+            assert_eq!(config.workspace_subdir.as_deref(), Some(subdir));
+            // Kept as written, for the universal configuration file.
+            assert_eq!(config.raw["container"]["workspace-subdir"], subdir);
+        }
+        for (subdir, problem) in [
+            ("''", "must not be empty"),
+            ("/abs", "must be relative to the workspace"),
+            ("a/../b", "can't have a `..` part"),
+            ("'..'", "can't have a `..` part"),
+            ("./a", "can't have a `.` part"),
+            ("a//b", "has an empty part"),
+            ("a/", "has an empty part"),
+            ("'a\\b'", "not `\\`"),
+            ("'a b'", "must be ASCII"),
+            ("caf\u{e9}", "must be ASCII"),
+            ("-x", "starting with `-`"),
+            ("'C:x'", "can't have a `:`"),
+            ("a/nul", "'a/nul': 'nul' is a Windows device name"),
+        ] {
+            let message = error(&with(subdir));
+            assert!(
+                message.starts_with("container.workspace-subdir: ") && message.contains(problem),
+                "{subdir}: {message}"
+            );
+        }
+        // Not text.
+        assert!(error(&with("[a]")).starts_with("container: "));
+        // The dev container is still worked out, so its problems are reported too.
+        let (result, container) = parse_checked(&with("/abs"), Path::new(PROJECT));
+        assert!(result.is_err());
+        assert_eq!(container, Some(ContainerRef::Name("dev-env".to_string())));
     }
 
     #[test]

@@ -1,0 +1,7 @@
+# All sub-commands that do not need the user to accept the project.
+# This uses the sub-command argument format of the name, not the script name.
+# Be sure to leave a trailing newline at the end of this file.
+verify
+revoke
+kill
+exempt

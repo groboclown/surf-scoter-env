@@ -341,7 +341,11 @@ class UserConfig:
         """The dev container's `dev-env.yaml`, merged with its parents; None without a project."""
         return self.__find(jdata.find_dict, "dev-container")
 
-    def use_accepted_files(self, project_setup: jdata.DictJsonData, dev_container: jdata.DictJsonData | None) -> None:
+    def use_accepted_files(
+        self,
+        project_setup: jdata.DictJsonData,
+        dev_container: jdata.DictJsonData | None,
+    ) -> None:
         """Replace `current-project-setup`, and `dev-container` when given, with the accepted copy's.
 
         Under an exemption (see `verified.staging.adopt_accepted`), the run
@@ -381,7 +385,8 @@ class UserConfig:
     def optional_path_list(self, section: str, key: str) -> list[Path]:
         """A section's `path-lists` list; empty when it isn't set, or has no value."""
         return [
-            Path(p) for p in self.__find(jdata.find_str_list, "resolved", section, "path-lists", key)
+            Path(p)
+            for p in self.__find(jdata.find_str_list, "resolved", section, "path-lists", key)
         ]
 
     def optional_value(self, section: str, key: str) -> str | None:

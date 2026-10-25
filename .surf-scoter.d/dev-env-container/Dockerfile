@@ -1,6 +1,7 @@
 FROM local-surf-scoter-env/dev-env:build
 
 # Install additional system packages.
+#   Installs 'cargo' to get all the necessary dependencies.
 USER root
 RUN set -x \
  && apt-get update \
@@ -14,10 +15,10 @@ RUN set -x \
         python3 \
         python3-venv \
         python3-pip \
-        gcc \
-        make \
         buildah \
- # Clean up installs.
+        cargo \
+        build-essential \
+# Clean up installs.
  && rm -rf /var/lib/apt/lists/*
 
 # End with user-mode installs and setup.
@@ -27,10 +28,8 @@ COPY --chown=ubuntu:ubuntu bashrc /tmp/bashrc
 
 RUN set -x \
  # Add in extra helper goodies.
- && cat "${HOME}/.bashrc" /tmp/bashrc > /tmp/b \
- && mv /tmp/b "${HOME}/.bashrc" \
- && rm /tmp/bashrc \
- && ln -s /workspace ~/w \
+ # .. There is no ~/.bashrc, so just copy straight there.
+ && mv /tmp/bashrc "${HOME}/.bashrc" \
  # Install user-land Rust, for Rust development.
  && curl https://sh.rustup.rs -sSf > /tmp/rust-installer \
  && chmod +x /tmp/rust-installer \

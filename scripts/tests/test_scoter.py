@@ -356,16 +356,29 @@ class HelpTest(unittest.TestCase):
         `verify` and `revoke` load the project as it suggests, without the
         user's accepted settings; `run` loads them too.
         """
+        self.maxDiff = None
         seen: list[scoter.ConfigScope] = []
 
+        def fake_dist_dir(_dist: str | None) -> Path:
+            return SCRIPTS / ".."
+
+        def fake_bin_dir(_dist: str | None) -> Path:
+            # Needed to find the subcmd-*.txt files.
+            return SCRIPTS
+
         def fake_load(
-            args: object, *, scope: scoter.ConfigScope = scoter.ConfigScope.ACCEPTED,
+            args: argparse.Namespace,
+            *,
+            dist_dir: Path,
+            scope: scoter.ConfigScope,
         ) -> scoter.DictJsonData:
             seen.append(scope)
             raise scoter.ConfigErr("stop here")
 
         original = scoter.load_config
         scoter.load_config = fake_load  # type: ignore[assignment]
+        scoter.require_global_dist_dir = fake_dist_dir  # type: ignore[assignment]
+        scoter._raw_bin_dir = fake_bin_dir  # type: ignore[assignment]
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 scoter.main(["scoter", "help"])

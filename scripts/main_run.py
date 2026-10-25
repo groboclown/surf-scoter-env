@@ -69,26 +69,11 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # The environment is named by the project: one run of it at a time.
     host = ssh_hosts.host_name(config)
 
-    # -- The reservation of the host, its port and its ssh entry, in one
-    # locked step: the port depends on the other environments, and they must
-    # see this one's.
-    try:
-        with _active_envs(config) as active_envs:
-            # Configure the sshd port.  It might be dynamic.
-            _configure_sshd_port(config, active_envs)
-            active_envs.reserve_environ(
-                host,
-                port=str(config.dev_container_sshd_port()),
-                user=config.dev_container_str("user"),
-                project_dir=str(config.require_active_location("project-dir")),
-            )
-            # Its own `Host` block in the ssh config, for `ssh HOST` and the IDEs.
-            ssh_hosts.write_host(
-                config, host, config.dev_container_str("user"), str(config.dev_container_sshd_port()),
-            )
-    except (ActiveEnvErr, ConfigErr) as err:
-        print(err, file=sys.stderr)
+    # Reserve the host in the .ssh/config file.
+    if not reserve_ssh_host(config, host):
         return 1
+
+    # When complete, with failure or not, clean up the ssh host file.
     try:
         # -- Stage the accepted copy of the project's files to build from.
         plan = _stage_accepted(config, host)
@@ -277,6 +262,34 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def reserve_ssh_host(config: UserConfig, host: str) -> bool:
+    """Try to reserve the host in SSH.
+    
+    Returns False on error.
+    """
+    # The reservation of the host, its port and its ssh entry, in one
+    # locked step: the port depends on the other environments, and they must
+    # see this one's.
+    try:
+        with _active_envs(config) as active_envs:
+            # Configure the sshd port.  It might be dynamic.
+            _configure_sshd_port(config, active_envs)
+            active_envs.reserve_environ(
+                host,
+                port=str(config.dev_container_sshd_port()),
+                user=config.dev_container_str("user"),
+                project_dir=str(config.require_active_location("project-dir")),
+            )
+            # Its own `Host` block in the ssh config, for `ssh HOST` and the IDEs.
+            ssh_hosts.write_host(
+                config, host, config.dev_container_str("user"),
+                str(config.dev_container_sshd_port()),
+            )
+        return True
+    except (ActiveEnvErr, ConfigErr) as err:
+        print(err, file=sys.stderr)
+        return False
+
 def _why_not_accepted(config: UserConfig) -> str:
     """Why no acceptance holds for the project; the plain reason if that can't be told."""
     try:
@@ -377,7 +390,10 @@ def _stage_accepted(config: UserConfig, host: str) -> staging.BuildPlan | None:
     except staging.StagingErr as err:
         print(err, file=sys.stderr)
         if err.reverify:
-            print("Run `scoter verify` to review the project's settings, then run again.", file=sys.stderr)
+            print(
+                "Run `scoter verify` to review the project's settings, then run again.",
+                file=sys.stderr
+            )
         plan = None
     except (OSError, VerifiedStoreErr) as err:
         print(f"Couldn't stage the accepted copy of the project's files: {err}", file=sys.stderr)
@@ -460,7 +476,7 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
         if res.returncode == EXIT_CONTAINER_NOT_FOUND:
             # Not found.
             continue
-        elif res.returncode != 0:
+        if res.returncode != 0:
             raise subprocess.CalledProcessError(
                 returncode=res.returncode,
                 cmd=res.args,
@@ -503,39 +519,46 @@ def _setup_workspace(
     clean_workspace: bool,
     workspace_fetch: bool
 ) -> Path:
-    # Setup the workspace directory.
+    # Setup the workspace's cloned project directory.
     workspace_dir = config.active_location("dev-container-workspace-dir")
     if workspace_dir is None:
         workspace_dir = config.require_path("workspace", "workspace-dir")
         config.set_active_location("dev-container-workspace-dir", workspace_dir)
-    if workspace_dir.exists():
+    clone_project_dir = config.active_location("dev-container-project-dir")
+    if clone_project_dir is None:
+        clone_project_dir = workspace_dir
+        workspace_subdir = config.project_str("container", "workspace-subdir")
+        if workspace_subdir:
+            clone_project_dir = clone_project_dir / workspace_subdir
+        config.set_active_location("dev-container-project-dir", clone_project_dir)
+    if clone_project_dir.exists():
         if clean_workspace:
-            print(f"Cleaning out the workspace directory ({workspace_dir})")
-            fileutil.rm(workspace_dir)
+            print(f"Cleaning out the workspace directory ({clone_project_dir})")
+            fileutil.rm(clone_project_dir)
         elif workspace_fetch and vcs_section:
-            print(f"Fetching your project into {workspace_dir} ...")
+            print(f"Fetching your project into {clone_project_dir} ...")
             config.run_command(
                 vcs_section,
                 "fetch-changes",
-                cwd=workspace_dir,
+                cwd=clone_project_dir,
             )
         else:
             print("Not copying project into the workspace.")
-    if not workspace_dir.exists():
+    if not clone_project_dir.exists():
         if vcs_section:
             print("Cloning into the workspace")
-            print(f"Cloning your project into {workspace_dir} ...")
+            print(f"Cloning your project into {clone_project_dir} ...")
             config.run_command(
                 vcs_section,
                 "local-clone",
                 cwd=config.active_location("project-dir"),
                 template={
-                    "workspace-dir": str(workspace_dir),
+                    "workspace-dir": str(clone_project_dir),
                 }
             )
         else:
             print("Not copying project into the workspace (no version control system defined).")
-            workspace_dir.mkdir(parents=True)
+            clone_project_dir.mkdir(parents=True)
     return workspace_dir
 
 

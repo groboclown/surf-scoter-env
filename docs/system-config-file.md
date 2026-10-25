@@ -5,36 +5,20 @@ Scoter allows you to set specific configurations for your particular computer in
 
 ## Where to find the system configuration files
 
-The tool reads both of these, when they exist; the first takes priority over the second.
+The `scoter` tool reads from these two places, in order:
 
-* `${scoter:user-setup-file}` (using the internal setup to find the location; see below)
-* `${scoter:distribution-dir}/setup.{yaml,yml}`: the files Surf Scoter itself installs (see below).
+1. Your "user home" setup file, which it checks, in order:
+    * `$SURF_SCOTER_HOME/setup.yaml` (if the `SURF_SCOTER_HOME` environment variable is set)
+    * `$XDG_CONFIG_HOME/surf-scoter.setup.yaml` (defaults the `XDG_CONFIG_HOME` environment variable to `~/.config`)
+    * `$XDG_CONFIG_HOME/surf-scoter.d/setup.yaml`
+2. The Surf Scoter distribution directory's `setup.yaml` file.
+    * This is wherever the `scoter` script figures out where it sits on your drive.
+    * Or you can pass the `--distribution-dir` argument with the location in case `scoter` has trouble finding it.
+    * Or if the user configuration includes the `scoter` path `distribution-dir`.  See the [format details](#format) section below for details on this.
 
-In order to find the `${scoter:user-setup-file}`, The system tries these locations, choosing the first one found (if any):
+Note that `scoter` will never read a setup file from a project.  A setup file declares which programs to run, what a project may or may not do, and changes how the containers are put together.  Because a project can come from anyone, allowing a project to declare a setup opens a gigantic security hole.  Therefore, `scoter` will error out if it finds that any of the above paths exist within a project directory.
 
-* `$SURF_SCOTER_HOME/setup.{yaml,yml}` (using the `SURF_SCOTER_HOME` environment variable, if set)
-* `~/.config/surf-scoter.setup.{yaml,yml}`
-* `~/.config/surf-scoter.d/setup.{yaml,yml}`
-
-The distribution directory is where Surf Scoter's own files are installed, much like a Linux distribution installing them into `/usr/share/surf-scoter`.  An installation gives it to the tools with `--distribution-dir`.  Without that, the tool uses the setup files read so far: if they include
-
-```yaml
-scoter:
-    paths:
-        distribution-dir: /my/install/dir
-```
-
-then the tool reads `/my/install/dir/setup.{yaml,yml}`, with the lowest priority.  `--distribution-dir` wins over a `distribution-dir` in the setup files.  To use a different installation, give `--distribution-dir` yourself; the setting in a setup file only counts when the tools aren't given one.  Either way, only one distribution directory's file is read, and a file is only read once, even if it's found more than one way.
-
-The tools never read a setup file from a project.  A setup file can run any program on your computer, decides what a project may do, and changes how the containers are put together, and a project can come from anyone.  So when there's a project, these must all be outside the project directory, the project files directory, the dev container's workspace directory, and the repository holding the project (the nearest directory above the project with a `.git` or `.hg`, not counting your home directory or above); otherwise the tools stop with an error, and make no configuration:
-
-* `$SURF_SCOTER_HOME`, whether or not it holds a setup file.  A project can set environment variables when you enter its directory (say, with a `.envrc`), so the tools check where it points.
-* The user's setup file, however it was found.
-* A `distribution-dir` that comes from the setup files (rather than `--distribution-dir`).  It must also be an absolute path, and must not refer to `${scoter:cwd}` (directly or through another key), as the tools usually run in the project.
-
-Note: it is an error (will cause the tools to bail out) if you have both a `setup.yaml` and a `setup.yml` (or `surf-scoter.setup.yaml` and `surf-scoter.setup.yml`) file in the same directory.
-
-The `scoter` section is special: the tool fills in some of its values.  See [The `scoter:` section](#the-scoter-section).
+You can use a `.yml` extension instead of `.yaml`, if you prefer a three-letter extension or less typing.  However, if you have both (say, `setup.yaml` and `setup.yml`) in a directory, `scoter` will refuse to load either and report an error.
 
 ## Format
 
@@ -57,41 +41,94 @@ ssh:
         home: ~/.ssh
         config-file: ${ssh:home}/config
         key-file: ${home}/scoter-dev-container
+git-vcs:
+    value-lists:
+        drop-env:
+            - GIT_*
 ```
 
-* `paths`: file locations (see [File Locations](#file-locations)).
-* `programs`: executables, found on the `PATH` (see [Programs](#programs)).
-* `runs`: command patterns (see [Defining Executables](#defining-executables)).
+* `paths`: file locations (see [File Locations](#file-locations)).  These expand `~/` to your home directory.
+* `programs`: executables, found on the `PATH` or absolute file name (see [Programs](#programs)).
+* `runs`: command patterns (see [Defining Executables](#defining-executables)).  You can specify this as a single bit of text or as a list (one entry per argument).
 * `path-lists`: lists of file locations (see [Defining Path Lists](#defining-path-lists)).
 * `value-lists`: lists of plain text (see [Value Lists](#value-lists)).
 * `values`: plain values (see [Plain Values](#plain-values)).
-* `host-commands`: checks on the commands a project may run on your computer (see [Host Command Checks](#host-command-checks)).
+* `host-commands`: plays an important part in locking down the commands a project may run on your computer (see [Host Command Checks](#host-command-checks)).
 
-Each key in a section has exactly one kind of value: setting the same key in two of the mappings (say, `paths: retries` and `values: retries`) is an error.  That holds across files too: the kind of value is part of what a key means, so a higher priority file can change a key's value, but not its kind.  You can think of a section as a mapping of keys, where each key has a value and a kind.
+Each key in a section has exactly one kind of value.  Setting the same key in two of the mappings (say, `paths: retries` and `values: retries`) is an error.
 
-Sections from different files are merged key by key, with the higher priority file's value winning.
+The distribution's file holds the defaults.  While your user file can change the values for those, you can't change that named *type*.  Using the above example, you can set the value for `docker: values: retries`, but you can't set `docker: runs: retries`.
 
-Each file may be at most 2 MB.  YAML tags (such as `!include`) aren't supported, and the tools report them as errors.  When the files have problems, the tools report all the problems they find, rather than just the first.
+### References
 
 Inside the values, you can refer to any other key with the `${[section:]key}` format.  In the example above, `${ssh:home}` is the `ssh` section's `home` path, so `config-file` becomes `~/.ssh/config` (with `~` expanded to your home directory).  In the same way, the `key-file` key assumes the `${home}` reference refers to its own section, which expands into `~/.ssh/scoter-dev-container`.
 
-What a reference gives depends on the kind of value it refers to:
+The text put into the reference depends on the referenced type:
 
-* `paths`, `programs` and `values` are text, and can be used anywhere.  A `null` value can't be used.  A reference to a program gives the program found (see [Programs](#programs)).
-* `host-commands` checks can't be referred to at all: `${verification:shells}` is an error.
-* `runs`, `path-lists` and `value-lists` are lists.  A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` or `value-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
+* `paths`, `programs` and `values` are text, and can be used anywhere.  A `null` value can't be used.  A reference to a program gives the absolute path to the program found (see [Programs](#programs)).
+* `runs`, `path-lists` and `value-lists` are lists.  You can reference another list within a list
+A reference that is a whole argument of a `runs` command, or a whole entry of a `path-lists` or `value-lists` list, puts the list's items in its place; for example, `${exec} ${common-args} build`, or a list entry `${docker:compose}`.  Anywhere else, a reference to a list is an error.
+* `host-commands` checks can't be referenced at all.  Doing so causes an error.
+* If you reference something that doesn't exist, that turns into an error.
 
-Referring to a key that isn't set anywhere is an error (except for the `scoter` locations the tool sets; see [below](#the-scoter-section)), as is a set of values that refer to each other in a loop.  You can escape a `${` expression by doubling up the dollars - `$${` becomes `${`; you don't need to double-up a `$` unless it's followed by a `{`.
+There exists no way to insert an environment variables from the file other than `~/` home directory replacement.  That exists as a security precaution (you know what you're getting).
+
+If you want to insert a `${` value exactly as-is into the text, without trying to make a reference, use `$${`; `scoter` will replace that with the text you want.  Note that a bare `$` is fine, and `$$` will remain `$$`.  Let's say you have the `ssh: paths: home` value set to `/opt/ssh`, and you want to set the value `ssh: values: help`:
+
+* `Look in ${ssh:home} for details` -> `Look in /opt/ssh for details`
+* `Look in ${home} for details` -> `Look in /opt/ssh for details`
+* `Did you try setting $HOME?` -> `Did you try setting $HOME?`
+* `Did you try setting $$HOME?` -> `Did you try setting $$HOME?`
+* `Did you try setting $${HOME}?` -> `Did you try setting ${HOME}?`
+* `Did you try setting ${HOME}?` -> error; no such value `ssh: *: HOME`, and `scoter` doesn't replace these with environment variables.
+
+### What's With the `{x:something}`?
+
+Separate from the [references](#references), a command can on-the-fly insert a value for an argument through a simple templating mechanism, the `{x:something}` format.
+
+For example, the `docker: runs: build` line above contains:
+
+```
+${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}
+```
+
+Here, the reference placement will turn the `${exec}` into the location of the docker executable (from `docker: programs: exec`).  But the tool also needs to provide the tag for the constructed image, the location of the Dockerfile, and the directory in which it should run.  For that, the tool replaces `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}` (respectively) with the corresponding value.  If the tool doesn't provide one of those, then it goes into the called program without modification.
+
+Why the `x:` prefix?  It seems like it won't collide with other CLI tools.
+
+### Yaml Format Fun
+
+YAML tags (such as `!include`) aren't supported, and the tools report them as errors.  When the files have problems, the tools report all the problems they find, rather than just the first.
+
+Currently, the files can store at most 2 MB each.
+
+## Sections
+
+Surf Scoter has some sections that provide defaults that you may want to tweak:
+
+* `workspace` - where to copy project directories when you run them in a container.  This allows a full separation of container files versus your computer's files, so that you *explicitly* bring over files that you've authorized.
+* `dev-env` - how to run your development environment.  You configure the firewall and gateway here, and you can include limitations on the container's resources.
+
+Surf Scoter expects some sections to exist in order to operate:
+
+* `ssh` - basic SSH configuration details.  You may need to adjust these if you use a different SSH toolchain.
+* `docker` - how to work with a container service on your computer.
+* `python` - how to run Python scripts.
+* [`*-vcs:`](#version-control-roots) - defines how to work with a version control system, like Git or Subversion.
+* `verification` - security measures for finding problems with projects or system configuration files.  Be careful when modifying this, as it will change your security profile.  Also, see [how this checks project files](#project-file-and-egress-host-checks).
+
+Additionally, the [`scoter` section](#the-scoter-section) has very special rules around it.
 
 ### The `scoter:` section
 
-The `scoter` section is special, in that the tool fills in the `paths` that say where the configuration came from, and two `values` about the project, so you can refer to them from other places.  These are the same values as the universal configuration file's `active-config-locations` (see [The Universal Configuration File](contributors/universal-configuration-file.md)):
+The `scoter` section has the unique trait where the tool fills in the `paths` that say where the configuration came from, and two `values` about the project, so you can refer to them from other places.  These are the same values as the universal configuration file's `active-config-locations` (see [The Universal Configuration File](contributors/universal-configuration-file.md)):
 
 * `project-config` - the project configuration file: `values: project-file-name` in the project directory's `values: project-files-dir` (below).  Not set without a project.
 * `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)): the directory holding the project files directory.  `scoter` finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --project-dir`.  Not set without a project.
 * `vcs-root` - the root of the repository holding the project.  The `scoter` tool finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --vcs-root`; it must hold the project directory.  Not set without a project, or when the project isn't in a repository.  Setup files can't be read from inside it.
 * `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers-search` (see below), so that list can't refer to it.
 * `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
+* `dev-container-project-dir` - where the project is cloned in the workspace: `dev-container-workspace-dir` with the project file's `container: workspace-subdir` added, or the workspace itself without one (see [the development container](project-configuration-file.md#the-development-container)).  Not set without a project and a workspace.
 * `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
 * `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  If the tool didn't find a user setup file, this isn't set.
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
@@ -131,13 +168,16 @@ When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), 
 
 The rest of the `scoter` section is yours to set.  The tools read its `path-lists: dev-containers-search` (see [Defining Executables](#defining-executables)).
 
-## File Locations
+
+## Value Types
+
+### File Locations
 
 Every `paths` value is a file location.  The tool expands a leading `~` to your home directory, and a leading `./` makes the location relative to the project directory, `${scoter:project-dir}` (without one, a `./` location stays as written).  References to it, such as `${ssh:home}`, get the expanded location.  A file location can't use `{x:...}` values.
 
 A file location that doesn't exist isn't an error, and is kept as it is (in `path-lists` too): configurations often name files that are only needed now and then, or that a tool creates.  The tool that uses the location checks whether it exists, when that matters.
 
-## Programs
+### Programs
 
 A section's `programs` name the executables it runs.  The key's name doesn't matter: anything in `programs` is a program, and nothing in `paths` is, whatever its name.  By convention, a section's main program is called `exec`.
 
@@ -155,7 +195,7 @@ A program's value is expanded as a file location is (a leading `~` and `./`, and
 
 References to a program, such as `${exec}`, get the program found.  If a program can't be found, it has no value, and neither does any value that refers to it (such as a `runs` command that uses it).  The rest of the section is still usable.  Like a file location, a program can't use `{x:...}` values.
 
-## Defining Executables
+### Defining Executables
 
 The tool makes heavy use of running other commands.  In order to remain flexible enough to work with your particular environment, it sets up executables based on the tool name and the uses for it.  In the example above, when the tool builds a container image, it will use the `docker` section's `runs: build` key.  The execution will include external values `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}`, and the `${exec}` comes from the `docker` section's `programs: exec`.
 
@@ -226,7 +266,7 @@ The tools use these sections:
 
 If you find yourself using very obscure versions or alternatives of these tools, you may find yourself needing to use a translator script to convert between what Surf Scoter expects and what your tool does.
 
-## Defining Path Lists
+### Defining Path Lists
 
 The tool relies upon search paths to find files it uses for running parts of its task.  This allows you to override parts of the configuration to better suit your project.  These lists go in a section's `path-lists`.  Note that, based on the load order above, if a higher level sets a list, this *replaces* the whole lower level list.
 
@@ -240,7 +280,7 @@ docker:
             - ${scoter:user-dir}/compose
 ```
 
-## Value Lists
+### Value Lists
 
 A section's `value-lists` hold lists of plain text: names, patterns, domains.  Unlike `path-lists`, the entries aren't file locations, so `~` and `./` mean nothing special.  Each entry is expanded like a `values` text (`${...}` references, `$${` for `${`), and an entry that's a whole reference to another list puts its items in its place.  Numbers and `true`/`false` become text.  An entry that needs a `scoter` location this run doesn't have is left out, as for `path-lists`.
 
@@ -283,7 +323,7 @@ The `docker` section has no `drop-env`.  A project could set `DOCKER_HOST`, `DOC
 
 The programs your setup runs are checked before `scoter run` starts anything, and by `scoter user-setup`: a program can't be written relative to the project (`./`), refer to a project location, or be found inside the project, the workspace or the repository; nor can another user own it, or anyone write to it or a directory above it (one its group can write to is warned about); nor can it be under a `host-commands` check's `paths`, such as the version manager shims.  A relative `PATH` entry is warned about: the tools skip it when finding programs.
 
-## Plain Values
+### Plain Values
 
 A section's `values` hold single values that aren't file locations: text, numbers, `true`/`false`, or `null`.  The tool keeps each value's type, and doesn't treat any of them as a file location or a program.  Text may refer to other keys with `${...}`, just like elsewhere; other kinds of values are used as written.
 
@@ -295,7 +335,7 @@ ssh:
         banner: Connecting with ${ssh:config-file}
 ```
 
-## Host Command Checks
+### Host Command Checks
 
 A project can ask to run commands on your computer (its `commands`, in the [project configuration file](project-configuration-file.md)).  A section's `host-commands` are checks on those commands: what to refuse, what to warn you about, and what you've decided to allow.  Each key is one check:
 
@@ -339,7 +379,7 @@ Only `command-map` values and `paths` entries are expanded.  The other fields ar
 
 A command's program can't be in the project directory, the project files directory, the workspace or the repository holding the project, and two checks can't map the same command to different programs; `gen-scoter-uc` reports either as an error.
 
-### When checks disagree
+#### When checks disagree
 
 A command's action is worked out in two steps:
 
@@ -357,7 +397,7 @@ Your setup file's checks merge with the distribution's key by key, like the othe
 
 Prefer `overrides` to replacing or removing a check.  A replaced check is frozen: when a later Surf Scoter version adds a newly found shell to `verification: shells`, your replacement doesn't get it.  `scoter user-setup` lists the checks your setup replaces or removes, and what each gives up.
 
-### Overrides
+#### Overrides
 
 To allow `ksh` without allowing the other shells:
 
@@ -379,6 +419,7 @@ For `ksh`, this check's `warn` takes the place of `verification: shells`' `refus
 * A check can only override checks from its own setup file or a lower priority one: the distribution's can't override yours.
 * It can only override checks without `overrides` of their own.
 * Two checks can't override the same check for the same command (or, with `options` or `env`, for the same option or variable): only one can say what the check becomes.  `gen-scoter-uc` reports it as an error, as it does the two above.
+
 
 ## Project File and Egress Host Checks
 
@@ -409,6 +450,7 @@ They merge across your setup files key by key, as the other checks do: add a che
 
 An egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check: uncommenting it with its `$override` accepts it for that project only.  A refused file has no such override: change the file, choose your own container (`use: {name}`), or change the check.
 
+
 ## Guarded Settings
 
 Some settings keep the tools' protections in place: `-E` on the Python scripts (so a project's `PYTHONPATH` stays out), `--no-local` on the workspace's clone, Git's `drop-env`, the network gateway and its configuration, where the store and the workspace are, the review's checks.  The defaults mark them, in `verification: value-lists: guarded`, as `section:kind:key` (`*` for every key of a kind), and `scoter user-setup` and the review list each one your setup file changes, with the default beside it:
@@ -426,6 +468,7 @@ So a change copied in from instructions you didn't look at closely doesn't go un
 * Your setup can add guards of its own to either list.  It can't take the distribution's out: they're always used, and a setup that tries is reported too.
 
 `scoter verify --skip-setup-review` leaves this, and the host command checks' report, out of the review.
+
 
 ## The Verified Store
 

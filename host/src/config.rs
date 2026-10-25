@@ -410,6 +410,9 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
         system.set_dev_container_path(&dev.dir);
     }
+    if let (Some(system), Some(project)) = (&mut system, &project) {
+        system.set_dev_container_project_dir(project.workspace_subdir.as_deref());
+    }
     let mut project = project;
     match (
         &mut project,
@@ -603,7 +606,11 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
         system.set_dev_container_path(&dev.dir);
     }
-    // After the dev container, as `env` values can refer to it.
+    if let (Some(system), Some(project)) = (&mut system, &project) {
+        system.set_dev_container_project_dir(project.workspace_subdir.as_deref());
+    }
+    // After the dev container and the project directory, as `env` values
+    // can refer to them.
     let refused = system.as_ref().map(|system| {
         let (refused, problems) = RefusedWildcards::load(system);
         errors.extend(problems);

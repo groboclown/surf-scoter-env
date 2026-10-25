@@ -8,10 +8,10 @@ environments file, and `${scoter:state-dir}/environments/HOST`).
 """
 import enum
 import os
-import subprocess  # nosec: B404  # Runs the setup's own commands.
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from subprocess import SubprocessError
 
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
@@ -178,7 +178,7 @@ def _fetch(config: UserConfig, env: EnvironmentDesc, branch: str) -> bool:
             capture=Capture.NONE,
             template={"workspace-dir": env.workspace_dir, "branch": branch},
         )
-    except (OSError, subprocess.SubprocessError, SurfScoterErr) as err:
+    except (OSError, SubprocessError, SurfScoterErr) as err:
         print(f"Couldn't fetch: {err}", file=sys.stderr)
         return False
     if res.returncode != 0:

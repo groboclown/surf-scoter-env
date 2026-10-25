@@ -1,6 +1,32 @@
 #!/bin/sh
 set -e
 
+# This expects the workspace directory to be a parent (at some level) to the
+# cloned project directory.  On first startup, this will ensure that the user's
+# home path is a symlink to the workspace directory, and will copy the original
+# files to the new one.
+export WORKSPACE_DIR=/workspace
+if [ ! -L "${HOME}" ] ; then
+    # 1. Change to a non-working directory.
+    cd /tmp
+    # 2. Copy (without replace) the original home directory files into the workspace directory.
+    for src in "${HOME}"/* "${HOME}"/.* ; do
+        # One of the globs may not exist, which means it appears as a '*'.
+        if [ -e "${src}" ] ; then
+            name="$( basename "${src}" )"
+            tgt="${WORKSPACE_DIR}/${name}"
+            if [ ! -e "${tgt}" ] ; then
+                cp -R "${src}" "${tgt}"
+            fi
+        fi
+    done
+    # 3. Backup the original.  Note that this requires write access to the /home directory.
+    parent="$( dirname "${HOME}" )"
+    mv "${HOME}" "${HOME}.backup"
+    # 4. Link home.
+    ln -s "${WORKSPACE_DIR}" "${HOME}"
+fi
+
 # Set up the sshd configuration file with the SSHD port.
 envsubst '${SCOTER_SSHD_PORT}' \
     < /home/ubuntu/.config/sshd/sshd_config.template \
