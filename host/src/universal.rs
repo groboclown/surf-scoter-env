@@ -106,6 +106,10 @@ pub struct ActiveConfigLocations {
     /// directory.
     #[serde(default)]
     pub dev_container_workspace_dir: Option<String>,
+    /// Where the project is cloned: the workspace, with the project file's
+    /// `container: workspace-subdir`.  Worked out each run.
+    #[serde(default)]
+    pub dev_container_project_dir: Option<String>,
     #[serde(default)]
     pub dev_container_settings_dir: Option<String>,
     /// The user's setup file found, and the user directory it's in.
@@ -278,6 +282,7 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             project_branch: location(system::PROJECT_BRANCH),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
             dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
+            dev_container_project_dir: location(system::DEV_CONTAINER_PROJECT_DIR),
             dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
             user_setup_file: location(system::USER_SETUP_FILE),
             user_dir: location(system::USER_DIR),
@@ -665,7 +670,7 @@ mod tests {
         // The locations are also the `scoter` section's paths; the project's
         // id and branch, its values (text, to build paths from).
         let active = json["active-config-locations"].as_object().unwrap();
-        assert_eq!(active.len(), 13);
+        assert_eq!(active.len(), 14);
         for (key, value) in active {
             let group = if key == "project-id" || key == "project-branch" {
                 "values"
@@ -1196,6 +1201,73 @@ mod tests {
             first.host_command_checks
         );
         assert_eq!(first.setup, again.system.setup_record().clone());
+    }
+
+    #[test]
+    fn dev_container_project_dir() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "home/setup.yaml",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
+        );
+        let workspace = dir.path().join("ws");
+        let p = |path: &PathBuf| path.display().to_string();
+        let generate = |project: &str, workspace: Option<&Path>| {
+            dir.write("proj/.surf-scoter.d/project.yaml", project);
+            let options = LoadOptions {
+                project_dir: Some(dir.path().join("proj")),
+                dev_container_workspace_dir: workspace.map(Path::to_path_buf),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            build(&load_all_with_env(&options, env).unwrap()).unwrap()
+        };
+        let with_subdir = "container:\n  dev-container-path: ./env\n  workspace-subdir: src/p\n";
+
+        let universal = generate(with_subdir, Some(&workspace));
+        let expected = p(&workspace.join("src/p"));
+        assert_eq!(
+            universal.active_config_locations.dev_container_project_dir,
+            Some(expected.clone())
+        );
+        let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
+        assert_eq!(
+            json["resolved"]["scoter"]["paths"]["dev-container-project-dir"],
+            expected
+        );
+        assert_eq!(
+            json["current-project-setup"]["container"]["workspace-subdir"],
+            "src/p"
+        );
+        // `scoter-host` works it out again from the file.
+        let file = dir.write("universal.json", &to_json(&universal));
+        let again = crate::config::load_universal_with_env(&file, Env::default()).unwrap();
+        assert_eq!(
+            again
+                .system
+                .get(system::SCOTER_SECTION, system::DEV_CONTAINER_PROJECT_DIR),
+            Some(expected)
+        );
+
+        // Without a subdir, the workspace itself; without a workspace, none.
+        let without = "container:\n  dev-container-path: ./env\n";
+        assert_eq!(
+            generate(without, Some(&workspace))
+                .active_config_locations
+                .dev_container_project_dir,
+            Some(p(&workspace))
+        );
+        assert_eq!(
+            generate(with_subdir, None)
+                .active_config_locations
+                .dev_container_project_dir,
+            None
+        );
     }
 
     #[cfg(unix)]

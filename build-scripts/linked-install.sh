@@ -34,8 +34,7 @@ echo "exec cargo run --manifest-path \"${here}/host/Cargo.toml\" --bin scoter-ho
 chmod +x "${target}/bin/scoter-host"
 
 cd "${target}/bin"
-ln -s "${here}/scripts/"*.py .
-ln -s "${here}/scripts/surf_scoter_lib" .
+ln -s "${here}/scripts/"* .
 
 cd "${target}"
 ln -s "${here}/containers" .

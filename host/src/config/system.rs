@@ -4,8 +4,9 @@
 //! These files are read, highest priority first:
 //!   1. the user's setup file, the first found of
 //!      `$SURF_SCOTER_HOME/setup.{yaml,yml}`,
-//!      `~/.config/surf-scoter.setup.{yaml,yml}` and
-//!      `~/.config/surf-scoter.d/setup.{yaml,yml}`;
+//!      `$XDG_CONFIG_HOME/surf-scoter.setup.{yaml,yml}` and
+//!      `$XDG_CONFIG_HOME/surf-scoter.d/setup.{yaml,yml}` (`~/.config` when
+//!      `XDG_CONFIG_HOME` isn't set, or isn't absolute);
 //!   2. `${scoter:distribution-dir}/setup.{yaml,yml}`, using the settings so
 //!      far: `--distribution-dir`, or else what the file above sets.
 //!
@@ -64,7 +65,8 @@
 //!
 //! The tool sets the `scoter` section's `paths` that say where the
 //! configuration came from: `project-config`, `project-dir`,
-//! `dev-container-path`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`,
+//! `dev-container-path`, `dev-container-workspace-dir`, `dev-container-project-dir`,
+//! `dev-container-settings-dir`, `user-setup-file`,
 //! `user-dir`, `distribution-dir`, `distribution-bin-dir` and `cwd`.  Setup files can set
 //! `distribution-dir` (the tool's value, when it has one, wins), but none of the others.
 //! `distribution-bin-dir` is `${distribution-dir}/bin`, unless an earlier run's
@@ -91,6 +93,9 @@ pub const PROJECT_DIR: &str = "project-dir";
 pub const DEV_CONTAINER_PATH: &str = "dev-container-path";
 /// The project workspace, mounted in the dev container.
 pub const DEV_CONTAINER_WORKSPACE_DIR: &str = "dev-container-workspace-dir";
+/// Where the project is cloned: the workspace, with the project file's
+/// `container: workspace-subdir` added.
+pub const DEV_CONTAINER_PROJECT_DIR: &str = "dev-container-project-dir";
 /// The settings directory, mounted read-only in the dev container.
 pub const DEV_CONTAINER_SETTINGS_DIR: &str = "dev-container-settings-dir";
 pub const USER_SETUP_FILE: &str = "user-setup-file";
@@ -124,7 +129,7 @@ pub const PROJECT_ID: &str = "project-id";
 /// set without a branch.
 pub const PROJECT_BRANCH: &str = "project-branch";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 12] = [
+const TOOL_ONLY_KEYS: [&str; 13] = [
     PROJECT_CONFIG,
     PROJECT_DIR,
     PROJECT_ID,
@@ -132,6 +137,7 @@ const TOOL_ONLY_KEYS: [&str; 12] = [
     VCS_ROOT,
     DEV_CONTAINER_PATH,
     DEV_CONTAINER_WORKSPACE_DIR,
+    DEV_CONTAINER_PROJECT_DIR,
     DEV_CONTAINER_SETTINGS_DIR,
     USER_SETUP_FILE,
     USER_DIR,
@@ -164,6 +170,8 @@ pub struct Env {
     pub home: Option<PathBuf>,
     /// `SURF_SCOTER_HOME`.
     pub scoter_home: Option<PathBuf>,
+    /// `XDG_CONFIG_HOME`, when it's an absolute path.
+    pub config_home: Option<PathBuf>,
     /// `PATH`.
     pub path: Option<OsString>,
     /// `PATHEXT`, on Windows.
@@ -182,6 +190,10 @@ impl Env {
                 .or_else(|| var("USERPROFILE"))
                 .map(PathBuf::from),
             scoter_home: var("SURF_SCOTER_HOME").map(PathBuf::from),
+            // The basedir spec says a relative value is to be ignored.
+            config_home: var("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
             path: var("PATH"),
             path_ext: if cfg!(windows) { var("PATHEXT") } else { None },
             cwd: std::env::current_dir().ok(),
@@ -189,6 +201,14 @@ impl Env {
                 .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
                 .collect(),
         }
+    }
+
+    /// The user's configuration directory: `XDG_CONFIG_HOME`, or else
+    /// `~/.config`.
+    pub fn config_dir(&self) -> Option<PathBuf> {
+        self.config_home
+            .clone()
+            .or_else(|| self.home.as_ref().map(|home| home.join(".config")))
     }
 
     /// `text` with a leading `~` replaced by the home directory.
@@ -785,13 +805,23 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     }
 
     errors.extend(kind_changes(&files));
-    // Stands in for the dev container's directory, until it's found.
+    // Stand in for the dev container's directory, and where the project is
+    // cloned in the workspace, until the project file says.
     let mut later = Fallbacks::new();
     if options.dev_container {
         later.insert(
             (SCOTER_SECTION.to_string(), DEV_CONTAINER_PATH.to_string()),
             Entry::Path(DEV_CONTAINER_PATH.to_string()),
         );
+        if options.dev_container_workspace_dir.is_some() {
+            later.insert(
+                (
+                    SCOTER_SECTION.to_string(),
+                    DEV_CONTAINER_PROJECT_DIR.to_string(),
+                ),
+                Entry::Path(DEV_CONTAINER_PROJECT_DIR.to_string()),
+            );
+        }
     }
     errors.extend(config.validate(&later));
     record.files = files.iter().map(SetupFile::record).collect();
@@ -964,8 +994,7 @@ fn find_user_setup(env: &Env) -> Result<Option<(PathBuf, Option<PathBuf>)>, Conf
     {
         return Ok(Some((file, Some(dir))));
     }
-    if let Some(home) = &env.home {
-        let config = home.join(".config");
+    if let Some(config) = env.config_dir() {
         if let Some(file) = find_setup(&config, USER_SETUP)? {
             return Ok(Some((file, None)));
         }
@@ -1639,6 +1668,16 @@ impl SystemConfig {
     /// Set `scoter:dev-container-path`, once the dev container is found.
     pub fn set_dev_container_path(&mut self, dir: &Path) {
         self.set_location(DEV_CONTAINER_PATH, path_text(dir));
+    }
+
+    /// Set `scoter:dev-container-project-dir` from the workspace and the
+    /// project file's `container: workspace-subdir`; without a workspace,
+    /// it's left unset.
+    pub fn set_dev_container_project_dir(&mut self, subdir: Option<&str>) {
+        if let Some(workspace) = self.get_path(SCOTER_SECTION, DEV_CONTAINER_WORKSPACE_DIR) {
+            let dir = subdir.map_or_else(|| workspace.clone(), |subdir| workspace.join(subdir));
+            self.set_location(DEV_CONTAINER_PROJECT_DIR, path_text(&dir));
+        }
     }
 
     /// Set one of the `scoter` `paths` the tool sets.
@@ -2752,6 +2791,54 @@ mod tests {
     }
 
     #[test]
+    fn discovery_xdg_config_home() {
+        let dir = TempDir::new();
+        let home = dir.path().join("home");
+        let xdg = dir.path().join("xdg");
+        dir.write("home/.config/surf-scoter.setup.yaml", "");
+        let env = Env {
+            home: Some(home),
+            config_home: Some(xdg.clone()),
+            ..Env::default()
+        };
+        // `~/.config` isn't looked at.
+        let config = load(None, None, env.clone()).unwrap();
+        assert!(config.files().is_empty());
+
+        let in_d = dir.write("xdg/surf-scoter.d/setup.yaml", "");
+        let config = load(None, None, env.clone()).unwrap();
+        assert_eq!(config.files(), [in_d]);
+        assert_eq!(
+            config.get_path(SCOTER_SECTION, USER_DIR),
+            Some(xdg.join("surf-scoter.d"))
+        );
+
+        let flat = dir.write("xdg/surf-scoter.setup.yaml", "");
+        let config = load(None, None, env.clone()).unwrap();
+        assert_eq!(config.files(), [flat]);
+        assert_eq!(config.get(SCOTER_SECTION, USER_DIR), None);
+
+        // `SURF_SCOTER_HOME` comes first.
+        let in_home = dir.write("scoter-home/setup.yaml", "");
+        let env = Env {
+            scoter_home: Some(dir.path().join("scoter-home")),
+            ..env
+        };
+        let config = load(None, None, env).unwrap();
+        assert_eq!(config.files(), [in_home]);
+    }
+
+    #[test]
+    fn config_dir() {
+        let mut env = Env::default();
+        assert_eq!(env.config_dir(), None);
+        env.home = Some(PathBuf::from("/home/me"));
+        assert_eq!(env.config_dir(), Some(PathBuf::from("/home/me/.config")));
+        env.config_home = Some(PathBuf::from("/xdg"));
+        assert_eq!(env.config_dir(), Some(PathBuf::from("/xdg")));
+    }
+
+    #[test]
     fn discovery_nothing_found() {
         let dir = TempDir::new();
         let env = Env {
@@ -3255,6 +3342,45 @@ mod tests {
             config.get(SCOTER_SECTION, DEV_CONTAINER_PATH).as_deref(),
             Some("/dev")
         );
+    }
+
+    #[test]
+    fn dev_container_project_dir_set_later() {
+        let dir = TempDir::new();
+        dir.write(
+            "setup.yaml",
+            "a:\n  paths:\n    x: ${scoter:dev-container-project-dir}/x\n",
+        );
+        let env = crate::config::testing::home_env(dir.path(), Env::default());
+        let workspace = dir.path().join("ws");
+        let options = SetupOptions {
+            dev_container: true,
+            dev_container_workspace_dir: Some(&workspace),
+            ..SetupOptions::default()
+        };
+        let mut config = load_with(&options, env.clone()).unwrap();
+        assert_eq!(config.get("a", "x"), None);
+        config.set_dev_container_project_dir(Some("src/p"));
+        assert_eq!(
+            config.get_path(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR),
+            Some(workspace.join("src/p"))
+        );
+        assert_eq!(config.get_path("a", "x"), Some(workspace.join("src/p/x")));
+        // Without a subdir, the workspace itself.
+        config.set_dev_container_project_dir(None);
+        assert_eq!(
+            config.get_path(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR),
+            Some(workspace.clone())
+        );
+
+        // Without a workspace, it's never set.
+        let options = SetupOptions {
+            dev_container: true,
+            ..SetupOptions::default()
+        };
+        let mut config = load_with(&options, env).unwrap();
+        config.set_dev_container_project_dir(Some("src/p"));
+        assert_eq!(config.get(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR), None);
     }
 
     // ---- file shape ----

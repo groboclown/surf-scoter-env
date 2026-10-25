@@ -3,7 +3,8 @@
 # The user the container runs as, and that sshd accepts.
 user: ubuntu
 mounts:
-    # Where the project workspace is mounted.
+    # Where the workspace is mounted.
+    # The project directory must be a sub-directory under this.
     workspace: /workspace
     # Where the read-only setup directory is mounted.
     setup: /opt/surf-scoter-setup

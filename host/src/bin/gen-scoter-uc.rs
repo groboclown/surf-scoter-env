@@ -11,8 +11,9 @@
 //!                      [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
-//! `~/.config`) and the distribution directory's.  They can run any program,
-//! so none is ever read from a project.
+//! `$XDG_CONFIG_HOME`, by default `~/.config`) and the distribution
+//! directory's.  They can run any program, so none is ever read from a
+//! project.
 //!
 //! Without `--output`, the JSON goes to stdout.  Problems in the
 //! configuration go to stderr, all of them, and nothing is written.
@@ -73,7 +74,7 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
                 "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
             );
             println!(
-                "--distribution-dir gives where Surf Scoter is installed; the user's setup file comes from SURF_SCOTER_HOME or ~/.config."
+                "--distribution-dir gives where Surf Scoter is installed; the user's setup file comes from SURF_SCOTER_HOME or XDG_CONFIG_HOME (by default ~/.config)."
             );
             println!(
                 "--universal starts from a universal configuration file made earlier, without reading its setup files again."

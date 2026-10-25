@@ -25,6 +25,8 @@ container:
   dev-container-path: ./dev-env
   # Or, instead, the name of one found in the system configuration's `scoter` `path-lists: dev-containers-search`.
   # dev-container: dev-env
+  # optional; where under the workspace the project is cloned (default: the workspace itself)
+  workspace-subdir: src/my-project
 # optional; the network destinations the container needs (see "Egress")
 egress:
   - host: registry.npmjs.org
@@ -71,6 +73,8 @@ The `container` section sets exactly one of:
 * `dev-container`: the name of such a directory, found in one of the `scoter` section's `path-lists: dev-containers-search` directories of the [system configuration](system-config-file.md).  The standard installation provides `dev-env`.
 
 The container directory, and every parent its `dev-env.yaml` builds on, must be inside `.surf-scoter.d` or one of the `dev-containers-search` directories, once symlinks are resolved.  The directory is the container's build context, so keep files you don't want in the image, such as `.env` files and keys, out of it.
+
+`workspace-subdir` (optional) says where under the workspace the project is cloned, so the container sees it at that path under its workspace mount (`/workspace/src/my-project`, say, rather than `/workspace`).  Without it, the project is the workspace itself.  It's a relative path, with `/` between names, and each name is ASCII without spaces or control characters, isn't `.` or `..`, has no `\`, doesn't start with `-`, and isn't one Windows reads as more than a file name (one with a `:`, or a device name such as `NUL`), since it's joined to the workspace on every host.  Tools find the result as the `scoter` path `dev-container-project-dir` in the [universal configuration file](contributors/universal-configuration-file.md).
 
 The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 

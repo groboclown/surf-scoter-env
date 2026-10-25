@@ -49,7 +49,10 @@ RUN set -x \
         /home/ubuntu/.config/sshd \
  # The host commands' links to the bridge client, made at start-up by the
  # container's user (see entrypoint.sh), ahead of everything else on the PATH.
- && install -d -o ubuntu -g ubuntu -m 0755 /usr/local/scoter-bridge
+ && install -d -o ubuntu -g ubuntu -m 0755 /usr/local/scoter-bridge \
+ # To have the /home magic point to the workspace, the user needs write
+ # access to the /home directory.
+ && chown ubuntu:ubuntu /home
 ENV PATH=/usr/local/scoter-bridge:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY --chown=ubuntu:ubuntu \

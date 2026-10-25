@@ -301,7 +301,7 @@ const WINDOWS_DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOU
 /// Why Windows would read `name` as more than a file name, if it would: a
 /// `:` (a drive, as in `C:aws`, or a stream, as in `aws:stream`), or a
 /// device name (`NUL`, `COM1`, `nul.txt` and the like, in any case).
-fn windows_name_problem(name: &str) -> Option<String> {
+pub(crate) fn windows_name_problem(name: &str) -> Option<String> {
     if name.contains(':') {
         return Some(format!(
             "'{name}' can't have a `:`; Windows reads it as a drive or a stream"

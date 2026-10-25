@@ -25,6 +25,7 @@ PROJECT_LOCATIONS = (
     "cwd",
     "dev-container-path",
     "dev-container-workspace-dir",
+    "dev-container-project-dir",
     "dev-container-settings-dir",
 )
 

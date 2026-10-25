@@ -36,18 +36,11 @@ VCS_COMMAND_TIMEOUT_SECONDS = 60
 # The exit code for a sub-command that couldn't start, as shells use it.
 EXIT_CANNOT_START = 127
 
-# Note: these lists hard-code sub-command usage.  That puts a limit on
-# what user-supplied sub-commands can do.  This should use
-# an alternative method for determining this relationship.
-# `help` lists the sub-commands, which needs the setup, not a project;
-# `list-accepted` lists every project's acceptances, from the setup's store,
-# and `cleanup` works on all of them.
-NO_PROJECT_CMDS = (None, "help", "list-accepted", "cleanup")
-# `verify` reviews what the project suggests; accepted settings
-# (a container of the user's, say) would change what it shows.
-# `revoke` works on the store itself, and the lookup could carry
-# an acceptance forward just before it's revoked.
-NO_ACCEPTANCE_CMDS = ("verify", "revoke", "kill", "exempt")
+# These two files must live in the bin directory.  Each line declares
+# a sub-command that has a special requirement around the project configuration.
+# This is how we keep from hard-coding this list.
+NO_ACCEPTANCE_FILE = "subcmd-no-acceptance.txt"
+NO_PROJECT_FILE = "subcmd-no-project.txt"
 
 
 # ---------------------------------------------------------------------
@@ -71,10 +64,12 @@ class ConfigScope(enum.Enum):
 
 
 def load_config(
-    args: argparse.Namespace, *, scope: ConfigScope = ConfigScope.ACCEPTED,
+    args: argparse.Namespace,
+    *,
+    dist_dir: Path,
+    scope: ConfigScope,
 ) -> DictJsonData:
     """Load the SUC based on the arguments, as far as `scope` says."""
-    dist_dir = require_global_dist_dir(args.distribution_dir)
     # Phase 1: the setup alone, which says how to find the project.
     settings = generate_config(
         distribution_dir=dist_dir,
@@ -235,10 +230,11 @@ def find_project_dir(
         distribution = _opt_lookup(settings, "active-config-locations", "distribution-dir")
         read = _opt_lookup(settings, "loaded-from", "user-setup-file")
         print(
-            "Warning: no setup file sets the `scoter` section's `values: project-files-dir` "
-            "and `project-file-name`, which say how to find a project, so none is looked for.  "
-            f"The distribution's setup file normally does: is there one at {distribution}/setup.yaml?  "
-            f"(Setup files read: {read or 'none'}.)  Did you remember to run 'scoter user-setup'?",
+            f"Warning: no setup file sets the `scoter` section's `values: project-files-dir` "
+            f"and `project-file-name`, which say how to find a project, so none is looked for.  "
+            f"The distribution's setup file normally does: is there one at "
+            f"{distribution}/setup.yaml?  (Setup files read: {read or 'none'}.)  Did you "
+            f"remember to run 'scoter user-setup'?",
             file=sys.stderr,
         )
         return None
@@ -292,7 +288,7 @@ def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
         raise ConfigErr("The setup's `verified` `runs: find-acceptance` has no value.")
     tmp = save_to_tmp(settings)
     try:
-        args = [arg.replace("{x:universal}", tmp) for arg in template]
+        args = [str(arg).replace("{x:universal}", tmp) for arg in template]
         res = subprocess.run(  # nosec: B603  # The command comes from the user's setup.
             args, stdout=subprocess.PIPE, check=False, shell=False,
         )
@@ -377,6 +373,7 @@ def require_global_dist_dir(distribution_dir: str | None) -> Path:
     """
     if distribution_dir:
         # Use this value, even if it doesn't exist.
+        print(f"Looking in {distribution_dir} for dist dir")
         if os.path.isdir(distribution_dir):
             # Don't use realpath here.
             return Path(os.path.abspath(distribution_dir))
@@ -389,7 +386,7 @@ def require_global_dist_dir(distribution_dir: str | None) -> Path:
     if os.path.isfile(this):
         this_dir = os.path.dirname(this)
         # All we care about here is that the executables exist.
-        bin_dir = Path(this_dir) / DISTRIBUTION_BIN_DIR
+        bin_dir = _raw_bin_dir(Path(this_dir))
         if _is_exe_file(bin_dir / SCOTER_HOST_EXEC) and _is_exe_file(bin_dir / GEN_SCOTER_UC_EXEC):
             return Path(this_dir)
 
@@ -464,7 +461,7 @@ def generate_config(
     `accepted_settings` (the user's accepted settings); without them, there
     are none.
     """
-    gen_uc = _require_exe(distribution_dir / DISTRIBUTION_BIN_DIR / GEN_SCOTER_UC_EXEC)
+    gen_uc = _require_exe(_raw_bin_dir(distribution_dir) / GEN_SCOTER_UC_EXEC)
     args: list[str] = [str(gen_uc), "--distribution-dir", str(distribution_dir)]
     if project_dir:
         args.extend(("--project-dir", project_dir))
@@ -542,6 +539,10 @@ def _require_exe(name: str | Path) -> Path:
     if not ret:
         raise ConfigErr(f"could not find '{name}'")
     return ret
+
+
+def _raw_bin_dir(dist_dir: Path) -> Path:
+    return dist_dir / DISTRIBUTION_BIN_DIR
 
 
 def _is_windows() -> bool:
@@ -693,13 +694,29 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
 # ---------------------------------------------------------------------
 # CLI code.
 
-def config_scope(sub_cmd: str | None) -> ConfigScope:
-    """How much of the configuration the sub-command needs."""
-    if sub_cmd in NO_PROJECT_CMDS:
+def config_scope(sub_cmd: str | None, dist_dir: Path) -> ConfigScope:
+    """How much of the configuration the sub-command needs.
+    
+    The scope is recorded next to the scripts.
+    """
+    # Hard-coded: no sub-command means no project, and help doesn't need a project.
+    if not sub_cmd or sub_cmd == "help":
         return ConfigScope.SETUP
-    if sub_cmd in NO_ACCEPTANCE_CMDS:
+    # Read from the subcmd-* file for how to treat the project information loading.
+    if _is_subcmd_in(sub_cmd, _raw_bin_dir(dist_dir) / NO_PROJECT_FILE):
+        return ConfigScope.SETUP
+    if _is_subcmd_in(sub_cmd, _raw_bin_dir(dist_dir) / NO_ACCEPTANCE_FILE):
         return ConfigScope.SUGGESTED
     return ConfigScope.ACCEPTED
+
+
+def _is_subcmd_in(sub_cmd: str, file: Path) -> bool:
+    """Check whether the sub-command is in the file."""
+    print(f"Reading {file}")
+    try:
+        return sub_cmd in file.read_text(encoding="utf-8").splitlines()
+    except BaseException as err:
+        raise ConfigErr(f"failed reading {file}") from err
 
 
 def main(argv: Sequence[str]) -> int:
@@ -707,7 +724,8 @@ def main(argv: Sequence[str]) -> int:
     # Configure how tool accepts arguments.
     try:
         args = parse_arguments(argv)
-        config = load_config(args, scope=config_scope(args.cmd))
+        dist_dir = require_global_dist_dir(args.distribution_dir)
+        config = load_config(args, dist_dir=dist_dir, scope=config_scope(args.cmd, dist_dir))
     except ConfigErr as err:
         print(f"Configuration error: {err}", file=sys.stderr)
         return 1
@@ -718,6 +736,7 @@ def main(argv: Sequence[str]) -> int:
         print("All supported sub-commands:")
         for sub in list_sub_commands(config):
             print(f"  {sub}")
+        print(f"Run '{argv[0]} SUB-CMD --help' for details on each one.")
         return 0
     if sub_cmd == "show-suc":
         json.dump(config, sys.stdout)

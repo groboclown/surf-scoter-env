@@ -39,11 +39,9 @@ mkdir -p "${workdir}/bin"
 # Set up the bin directory.
 cp "${base}/host/${target_dir}/scoter-host${ext}" "${workdir}/bin/."
 cp "${base}/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
-cp "${base}/scripts/"*.py "${workdir}/bin/."
-cp -R "${base}/scripts/surf_scoter_lib" "${workdir}/bin/."
+cp -R "${base}/scripts/"* "${workdir}/bin/."
 
 cp -R "${base}/containers" "${workdir}/."
-rm -r "${workdir}/containers/dev-env/target"
 # The distribution's setup file goes at the top, where the tools look for it
 # (`${scoter:distribution-dir}/setup.yaml`); the rest of `defaults`, such as the
 # docker-compose file, stays where the setup file points.
@@ -64,9 +62,11 @@ cp \
 
 # Remove potential build left-overs.
 rm -r \
-    "${workdir}/bin/__pycache__" \
-    "${workdir}/bin/"*/__pycache__ \
-    "${workdir}/bin/"*/*/__pycache__ \
+    "${workdir}/__pycache__" \
+    "${workdir}/"*/__pycache__ \
+    "${workdir}/"*/*/__pycache__ \
+    "${workdir}/"*/*/*/__pycache__ \
+    "${workdir}/containers/dev-env/target" \
     "${workdir}/containers/dev-env/"*.cdx.json \
     2>/dev/null || true
 
