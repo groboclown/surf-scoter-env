@@ -11,6 +11,7 @@ Each area has its own page:
 * [The development container](dev-container-attack-vectors.md) (`DEV`)
 * [File access](files-attack-vectors.md) (`FILE`)
 * [The host bridge](host-bridge-attack-vectors.md) (`BRIDGE`)
+* [Project verification](verification-attack-vectors.md) (`VER`)
 
 The [user and default settings](settings.md) aren't analyzed here.  They come from the developer rather than a cloned project, so they rank lower, but changes to them can break the network properties; that page has its own checklist.
 
@@ -56,17 +57,20 @@ The Critical vectors, and the High vectors that are open or unverified:
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Open |
+| [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
 | [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Open |
 | [FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace) | `scoter run` runs Git inside the workspace | Critical | Open |
 | [BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
+| [FILE-10](files-attack-vectors.md#file-10-the-workspace-sub-path-through-container-symlinks) | The workspace sub-path through container symlinks | High | Open |
+| [VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled) | The Dockerfile meaning match can be fooled | High | Open |
+| [VER-2](verification-attack-vectors.md#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Open |
+| [VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts) | The review doesn't show everything it accepts | High | Open |
+| [VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed) | Exemptions accept what nobody reviewed | High | By design, partly Open |
 | [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |
 | [DEV-3](dev-container-attack-vectors.md#dev-3-image-builds-run-outside-the-isolation) | Image builds run outside the isolation | High | Open |
 | [DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker) | Host ids under rootful Docker | High | Open |
 | [DEV-5](dev-container-attack-vectors.md#dev-5-the-ide-session-as-a-channel-to-the-host) | The IDE session as a channel to the host | High | Unverified |
-| [NET-2](network-attack-vectors.md#net-2-the-project-controls-the-allowlist) | The project controls the allowlist | High | Open |
 | [NET-3](network-attack-vectors.md#net-3-dns-from-the-dev-container) | DNS from the dev container | High | Unverified |
-| [BRIDGE-2](host-bridge-attack-vectors.md#bridge-2-the-project-chooses-the-commands) | The project chooses the commands | High | Open |
 | [BRIDGE-3](host-bridge-attack-vectors.md#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Open |
 
 
@@ -75,8 +79,11 @@ The Critical vectors, and the High vectors that are open or unverified:
 A few patterns show up across the areas, and are worth watching for in any new code:
 
 * **Project values written into host files.**  Anything the project supplies that `scoter` writes into a host file or command line needs strict validation and escaping (DEV-1, DEV-2).
-* **The host acting inside the workspace.**  Anything that runs on the host with the workspace as its working directory, or shares files with it, gives the container a way out (FILE-1, FILE-2, FILE-4).
-* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all come from the project, so they need review whenever they change (NET-2, BRIDGE-2, DEV-3).
+* **The host acting inside the workspace.**  Anything that runs on the host with the workspace as its working directory, opens a path through it, or shares files with it, gives the container a way out.  The container can replace any directory there with a symlink between sessions (FILE-1, FILE-2, FILE-4, FILE-10).
+* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all come from the project.  [Project verification](verification.md) puts a review in front of them (NET-2, BRIDGE-2, DEV-3), so the review's own gaps are now where these risks live (VER-3, VER-4).
+* **Matching on meaning must agree with the consumer.**  Wherever a change is let through because it "means the same", the canonical form must drop exactly what the real consumer (Docker, the shell, the generator) ignores, and nothing more (VER-1, VER-2).
+* **The review must show everything it accepts.**  A value that reaches the host but isn't on the review page is accepted unseen (VER-3, DEV-2, FILE-10).
+* **State that outlives a session.**  Anything the container can leave in the workspace (its home directory, the clone's `.git`) is input to the next session and to the host (DEV-16, FILE-1).
 * **Differences between runtimes.**  Rootful and rootless runtimes, Docker and Podman, and VM-based runtimes on macOS and Windows behave differently, so tests on one don't cover the others (NET-3, NET-8, DEV-4, BRIDGE-12).
 
 

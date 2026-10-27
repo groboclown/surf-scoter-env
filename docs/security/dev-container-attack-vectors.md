@@ -17,9 +17,10 @@ This analysis starts from one assumption: **anything inside the dev container ma
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
 | `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
-| `Dockerfile`, build context, parent directories | The project | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
+| `Dockerfile`, build context, parent directories and their tags | The project, as accepted | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`staging.py`](../../scripts/surf_scoter_lib/verified/staging.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which doesn't override them |
 | Workspace files, including permission bits | Code in the container | The host file system, and whatever later reads it |
+| The home directory, kept in the workspace | Code in the container, and the project's repository | [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) |
 | Processes and files inside the container | Code in the container | The [runtime constraints](dev-container.md#runtime-constraints) |
 | The IDE's remote session | Code in the container (server side) | The IDE |
 
@@ -28,7 +29,7 @@ This analysis starts from one assumption: **anything inside the dev container ma
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [DEV-1](#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Open |
+| [DEV-1](#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
 | [DEV-2](#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Open |
 | [DEV-3](#dev-3-image-builds-run-outside-the-isolation) | Image builds run outside the isolation | High | Open |
 | [DEV-4](#dev-4-host-ids-under-rootful-docker) | Host ids under rootful Docker | High | Open |
@@ -40,8 +41,10 @@ This analysis starts from one assumption: **anything inside the dev container ma
 | [DEV-10](#dev-10-loosened-permissions-on-workspace-files) | Loosened permissions on workspace files | Low | Open |
 | [DEV-11](#dev-11-subordinate-ids-under-rootless-runtimes) | Subordinate ids under rootless runtimes | Low | Open |
 | [DEV-12](#dev-12-group-access-inside-the-image) | Group access inside the image | Low | Mitigated |
-| [DEV-13](#dev-13-bridge-links-in-a-root-owned-directory) | Bridge links in a root-owned directory | Low | Unverified |
+| [DEV-13](#dev-13-bridge-links-in-a-root-owned-directory) | Bridge links in a root-owned directory | Low | Closed |
 | [DEV-14](#dev-14-unbounded-writable-storage) | Unbounded writable storage | Low | Open |
+| [DEV-15](#dev-15-the-project-chooses-shared-image-tags) | The project chooses shared image tags | Medium | Open |
+| [DEV-16](#dev-16-the-home-directory-persists-in-the-workspace) | The home directory persists in the workspace | Medium | Open |
 
 
 ## Background: how container ids reach the host
@@ -63,7 +66,7 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 
 ### DEV-1: `user` is written into the SSH configuration
 
-**Severity:** Critical.  **Status:** Mitigated where it's written: `write_host` refuses a `user` that isn't a plain user name (letters, digits, `.`, `_` and `-`, at most 32), and the `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The generator still takes any non-empty string.
+**Severity:** Critical.  **Status:** Mitigated where it's written: `write_host` refuses a `user` that isn't a plain user name (letters, digits, `.`, `_` and `-`, at most 32), and the `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The generator still takes any non-empty string, so any new place that writes `user` into a host file needs its own check.  The review doesn't show `user` ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)).
 **Where:** `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `write_host` and `host_name` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py).
 
 `user` went into the developer's `~/.ssh/config`, in the container's `Host` line and its `User` line, without escaping.  The only check is that it's a non-empty string.  A value containing a newline adds arbitrary directives, such as a `Match all` block with a `ProxyCommand`, which runs on the host the next time the developer uses `ssh` for anything.  A value containing spaces adds extra `Host` patterns.  This happens before any container starts.
@@ -79,20 +82,28 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 
 `mounts: workspace` and `mounts: setup` go into the `.env` file unescaped.  The only check is a leading `/`.  A newline adds a line, and compose takes the last value for a repeated name (confirmed with podman-compose 1.6.0), so `"/workspace\nWORKSPACE_HOST=/home/you"` mounts the developer's home directory into the container, read-write.
 
+Project verification doesn't close this.  The run uses the accepted `dev-env.yaml`, but:
+
+* `dev-env.yaml` gets no control-character check: the generator's text checks cover only the project file and the review;
+* the review doesn't show the mount points, or the contents of a new `dev-env.yaml` ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts));
+* `scoter verify --with-exemption` accepts it without showing it at all ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed)).
+
 **Red team:** override `WORKSPACE_HOST` or `SETTINGS_HOST` this way.  Repeat with Docker Compose, whose `.env` parsing may differ.  Try `:` and `,` in mount points to change mount options.
 
 **When changing this code:** refuse control characters, `:` and `,` in mount points, and escape every value written to `.env`.  Any new value that flows from `dev-env.yaml` into a host-side file has the same exposure.
 
 ### DEV-3: Image builds run outside the isolation
 
-**Severity:** High.  **Status:** Open.
-**Where:** `_build_containers` in [`main_run.py`](../../scripts/main_run.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
+**Severity:** High.  **Status:** Open for the network; the build's inputs are now mitigated.
+**Where:** `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`staging.py`](../../scripts/surf_scoter_lib/verified/staging.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
 
-None of the [required network properties](network.md#required-properties) hold during a build.  `RUN` steps have the builder's ordinary network access, including the LAN and cloud metadata endpoints, and can bake anything into the image.  The build context is sent to the builder in full: a dev container directory at the project root sends untracked files like `.env`, and `COPY . .` puts them into image layers.  `parents` entries with `dir` can name directories outside the project, and those are built too.
+None of the [required network properties](network.md#required-properties) hold during a build.  `RUN` steps have the builder's ordinary network access, including the LAN and cloud metadata endpoints, and can bake anything into the image.
 
-**Red team:** a `Dockerfile` whose `RUN` steps reach the LAN, the metadata endpoint and the internet.  A project layout that pulls secrets into the build context.  A `dir` parent pointing outside the project.
+What gets built is narrower than it was.  The project's containers and their parents must be inside `.surf-scoter.d` or a `dev-containers-search` directory, and the ones inside `.surf-scoter.d` are built from the accepted copy, restored into a private staging directory, so the build context holds only the files that were reviewed, and a change to the live files after the check never reaches the build.  But a reviewed `Dockerfile` can still fetch anything at build time, and the review doesn't show `RUN` steps' effects; a change that matches the accepted one on meaning isn't reviewed at all ([VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled)).  During an [exemption](verification.md#exemptions), the live container files are built.
 
-**When changing this code:** consider `--network=none` or building through the gateway, and limiting `dir` parents to the project.
+**Red team:** a `Dockerfile` whose `RUN` steps reach the LAN, the metadata endpoint and the internet.  A `dir` parent pointing outside `.surf-scoter.d`.
+
+**When changing this code:** consider `--network=none` or building through the gateway.  Keep building from the staged copy.
 
 ### DEV-4: Host ids under rootful Docker
 
@@ -111,6 +122,8 @@ Without a user namespace, container ids are host ids.  A container running as ro
 **Where:** IDE remote protocols (VS Code Remote - SSH, JetBrains Gateway); the IDE settings in the [main README](../../README.md#connecting-through-vs-code).
 
 The IDE's server half runs in the container, and talks to its client half on the host.  Some extensions run on the host, the workspace can recommend extensions, and IDEs can open URLs, forward ports and read local files on the server's request.  What a hostile server can make the client do hasn't been analyzed.
+
+The IDE server (such as `~/.vscode-server`) now lives in the home directory, which is kept in the workspace ([DEV-16](#dev-16-the-home-directory-persists-in-the-workspace)), so a server or extension changed in one session is the one the IDE talks to in every later session, even after the image is rebuilt.
 
 **Red team:** with a modified IDE server or extension in the container, try to make the host client open URLs, install or enable extensions, forward ports, or run tasks locally.
 
@@ -191,12 +204,12 @@ Groups such as `root`, `staff`, `shadow` and `adm` can open image files.  Every 
 
 ### DEV-13: Bridge links in a root-owned directory
 
-**Severity:** Low.  **Status:** Unverified.
+**Severity:** Low.  **Status:** Closed.
 **Where:** [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh); [`containers/dev-env/Dockerfile`](../../containers/dev-env/Dockerfile).
 
-The start-up script runs as `ubuntu` and links into `/usr/local/bin`, which the base image leaves owned by root.  As built, the link should fail and stop the container whenever bridge commands are listed.  A project that makes `/usr/local/bin` writable to work around it lets code in the container replace the client binary.  That doesn't cross the host's checks.
+The start-up script used to link the bridge commands into `/usr/local/bin`, which the base image leaves owned by root, so the link would fail.  It now links them into `/usr/local/scoter-bridge`, which the image creates owned by `ubuntu` and puts first on the `PATH`.  Code in the container can replace those links, or put its own programs ahead of others on the `PATH`; that's expected ([DEV-8](#dev-8-no-separation-inside-the-container)), and doesn't cross the host's checks.
 
-**Red team:** start an environment with bridge commands on the base image, and with a writable `/usr/local/bin`.
+**Red team:** confirm that a replaced link or client binary can't send anything the host's checks would refuse.
 
 ### DEV-14: Unbounded writable storage
 
@@ -207,6 +220,35 @@ Code in the container can fill the disk that backs the container's writable laye
 
 **Red team:** fill the disk and observe the effect on the host.
 
+### DEV-15: The project chooses shared image tags
+
+**Severity:** Medium.  **Status:** Open.
+**Where:** the `parents` `tag` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_build_containers` in [`main_run.py`](../../scripts/main_run.py).
+
+Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, and nothing checks it.  Tags are shared by every project on the computer.  A project can tag its own parent with a name another project builds `FROM`, such as the distribution's `local-surf-scoter/dev-env:distro` (the `scoter init` template's base), and that project's next build uses the first project's image without a review of its own.  The review lists parent tags, but doesn't flag one that isn't the project's.
+
+**Red team:** with two projects, have one build a `dir` parent tagged as the other's base image, then build the other.
+
+**When changing this code:** put each project's parent tags under a prefix made from its environment id, or refuse tags outside it, and build the distribution's containers under tags no project may use.
+
+### DEV-16: The home directory persists in the workspace
+
+**Severity:** Medium.  **Status:** Open.
+**Where:** [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh); [`containers/dev-env/Dockerfile`](../../containers/dev-env/Dockerfile) (`/home` writable by `ubuntu`); `container: workspace-subdir` in the project file.
+
+At start-up, the entrypoint copies the image's home directory into `/workspace`, keeping any file already there, and replaces `$HOME` with a link to `/workspace`.  So the home directory is kept in the workspace on the host, between sessions:
+
+* **What a session plants stays.**  Shell start-up files, `~/.cargo/bin` and other programs on the `PATH`, the IDE server ([DEV-5](#dev-5-the-ide-session-as-a-channel-to-the-host)), and `~/.config/sshd/sshd_config.template`, from which each start makes the SSH server's configuration, all win over the image's copies.  They survive rebuilding the image, `--clean-workspace` (which removes only the project's clone), and revoking and accepting the project again.  A fix to the image doesn't reach an existing workspace.
+* **Secrets reach the host disk.**  The SSH host private key is copied into `~/.config/sshd`, so it's now on the host, in the workspace, as is anything else the container keeps in its home, such as shell history and tokens.
+* **Without `workspace-subdir`, home is the project's clone.**  The project's repository then supplies `.bashrc`, `.ssh/`, `.config/sshd/` and the rest, ahead of the image's, and every dotfile the container writes shows up in the clone as an untracked file.  The default container's `dev-env.yaml` says the project must be in a sub-directory, but nothing enforces it.
+* **`/workspace` is fixed.**  The entrypoint ignores `mounts: workspace`, so a `dev-env.yaml` that mounts the workspace elsewhere gets a home directory that isn't kept.
+
+None of this crosses to the host by itself; it's the container's own state, made permanent.  It matters with [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge) and [FILE-11](files-attack-vectors.md#file-11-kill---fetch-fetches-from-the-workspace-root), which bring the home directory's contents back to the host.
+
+**Red team:** change `.bashrc`, the sshd template and a program on the `PATH` in one session, then rebuild the image and run `scoter run --clean-workspace`, and check what the next session runs.  With a project that sets no `workspace-subdir`, commit a `.ssh/authorized_keys` and a `.config/sshd/sshd_config.template` to the repository.
+
+**When changing this code:** keep the files that make up the container's own configuration (the sshd template, the host key) out of the persisted home, and refresh them from the image on every start.  Require `workspace-subdir`, or keep the home directory somewhere other than the project's clone.  Give `--clean-workspace` a way to clear the home directory too.
+
 
 ## Sensitive code
 
@@ -214,7 +256,8 @@ Code in the container can fill the disk that backs the container's writable laye
 * [`scripts/main_run.py`](../../scripts/main_run.py): everything written to `~/.ssh/config`, `known_hosts`, the `.env` file and the setup directory, and the image builds.
 * [`scripts/surf_scoter_lib/ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py): the SSH configuration writer.
 * [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml): the `dev` service's user, capabilities, mounts and limits.
-* [`containers/dev-env/`](../../containers/dev-env/): the base image, start-up script and `sshd_config`.
+* [`containers/dev-env/`](../../containers/dev-env/): the base image, start-up script (including the home directory link) and `sshd_config`.
+* [`scripts/surf_scoter_lib/verified/staging.py`](../../scripts/surf_scoter_lib/verified/staging.py): what the build is made from.
 
 
 ## Open design questions

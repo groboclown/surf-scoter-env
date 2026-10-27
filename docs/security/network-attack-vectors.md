@@ -29,7 +29,7 @@ Code in the dev container wants to:
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
 | [NET-1](#net-1-allowed-domains-are-open-channels) | Allowed domains are open channels | High | By design |
-| [NET-2](#net-2-the-project-controls-the-allowlist) | The project controls the allowlist | High | Open |
+| [NET-2](#net-2-the-project-controls-the-allowlist) | The project controls the allowlist | High | Mitigated |
 | [NET-3](#net-3-dns-from-the-dev-container) | DNS from the dev container | High | Unverified |
 | [NET-4](#net-4-proxy-bypass) | Proxy bypass | High | Mitigated |
 | [NET-5](#net-5-allowed-names-resolving-to-forbidden-addresses) | Allowed names resolving to forbidden addresses | Medium | Mitigated |
@@ -57,14 +57,21 @@ Once a domain is on the list, anything in the container can send it anything.  T
 
 ### NET-2: The project controls the allowlist
 
-**Severity:** High.  **Status:** Open; project authorization is planned (see [configuration weaknesses](configuration-weaknesses.md)).
-**Where:** the project file's `egress`; `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).  The review of the project's settings (steps 12 to 16 of [projects in v1](../contributors/projects-v1.md)) closes this; until then the rules come from the project file, with a warning.
+**Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
+**Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../host/src/config/egress.rs), [`public_suffix.rs`](../../host/src/config/public_suffix.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py); [`gateway_squid.py`](../../scripts/gateway_squid.py); `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).
 
-The list comes from the project, and nothing checks its contents.  A project can widen its own access, and changes made in the workspace take effect once someone brings them back into the project.
+The project suggests the rules, but the gateway gets only the rules you accepted with `scoter verify`, from the verified store.  Until you accept them, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), and wildcards over a public suffix.  `gateway_squid.py` escapes each host into Squid's pattern, and stops the launch on a rule the gateway can't enforce.
 
-**Red team:** ship a project whose list contains very broad entries, such as `.com`, a bare IP address, or entries that Squid parses unexpectedly, and see what the gateway allows.  Get a list change merged back through the normal review path.
+What's left:
 
-**When changing this code:** any validation of the list belongs in `scoter`, before the file reaches the setup directory.
+* **The checks are thin.**  The review flags plain `http` and hosts on the `verification: egress-hosts` lists; any other host is shown, but only as a rule.  [NET-1](#net-1-allowed-domains-are-open-channels) is the real risk of each one.
+* **The public suffix list is off by default.**  `verification: path-lists: public-suffix-lists` is empty, so only the built-in `egress-refused-wildcards` list stops a wildcard such as `*.some-hosting-provider.example`.
+* **Accepting without looking.**  `scoter verify --with-exemption` accepts new rules unseen ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed)).
+* **Checks added later don't apply** to projects already accepted ([VER-6](verification-attack-vectors.md#ver-6-setup-changes-that-dont-ask-for-a-new-review)).
+
+**Red team:** ship a project whose rules contain very broad entries, such as `*.com`, a bare IP address, a wildcard over a hosting provider's user domains, or entries Squid might parse unexpectedly, and see what the review shows and the gateway allows.  Get a rule change accepted through `--with-exemption`.
+
+**When changing this code:** validation belongs in the generator, before the rules reach the review, and again before they reach the gateway.  Keep the gateway's configuration made only from the accepted rules.
 
 ### NET-3: DNS from the dev container
 

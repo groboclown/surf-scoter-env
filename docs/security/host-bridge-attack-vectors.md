@@ -21,7 +21,9 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | Wire messages from the broker | Code in the container (the broker is part of the image) | [`host.rs`](../../host/src/host.rs), [`comm/`](../../containers/dev-env/src/comm.rs) |
 | Standard input and signals for a running command | Code in the container | [`exec.rs`](../../host/src/host/exec.rs) |
 | Workspace files named in path arguments | Code in the container, at any time | `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); the host program |
-| The `commands` configuration | The project | [`project.rs`](../../host/src/config/project.rs), [`pattern.rs`](../../host/src/config/pattern.rs) |
+| The `commands` configuration | The project, as you accepted it | [`project.rs`](../../host/src/config/project.rs), [`pattern.rs`](../../host/src/config/pattern.rs), [`accepted.rs`](../../host/src/config/accepted.rs), [`checks.py`](../../scripts/surf_scoter_lib/checks.py) |
+| The universal configuration file | `scoter`, as you | `load_universal` in [`config.rs`](../../host/src/config.rs); [`accepted.rs`](../../host/src/config/accepted.rs) |
+| The accepted programs on the host | Whoever can write them or their directories | `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs) |
 | The host's `PATH` and working directory | The developer | `find_on_host` in [`exec.rs`](../../host/src/host/exec.rs); [`command.rs`](../../host/src/config/command.rs) |
 
 
@@ -30,7 +32,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
 | [BRIDGE-1](#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
-| [BRIDGE-2](#bridge-2-the-project-chooses-the-commands) | The project chooses the commands | High | Open |
+| [BRIDGE-2](#bridge-2-the-project-chooses-the-commands) | The project chooses the commands | High | Mitigated |
 | [BRIDGE-3](#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Open |
 | [BRIDGE-4](#bridge-4-host-output-returns-to-the-container) | Host output returns to the container | High | By design |
 | [BRIDGE-5](#bridge-5-allowed-environment-variables-steer-the-program) | Allowed environment variables steer the program | High | By design |
@@ -41,6 +43,8 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | [BRIDGE-10](#bridge-10-signals-delivered-to-host-processes) | Signals delivered to host processes | Low | By design |
 | [BRIDGE-11](#bridge-11-the-hosts-path-lookup) | The host's `PATH` lookup | Low | Closed |
 | [BRIDGE-12](#bridge-12-windows-hosts) | Windows hosts | Medium | Unverified |
+| [BRIDGE-13](#bridge-13-an-accepted-program-can-change-after-the-review) | An accepted program can change after the review | Medium | Open |
+| [BRIDGE-14](#bridge-14-the-bridge-trusts-the-universal-configuration-files-command-list) | The bridge trusts the universal configuration file's command list | Low | Open |
 
 
 ## Vectors
@@ -58,14 +62,21 @@ The bridge checks the command line, not what the program does with it.  A progra
 
 ### BRIDGE-2: The project chooses the commands
 
-**Severity:** High.  **Status:** Open; project authorization is planned (see [configuration weaknesses](configuration-weaknesses.md)).
-**Where:** [`project.rs`](../../host/src/config/project.rs).
+**Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
+**Where:** [`project.rs`](../../host/src/config/project.rs); [`host_commands.rs`](../../host/src/config/host_commands.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py) (the checks); [`accepted.rs`](../../host/src/config/accepted.rs) and [`universal.rs`](../../host/src/universal.rs) (the accepted copy).
 
-`commands` comes from the project configuration, so cloning a project means trusting its choices.  Changes made in the workspace take effect once someone brings them back into the project.
+The project only suggests `commands`.  `scoter-host` runs only the commands you accepted with `scoter verify`, each with the absolute program the review resolved, and a change to the project's suggestion needs a new review.  The setup's `verification: host-commands` checks refuse shells, interpreters, command runners and the like, and warn about programs that read configuration from their working directory (BRIDGE-1); programs inside the project are refused, and programs other users can write to are refused or flagged.
 
-**Red team:** get a widened `commands` entry merged back through the normal review path.
+What's left:
 
-**When changing this code:** the planned authorization step belongs before `scoter-host` reads the configuration.
+* **A command no check covers gets only a note.**  The checks are a deny-list; a dangerous program that isn't on it, or a dangerous use of one that's allowed, depends on the reviewer.
+* **Overrides.**  A reviewer can set a policy refusal aside for a command with `$override`.  It's recorded and shown at the next review, but it's still one keystroke from a refused command to an accepted one.
+* **Accepting without looking.**  `scoter verify --with-exemption` accepts new commands that no check refuses, unseen ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed)).
+* **Checks added later don't apply** to projects already accepted, except for the host command checks, which are recorded with each acceptance ([VER-6](verification-attack-vectors.md#ver-6-setup-changes-that-dont-ask-for-a-new-review)).
+
+**Red team:** get a widened `commands` entry accepted: through a program the checks don't name, through an `any` placeholder after an option that runs code, or through `--with-exemption`.
+
+**When changing this code:** `scoter-host` must keep reading commands only from the accepted settings.  New checks belong in the setup's `host-commands` lists, so they're recorded with each acceptance.
 
 ### BRIDGE-3: Path checks race the host program
 
@@ -108,6 +119,8 @@ Commands start with an empty environment, and only variables the configuration a
 Container paths must be inside the workspace mount.  They're mapped to the host's workspace directory and resolved following symlinks, and the result must still be inside the workspace and match the entry's `within` rule.  Missing paths are allowed only when their directory exists and they aren't dangling symlinks.
 
 **Red team:** try relative paths, `..`, repeated separators, symlink chains, dangling symlinks, hard links to files outside the workspace, very long paths and non-UTF-8 names.
+
+With a `workspace-subdir` ([FILE-10](files-attack-vectors.md#file-10-the-workspace-sub-path-through-container-symlinks)), the workspace mount holds the container's home directory as well as the project's clone, and `within: workspace`, `allowed` patterns and `cwd: allowed-workspace-dirs` are all relative to the mount, not the clone.  A configuration written when the clone was the whole workspace now also lets host commands work on the container's home directory.
 
 **When changing this code:** every path a host process receives must come from this resolution.  Add tests for any new `within` mode.
 
@@ -179,11 +192,35 @@ The bridge supports Windows hosts, where path rules differ: case-insensitive nam
 
 **When changing this code:** run the path tests on Windows as well as Linux.
 
+### BRIDGE-13: An accepted program can change after the review
+
+**Severity:** Medium.  **Status:** Open.
+**Where:** `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs); `AcceptedSettings::check` in [`accepted.rs`](../../host/src/config/accepted.rs); the program checks in [`checks.py`](../../scripts/surf_scoter_lib/checks.py).
+
+The review checks each program's location, owner and permissions, and the acceptance records its absolute path.  At each run, the generator checks only that the path is still an executable file outside the project, and `scoter-host` checks only that it's absolute and still an executable file, following symlinks.  Nothing records the program's contents.  So anything that can replace the program, or change a symlink along its path, between the review and a request (up to the acceptance's 30 days) gets its replacement run: a package upgrade, a version manager switching what a link points to, or a host command whose accepted arguments let it write there.
+
+The workspace also isn't counted as part of the project when the review and the generator check where a program lives, so a program found through a `PATH` entry inside the workspace isn't refused.  The project can't name such a path itself (`program` is a bare name), so this needs your own `PATH` to reach into the workspace.
+
+**Red team:** accept a command, then change the program or a link on its path, and check whether the request is refused.  Put a workspace directory on the host's `PATH` and accept a command found there.
+
+**When changing this code:** record each program's hash, owner and mode at the review, and check them again before running it, opening the file once and running what was checked where the platform allows.  Count the workspace as part of the project in every location check.
+
+### BRIDGE-14: The bridge trusts the universal configuration file's command list
+
+**Severity:** Low (defense in depth).  **Status:** Open.
+**Where:** `load_universal` in [`config.rs`](../../host/src/config.rs); `check_for_run` in [`accepted.rs`](../../host/src/config/accepted.rs).
+
+`scoter-host` reads its commands from the universal configuration file's `host-brokered` list.  It checks the file's owner and mode, and that its copy of the accepted settings matches the store, but not that `host-brokered` is the accepted settings' commands.  When the file has no accepted settings at all, it skips the store check and still installs `host-brokered`.  Only something that can already write your private files could use either, but either one turns a change to one file into commands run on the host without any acceptance.
+
+**Red team:** edit a running environment's `suc.json` (as you) to add a command to `host-brokered`, or to remove `accepted-settings`, restart `scoter-host`, and see whether it runs the command.
+
+**When changing this code:** build the command list from the accepted settings in `scoter-host` itself, or refuse a file whose `host-brokered` differs from them, and refuse a file without accepted settings.
+
 
 ## Sensitive code
 
 * [`host/src/host/analyze.rs`](../../host/src/host/analyze.rs): request matching and path resolution.
 * [`host/src/host/exec.rs`](../../host/src/host/exec.rs): process start, environment, input, output and signals.
 * [`host/src/host.rs`](../../host/src/host.rs) and [`host/src/host/container.rs`](../../host/src/host/container.rs): the broker connection.
-* [`host/src/config/`](../../host/src/config/): the `commands`, `env` and pattern parsing.
+* [`host/src/config/`](../../host/src/config/): the `commands`, `env` and pattern parsing, and the accepted settings checks (`accepted.rs`).
 * [`containers/dev-env/src/comm/`](../../containers/dev-env/src/comm.rs): the wire protocol.

@@ -18,6 +18,7 @@ The [system configuration file](../system-config-file.md) describes the loading 
 
 * Settings load from the installation's `setup.yaml` (lowest priority), then your own setup file (highest).  A higher priority file replaces individual keys.
 * The tools **never** read setup files from a project.  `$SURF_SCOTER_HOME`, your setup file, and a `distribution-dir` taken from a setup file must all lie outside the project, its workspace, and the repository holding it; otherwise the tools stop without making a configuration.  This matters because a project can set `SURF_SCOTER_HOME` itself, through tools such as direnv that run when you enter its directory.
+* `scoter` reports when your setup weakens one of the *guarded* settings, such as removing a default check or lengthening the exemption limit, and `scoter run` refuses to start when a setup program resolves into the project or through a relative path.  See [guarded settings](../system-config-file.md#guarded-settings).
 * A setup file can run any program on your computer: every `runs` entry is a command line, and every `programs` entry picks an executable.  It also decides what a project may do, such as the project files directory and where dev containers may come from.  Treat a setup file like a shell script.
 
 
@@ -37,6 +38,11 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `dev-env: paths: docker-compose`, `firewall-router`, `network-gateway` | Which compose file and network containers to use | Replacing these replaces the network.  Recheck every property. |
 | `dev-env: values: *-image` | Image names for the containers | An image from a registry rather than a local build means trusting whoever publishes it. |
 | `dev-env: values: mem-limit`, `cpus`, `pids-limit`, `logging-max-size` | Dev container resource limits | Removing them lets the container exhaust your host. |
+| `verification: host-commands`, `project-files`, `egress-hosts`, `value-lists: egress-refused-wildcards`, `path-lists: public-suffix-lists` | The checks the review runs on a project's settings | Weakening them weakens every later review.  Only the `host-commands` checks are recorded with an acceptance; a change to the others doesn't ask for a new review of projects already accepted ([VER-6](verification-attack-vectors.md#ver-6-setup-changes-that-dont-ask-for-a-new-review)). |
+| `verification: paths: store` | Where your acceptances are kept | Keep it outside every project and workspace, private to you, and never mounted into a container ([VER-8](verification-attack-vectors.md#ver-8-the-store-itself)). |
+| `verification: values: expiry-days`, `exempt-days`, `max-exempt-days` | How long an acceptance and an exemption last | Longer values let an acceptance outlive the reasons it was given ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed)). |
+| `verification: values: max-file-size`, `max-snapshot-size` | Limits on what a snapshot keeps | A project over the limits can't be accepted; raising them costs disk space, not safety. |
+| `scoter: path-lists: dev-containers-search`, `verification: path-lists: verified-containers` | Where containers are found by name, and which of those are reviewed | A container found here outside the project is trusted, not reviewed.  Never add a directory a project controls ([VER-9](verification-attack-vectors.md#ver-9-trusted-containers)). |
 
 
 ## The compose file

@@ -2,7 +2,7 @@
 
 v1 changes how a project describes its development environment, and how much of that description the tools trust.  Today the tools act on the project's [configuration file](../project-configuration-file.md) directly.  In v1, the project file only *suggests* settings.  The developer reviews them and accepts, edits or denies them.  The tools then run only from the developer's accepted copy.
 
-This page collects the design, the reasons behind it, and the weak points to keep in mind while building it.  It builds on the [configuration weaknesses](../security/configuration-weaknesses.md) analysis, and addresses several vectors in the [file access](../security/files-attack-vectors.md) and [host bridge](../security/host-bridge-attack-vectors.md) attack vector lists.
+This page collects the design, the reasons behind it, and the weak points to keep in mind while building it.  It builds on the configuration weaknesses analysis, which is now the [project verification](../security/verification.md) page, and addresses several vectors in the [file access](../security/files-attack-vectors.md) and [host bridge](../security/host-bridge-attack-vectors.md) attack vector lists.
 
 
 ## Summary of the changes
@@ -245,7 +245,7 @@ If any of these is still read live from the project, it's a way around the revie
 
 ### Identity, expiry and revoking
 
-The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second clone of the same repository, or a moved directory, gets a new review.  The expiry, temporary exemption and revoking ideas from [configuration weaknesses](../security/configuration-weaknesses.md#authorization-for-a-project) still apply, and expiry matters more here: the permissions of the cloud services a project uses can change while an old acceptance stays the same.
+The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second clone of the same repository, or a moved directory, gets a new review.  The expiry, temporary exemption and revoking ideas from the configuration weaknesses analysis (now [project verification](../security/verification.md#expiry-revoking-and-cleaning-up)) still apply, and expiry matters more here: the permissions of the cloud services a project uses can change while an old acceptance stays the same.
 
 
 ## Documents to update
@@ -254,7 +254,7 @@ The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second 
 * [Network](../security/network.md): the allowed domain list becomes the accepted egress rules, translated per gateway.
 * [File access attack vectors](../security/files-attack-vectors.md): FILE-5 (one directory to review), FILE-8 (the whole repository is exposed), FILE-9 (the workspace location).
 * [Host bridge attack vectors](../security/host-bridge-attack-vectors.md): BRIDGE-11 (closed by absolute paths), and shims as a new vector.
-* [Configuration weaknesses](../security/configuration-weaknesses.md): the accepted file replaces fingerprint-only authorization.
+* [Configuration weaknesses](../security/verification.md) (now project verification): the accepted file replaces fingerprint-only authorization.
 * [The developer environment Dockerfile](../project-dockerfile.md): `parents: dir` limited to `.surf-scoter.d` and the installation directory.
 * [The system configuration file](../system-config-file.md): the new `project-files-dir`, `project-file-name` and `dev-containers-search` settings.
 
@@ -1459,7 +1459,7 @@ It covers blanket acceptances too (moved from step 18).  The kind exists in the 
 
 ### Draft: what an exemption is
 
-The [configuration weaknesses](../security/configuration-weaknesses.md#authorization-for-a-project) design: "for a time period disable the checksum analysis.  This can be useful when the user actively works on making a running environment."  That's someone editing their project's Dockerfile, running it, editing again: each edit is a change to the files, and asks for a review.
+The original configuration weaknesses design (now [project verification](../security/verification.md#exemptions)): "for a time period disable the checksum analysis.  This can be useful when the user actively works on making a running environment."  That's someone editing their project's Dockerfile, running it, editing again: each edit is a change to the files, and asks for a review.
 
 So an exemption is a window, on one project, in which a run with changed files doesn't stop for a review.  It never builds from the live files (step 16): instead each run carries the user's last acceptance forward over the changed files, as a match on meaning does (step 5).  The new acceptance keeps the last one's accepted settings (`accepted.json`: the host commands, egress rules and container choices) and its expiry; only the files it's for are the current ones.  It's marked as made by the exemption, so the next review compares with the last acceptance the user reviewed, not one the exemption made.
 

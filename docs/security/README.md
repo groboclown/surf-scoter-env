@@ -11,6 +11,7 @@ What they are and how Surf Scoter aims to isolate or protect them.
 * [File access](files.md)
 * [The Host Bridge](host-bridge.md)
 * [User and default settings](settings.md)
+* [Project verification](verification.md)
 
 ## Security Analysis
 
@@ -21,5 +22,5 @@ Investigations into what the systems do and where potential weak points exist.
     * [The development container](dev-container-attack-vectors.md)
     * [File access](files-attack-vectors.md)
     * [The Host Bridge](host-bridge-attack-vectors.md)
+    * [Project verification](verification-attack-vectors.md)
 * [Red Team Events](red-team.md)
-* [Configuration weaknesses](configuration-weaknesses.md)

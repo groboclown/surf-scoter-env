@@ -11,7 +11,7 @@ This document describes which files the container can see, how they get there, a
 
 | Host directory | Contents | In the dev container | Who writes it |
 | --- | --- | --- | --- |
-| `workspace` | A clone of your project | Read-write, at `mounts: workspace` (default `/workspace`) | The container |
+| `workspace` | A clone of your project (in the project file's `container: workspace-subdir`, when it sets one), and the container's home directory | Read-write, at `mounts: workspace` (default `/workspace`) | The container |
 | `setup` | SSH host key, `authorized_keys`, bridge command list | Read-only, at `mounts: setup` (default `/opt/surf-scoter-setup`) | `scoter` on the host |
 | `resources` | Compose file, compose `.env`, the universal configuration file | Not mounted | `scoter` on the host |
 
@@ -31,7 +31,11 @@ The dev container runs as the image's user (the unprivileged `ubuntu` in the bas
 
 ### The setup directory
 
-The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization or the list of bridge commands.  The gateway's allowed hosts come from the egress rules you accepted, read from your *project directory* (not the workspace), so a change the container makes to its own copy of the project file has no effect until you bring that change back into your project, and review it.
+The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization or the list of bridge commands.  The gateway's allowed hosts and the bridge commands come from the settings you accepted, kept in your verified store (see [project verification](verification.md)), so a change the container makes to its own copy of the project file has no effect until you bring that change back into your project, and review it again.
+
+### The home directory
+
+The default dev container keeps its home directory in the workspace: at start-up it copies the image's home into `/workspace`, keeping anything already there, and links `$HOME` to it.  IDE settings, build caches and shell history then survive between runs, but so does anything code in the container leaves there, and it all sits on your host disk, beside the clone.  See [DEV-16](dev-container-attack-vectors.md#dev-16-the-home-directory-persists-in-the-workspace).
 
 
 ## Bringing changes back
