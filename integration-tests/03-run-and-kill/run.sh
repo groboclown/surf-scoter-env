@@ -110,7 +110,8 @@ for name in "${host}" "${host}-fr" "${host}-ng"; do
 done
 [ -z "$( running_host )" ] || it_fail "the environment is still listed"
 [ ! -e "${HOME}/.config/surf-scoter.d/state/environments/${host}" ] || it_fail "its state directory is still there"
-it_expect "${IT_SANDBOX}/kill.log" "The workspace is kept"
+it_expect "${IT_SANDBOX}/kill.log" "The project clone is kept"
+"${tool}" volume inspect "${host}-store" > /dev/null 2>&1 || it_fail "the persistent store went with the kill"
 
 it_say "without a terminal, its ssh entry is kept (config-cleanup: ask), and cleanup lists it"
 it_expect "${IT_SANDBOX}/kill.log" "Kept the ssh entries for ${host}"

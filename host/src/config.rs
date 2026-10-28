@@ -211,9 +211,9 @@ pub struct LoadOptions {
     /// `current-branch` gave it; `scoter:project-branch` is it made safe as a
     /// path part.
     pub project_branch: Option<String>,
-    /// The dev container's mounts: the project workspace (`--dev-container-workspace-dir`)
+    /// The host directories mounted in the dev container: the project's clone (`--project-clone-dir`)
     /// and the settings directory (`--dev-container-settings-dir`).
-    pub dev_container_workspace_dir: Option<PathBuf>,
+    pub project_clone_dir: Option<PathBuf>,
     pub dev_container_settings_dir: Option<PathBuf>,
     /// Where a distribution installed Surf Scoter, if it did.
     pub distribution_dir: Option<PathBuf>,
@@ -305,6 +305,51 @@ pub struct FullConfig {
     pub previous_review: Option<Review>,
 }
 
+impl FullConfig {
+    /// The dev container's mounts, with the project's `container: mounts:
+    /// project-clone` in place of the container's own; `None` without a dev
+    /// container.
+    pub fn mounts(&self) -> Option<dev_env::Mounts> {
+        let dev = self.dev_container.as_ref()?;
+        Some(effective_mounts(self.project.as_ref(), &dev.env.mounts))
+    }
+}
+
+/// `mounts`, with the project's `container: mounts: project-clone` in place
+/// of the container's own.
+fn effective_mounts(project: Option<&ProjectConfig>, mounts: &dev_env::Mounts) -> dev_env::Mounts {
+    let mut mounts = mounts.clone();
+    if let Some(clone) = project.and_then(|p| p.project_clone_mount.as_ref()) {
+        mounts.project_clone = clone.clone();
+    }
+    mounts
+}
+
+/// The problem with the project's `container: mounts: project-clone`, if it
+/// lands on, or in, another of the dev container's mounts.
+fn project_mount_problems(
+    project: Option<&ProjectConfig>,
+    dev: Option<&DevContainer>,
+) -> Vec<ConfigError> {
+    let (Some(project), Some(dev)) = (project, dev) else {
+        return Vec::new();
+    };
+    if project.project_clone_mount.is_none() {
+        return Vec::new();
+    }
+    let mounts = effective_mounts(Some(project), &dev.env.mounts);
+    dev_env::mounts_overlap(&mounts.named())
+        .map(|problem| {
+            ConfigError::new(
+                Some(&project.path),
+                "container.mounts.project-clone",
+                format!("{problem}, in {}", dev.env_file().display()),
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
 /// Read the whole configuration, using the process environment to find the
 /// user's setup file and executables.
 pub fn load_all(options: &LoadOptions) -> Result<FullConfig, ConfigErrors> {
@@ -392,7 +437,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         project_config: path_of(&active.project_config),
         vcs_root: path_of(&active.vcs_root),
         project_branch: active.project_branch.as_deref(),
-        dev_container_workspace_dir: path_of(&active.dev_container_workspace_dir),
+        project_clone_dir: path_of(&active.project_clone_dir),
         dev_container_settings_dir: path_of(&active.dev_container_settings_dir),
         dev_container: universal.dev_container.is_some(),
         no_search: true,
@@ -409,9 +454,6 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         .ok();
     if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
         system.set_dev_container_path(&dev.dir);
-    }
-    if let (Some(system), Some(project)) = (&mut system, &project) {
-        system.set_dev_container_project_dir(project.workspace_subdir.as_deref());
     }
     let mut project = project;
     match (
@@ -446,6 +488,10 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             .map_err(|e| errors.extend(e))
             .ok()
     });
+    errors.extend(project_mount_problems(
+        project.as_ref(),
+        dev_container.as_ref(),
+    ));
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
@@ -494,9 +540,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
                 .map(PathBuf::from)
         })
     };
-    let dev_container_workspace_dir = carried(&options.dev_container_workspace_dir, |a| {
-        &a.dev_container_workspace_dir
-    });
+    let project_clone_dir = carried(&options.project_clone_dir, |a| &a.project_clone_dir);
     // Given, or carried over with the project it was found for.
     let vcs_root = match &options.vcs_root {
         Some(root) => Some(tidy_dir(root)),
@@ -553,7 +597,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         project_config: None,
         find_project_config: true,
         vcs_root: vcs_root.as_deref(),
-        dev_container_workspace_dir: dev_container_workspace_dir.as_deref(),
+        project_clone_dir: project_clone_dir.as_deref(),
         dev_container_settings_dir: dev_container_settings_dir.as_deref(),
         // A project always has one.
         dev_container: project_dir.is_some(),
@@ -605,9 +649,6 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     };
     if let (Some(system), Some(dev)) = (&mut system, &dev_container) {
         system.set_dev_container_path(&dev.dir);
-    }
-    if let (Some(system), Some(project)) = (&mut system, &project) {
-        system.set_dev_container_project_dir(project.workspace_subdir.as_deref());
     }
     // After the dev container and the project directory, as `env` values
     // can refer to them.
@@ -694,6 +735,10 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             Err(e) => errors.extend(e),
         }
     }
+    errors.extend(project_mount_problems(
+        project.as_ref(),
+        dev_container.as_ref(),
+    ));
     match system {
         Some(system) if errors.is_empty() => Ok(FullConfig {
             system,
@@ -949,7 +994,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
+    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  project-clone: /workspace\n  persistent-store: /store\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
 
     fn dev_container(dir: &TempDir, at: &str) {
         dir.write(&format!("{at}/Dockerfile"), "FROM scratch\n");
@@ -1483,14 +1528,14 @@ mod tests {
         let dir = TempDir::new();
         let get = |config: &FullConfig, key| config.system.get_path(system::SCOTER_SECTION, key);
         let first = LoadOptions {
-            dev_container_workspace_dir: Some(dir.path().join("ws")),
+            project_clone_dir: Some(dir.path().join("ws")),
             // Made absolute; it needn't exist yet.
             dev_container_settings_dir: Some(PathBuf::from("relative/settings")),
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&first, env(&dir)).unwrap();
         assert_eq!(
-            get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
+            get(&config, system::PROJECT_CLONE_DIR),
             Some(dir.path().join("ws"))
         );
         let settings = absolute(Path::new("relative/settings"));
@@ -1509,12 +1554,12 @@ mod tests {
         let again = LoadOptions {
             universal: Some(first_file),
             no_setup_search: true,
-            dev_container_workspace_dir: Some(dir.path().join("other")),
+            project_clone_dir: Some(dir.path().join("other")),
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
         assert_eq!(
-            get(&config, system::DEV_CONTAINER_WORKSPACE_DIR),
+            get(&config, system::PROJECT_CLONE_DIR),
             Some(dir.path().join("other"))
         );
         assert_eq!(
@@ -1524,7 +1569,7 @@ mod tests {
 
         // Without them, they're not set.
         let config = load_all_with_env(&LoadOptions::default(), env(&dir)).unwrap();
-        assert_eq!(get(&config, system::DEV_CONTAINER_WORKSPACE_DIR), None);
+        assert_eq!(get(&config, system::PROJECT_CLONE_DIR), None);
     }
 
     #[test]

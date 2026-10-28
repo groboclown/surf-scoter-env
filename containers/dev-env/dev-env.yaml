@@ -3,9 +3,12 @@
 # The user the container runs as, and that sshd accepts.
 user: ubuntu
 mounts:
-    # Where the workspace is mounted.
-    # The project directory must be a sub-directory under this.
-    workspace: /workspace
+    # Where the project's clone is mounted, read-write.  A project file can
+    # put it elsewhere (`container: mounts: project-clone`).
+    project-clone: /project
+    # Where the container's persistent store, a volume kept between runs,
+    # is mounted.  Host commands can't reach it.
+    persistent-store: /persistent-store
     # Where the read-only setup directory is mounted.
     setup: /opt/surf-scoter-setup
 # The broker that scoter-host connects to.

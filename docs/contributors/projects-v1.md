@@ -87,7 +87,7 @@ The default Git setup clones with `--depth 4`.
 * Git ignores `--depth` for local clones that take the local shortcut.  With `--no-local` it should take effect.  Add a test that checks for `.git/shallow` in a new workspace.
 * `--depth` implies `--single-branch`.  Developers who need other branches will be surprised, so make the depth and the branch choice user settings, not project settings.
 * Bringing changes back still works: fetching from the shallow workspace into the full project succeeds, because the project already has the base commits.  A rebase or merge in the workspace that reaches past the depth will fail.
-* [FILE-1](../security/files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace) still applies.  Refresh a shallow workspace by pushing from the project into it, never by running `git fetch` inside it.
+* [FILE-1](../security/files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone) still applies.  Refresh a shallow workspace by pushing from the project into it, never by running `git fetch` inside it.
 
 Mercurial and other VCS implementations follow the [VCS checklist](../security/files.md#adding-a-vcs-implementation), and need their own answer for root detection and history depth.
 
@@ -210,7 +210,7 @@ Values from the project still reach the rendered file, so they need care too:
 
 * Create the file with `mkstemp` in a directory only the developer can read.  Open it without following symlinks, and read it once.
 * Use `VISUAL`, then `EDITOR`.
-* Start the editor in a neutral directory, such as the temporary directory, not the project.  Editors read project-local configuration (vim modelines and `.exrc`, VS Code workspace settings), which is [FILE-4](../security/files-attack-vectors.md#file-4-host-tools-acting-on-the-workspace) on the host.
+* Start the editor in a neutral directory, such as the temporary directory, not the project.  Editors read project-local configuration (vim modelines and `.exrc`, VS Code workspace settings), which is [FILE-4](../security/files-attack-vectors.md#file-4-host-tools-acting-on-the-project-clone) on the host.
 * After the editor exits, run steps 1 to 6 again on the edited file, then ask again, the way `visudo` does.  Paths in the edited file now come from the developer, and get the same path checks as resolved ones.  Never store a file that fails validation.
 
 ### Defaults

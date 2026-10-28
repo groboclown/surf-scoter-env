@@ -89,7 +89,7 @@ class CheckProgramsTest(unittest.TestCase):
             "vcs-root": str(self.dir / "repo"),
             "project-dir": str(self.dir / "repo/client"),
             "project-config": str(self.dir / "repo/client/.surf-scoter.d/project.yaml"),
-            "dev-container-workspace-dir": str(self.dir / "ws"),
+            "project-clone-dir": str(self.dir / "ws"),
         }
         config = _config(
             {"a": "${x:a}", "b": "${x:b}", "c": "${x:c}", "d": "${x:d}", "e": "/usr/bin/ok"},
@@ -106,7 +106,7 @@ class CheckProgramsTest(unittest.TestCase):
         self.assertEqual(self.check(config), [
             "t.programs.a: is inside the project (the project directory)",
             "t.programs.b: is inside the project (the repository)",
-            "t.programs.c: is inside the project (the workspace)",
+            "t.programs.c: is inside the project (the project clone)",
             "t.programs.d: is inside the project (the project directory)",
         ])
 

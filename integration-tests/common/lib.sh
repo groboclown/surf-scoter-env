@@ -70,7 +70,7 @@ it_init() {
     mkdir -p "${IT_DIST}/bin"
     ln -s "${IT_REPO}/host/target/debug/gen-scoter-uc" "${IT_DIST}/bin/gen-scoter-uc"
     ln -s "${IT_REPO}/host/target/debug/scoter-host" "${IT_DIST}/bin/scoter-host"
-    for script in "${IT_REPO}/scripts/"*.py; do
+    for script in "${IT_REPO}/scripts/"*.py "${IT_REPO}/scripts/"*.txt; do
         ln -s "${script}" "${IT_DIST}/bin/"
     done
     ln -s "${IT_REPO}/scripts/surf_scoter_lib" "${IT_DIST}/bin/surf_scoter_lib"

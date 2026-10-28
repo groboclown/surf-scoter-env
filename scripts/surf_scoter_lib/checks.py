@@ -128,7 +128,7 @@ def _check_commands(check: jdata.DictJsonData) -> dict[str, str | None]:
 def _locations(config: UserConfig) -> dict[str, Path]:
     """The project's places, by name, with symlinks resolved."""
     ret: dict[str, Path] = {}
-    for name in ("project-dir", "vcs-root", "dev-container-workspace-dir"):
+    for name in ("project-dir", "vcs-root", "project-clone-dir"):
         location = config.active_location(name)
         if location is not None:
             ret[f"scoter:{name}"] = Path(os.path.realpath(location))

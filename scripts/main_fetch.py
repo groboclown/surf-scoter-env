@@ -15,7 +15,7 @@ def run_fetch(config: UserConfig, *, branch: str | None) -> int:
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     config, argv, parser = gen_parser(argv, (
-        "Fetch changes committed by the dev container to its local workspace."
+        "Fetch changes committed by the dev container to the project's clone."
     ))
     if not config:
         return BAD_EXECUTION_ARGS_CODE
@@ -24,10 +24,10 @@ def main(argv: Sequence[str]) -> int:
         "-b",
         "--branch",
         action="store",
-        default="workspace-fetch",
+        default="project-fetch",
         dest="branch",
         help=(
-            "The branch name to fetch the workspace changes into."
+            "The branch name to fetch the project clone's changes into."
         ),
     )
 

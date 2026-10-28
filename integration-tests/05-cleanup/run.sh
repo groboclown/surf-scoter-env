@@ -1,10 +1,11 @@
 #!/bin/sh
 #SPDX:MIT
 # `scoter cleanup`: accept two projects, delete one, and leave a run's files,
-# a workspace and an image behind; check that the cleanup lists them, removes
-# nothing until it's told to, and then removes only what nothing uses.
-# Uses 02's sample project.  No containers: the container tool is a
-# stand-in that lists one leftover image, and records what it's asked.
+# a project state directory, a persistent store and an image behind; check
+# that the cleanup lists them, removes nothing until it's told to, and then
+# removes only what nothing uses.  Uses 02's sample project.  No containers:
+# the container tool is a stand-in that lists one leftover image and volume,
+# and records what it's asked.
 . "$( dirname "$0" )/../common/lib.sh"
 
 it_init
@@ -15,6 +16,9 @@ cat > "${IT_SANDBOX}/tools/container-tool" <<STUB
 echo "\$*" >> '${log}'
 if [ "\$1 \$2" = "image ls" ]; then
     echo 'local-surf-scoter/scoter-ubuntu-20001-z:latest'
+fi
+if [ "\$1 \$2" = "volume ls" ]; then
+    echo 'scoter-old-project-0123456789ab-store'
 fi
 exit 0
 STUB
@@ -29,15 +33,16 @@ IT_PROJECT="${IT_SANDBOX}/moved"
 it_accept
 kept_id=$( scoter list-accepted -q | grep -v "${gone_id}" )
 
-it_say "leaving a run's files and a workspace behind"
-mkdir -p -m 700 "${state}/environments/scoter-ubuntu-20001-q" "${state}/workspaces/old-project-0123456789ab/workspace"
+it_say "leaving a run's files and a project's state behind"
+mkdir -p -m 700 "${state}/environments/scoter-ubuntu-20001-q" "${state}/projects/old-project-0123456789ab/project-clone"
 
 it_say "a dry run lists them, and removes nothing"
-scoter cleanup --dry-run --workspaces --images > "${IT_SANDBOX}/dry.log" 2>&1 \
+scoter cleanup --dry-run --project-state --persistent-stores --images > "${IT_SANDBOX}/dry.log" 2>&1 \
     || { cat "${IT_SANDBOX}/dry.log" >&2; it_fail "the dry run failed"; }
 it_expect "${IT_SANDBOX}/dry.log" "${state}/environments/scoter-ubuntu-20001-q"
 it_expect "${IT_SANDBOX}/dry.log" "Accepted settings of projects whose directory is gone:"
-it_expect "${IT_SANDBOX}/dry.log" "${state}/workspaces/old-project-0123456789ab"
+it_expect "${IT_SANDBOX}/dry.log" "${state}/projects/old-project-0123456789ab"
+it_expect "${IT_SANDBOX}/dry.log" "scoter-old-project-0123456789ab-store"
 it_expect "${IT_SANDBOX}/dry.log" "local-surf-scoter/scoter-ubuntu-20001-z:latest"
 it_expect "${IT_SANDBOX}/dry.log" "Nothing was removed (--dry-run)."
 [ -d "${state}/environments/scoter-ubuntu-20001-q" ] || it_fail "the dry run removed something"
@@ -52,18 +57,20 @@ printf 'n\n' | it_tty "'${IT_DIST}/scoter' cleanup" > "${IT_SANDBOX}/no.log" 2>&
 it_expect "${IT_SANDBOX}/no.log" "Remove these?"
 it_expect "${IT_SANDBOX}/no.log" "Nothing was removed."
 
-it_say "--force removes it, but not the workspace or image unless asked"
+it_say "--force removes it, but not the project state, store or image unless asked"
 scoter cleanup --force > "${IT_SANDBOX}/force.log" 2>&1 \
     || { cat "${IT_SANDBOX}/force.log" >&2; it_fail "the cleanup failed"; }
 [ ! -e "${state}/environments/scoter-ubuntu-20001-q" ] || it_fail "the run's files are still there"
 [ "$( scoter list-accepted -q )" = "${kept_id}" ] || it_fail "expected only the kept project's acceptance"
-[ -d "${state}/workspaces/old-project-0123456789ab" ] || it_fail "the workspace went without --workspaces"
+[ -d "${state}/projects/old-project-0123456789ab" ] || it_fail "the project state went without --project-state"
 it_expect_not "${log}" "image rm"
+it_expect_not "${log}" "volume rm"
 
-it_say "--workspaces and --images"
-scoter cleanup --force --workspaces --images > "${IT_SANDBOX}/all.log" 2>&1 \
+it_say "--project-state, --persistent-stores and --images"
+scoter cleanup --force --project-state --persistent-stores --images > "${IT_SANDBOX}/all.log" 2>&1 \
     || { cat "${IT_SANDBOX}/all.log" >&2; it_fail "the cleanup failed"; }
-[ ! -e "${state}/workspaces/old-project-0123456789ab" ] || it_fail "the workspace is still there"
+[ ! -e "${state}/projects/old-project-0123456789ab" ] || it_fail "the project state is still there"
+it_expect "${log}" "volume rm scoter-old-project-0123456789ab-store"
 it_expect "${log}" "image rm local-surf-scoter/scoter-ubuntu-20001-z:latest"
 it_expect "${log}" "image prune -f"
 

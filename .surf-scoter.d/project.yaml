@@ -3,7 +3,6 @@ vcs: git
 
 container:
   dev-container-path: dev-env-container
-  workspace-subdir: proj
 
 # Where the dev container may connect, through the network gateway.
 egress:

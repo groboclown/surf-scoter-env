@@ -17,7 +17,7 @@ Verification is now the control that several other vectors depend on: [NET-2](ne
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Files in `.surf-scoter.d` (project file, Dockerfiles, `dev-env.yaml`, build files) | The project, including changes pulled from others or brought back from the workspace | `take` and `canonical_hash` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); [`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py) |
+| Files in `.surf-scoter.d` (project file, Dockerfiles, `dev-env.yaml`, build files) | The project, including changes pulled from others or brought back from the project clone | `take` and `canonical_hash` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); [`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py) |
 | File names and contents shown in the review | The project | [`review.py`](../../scripts/surf_scoter_lib/review.py); [`checks.py`](../../scripts/surf_scoter_lib/checks.py) |
 | The branch name | The project's VCS, and whoever names branches | `current_branch` in [`main_verify.py`](../../scripts/main_verify.py); [`exempt.py`](../../scripts/surf_scoter_lib/verified/exempt.py); [`records.py`](../../scripts/surf_scoter_lib/verified/records.py) |
 | The verified store | You, and any process running as you | [`store.py`](../../scripts/surf_scoter_lib/verified/store.py); [`accepted.rs`](../../host/src/config/accepted.rs) |
@@ -77,11 +77,11 @@ Every file named `dev-env.yaml`, wherever it is in a container directory, gets t
 **Severity:** High.  **Status:** Open.
 **Where:** the container listing in [`review.py`](../../scripts/surf_scoter_lib/review.py); [`checks.py`](../../scripts/surf_scoter_lib/checks.py).
 
-The review shows host commands, egress rules, and new Dockerfiles in full.  For any other new file, including `dev-env.yaml` and scripts the build runs, it shows only the name, size and a short hash.  Changed files get a diff of up to 200 lines, and those over 256 KiB or not UTF-8 get none.  The parsed dev container values aren't shown anywhere: `user`, `mounts`, `broker-bin`, the sshd settings, and the project file's `container: workspace-subdir` and `vcs`.
+The review shows host commands, egress rules, and new Dockerfiles in full.  For any other new file, including `dev-env.yaml` and scripts the build runs, it shows only the name, size and a short hash.  Changed files get a diff of up to 200 lines, and those over 256 KiB or not UTF-8 get none.  The parsed dev container values aren't shown anywhere: `user`, `mounts`, `broker-bin`, the sshd settings, and the project file's `container: mounts: project-clone` and `vcs`.
 
-Several of those values reach the host.  A mount point is written into the compose `.env` file ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)), and `workspace-subdir` decides where the host clones and deletes ([FILE-10](files-attack-vectors.md#file-10-the-workspace-sub-path-through-container-symlinks)).  A reviewer can accept them without seeing them.  The checks don't look at them either, nor at `RUN` lines, `# syntax=` directives, script contents, or the parent images' tags ([DEV-15](dev-container-attack-vectors.md#dev-15-the-project-chooses-shared-image-tags)).
+Several of those values reach the host.  The mount points are written into the compose `.env` file, and `user` into `~/.ssh/config`; the generator now refuses any that could inject anything ([DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration), [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)), but a reviewer can still accept them without seeing them: where the clone and the persistent store appear in the container, and as which user it runs.  The checks don't look at them either, nor at `RUN` lines, `# syntax=` directives, script contents, or the parent images' tags ([DEV-15](dev-container-attack-vectors.md#dev-15-the-project-chooses-shared-image-tags)).
 
-**Red team:** in a new project, put a crafted mount point or a multi-part `workspace-subdir` in the settings, and look for it in the review.
+**Red team:** in a new project, put an unusual (but valid) mount point or `user` in the settings, and look for it in the review.
 
 **When changing this code:** show the parsed dev container values and the project file's container settings in the review, as data, and validate them on the host as strictly as any other value written to a host file.
 
@@ -146,13 +146,13 @@ Separately, the generator's own check of the accepted settings compares the acce
 **Severity:** Medium.  **Status:** Mitigated on POSIX; Unverified on Windows.
 **Where:** [`store.py`](../../scripts/surf_scoter_lib/verified/store.py); `exclusive_lock` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); the accepted file checks in [`accepted.rs`](../../host/src/config/accepted.rs).
 
-The store holds what the run trusts.  Its directories are `0700` and its files `0600`; every read checks the owner and mode, opens without following symlinks, and limits the size.  Writes are atomic, under an operating system lock.  The generator refuses a store or state directory inside the project.  `scoter-host` checks the universal configuration file's owner and mode, and that its `accepted-settings` match the file in the store (see [BRIDGE-14](host-bridge-attack-vectors.md#bridge-14-the-bridge-trusts-the-universal-configuration-files-command-list) for what it doesn't check).  Nothing in the container can reach the store: it isn't mounted, and it isn't under the workspace.
+The store holds what the run trusts.  Its directories are `0700` and its files `0600`; every read checks the owner and mode, opens without following symlinks, and limits the size.  Writes are atomic, under an operating system lock.  The generator refuses a store or state directory inside the project.  `scoter-host` checks the universal configuration file's owner and mode, and that its `accepted-settings` match the file in the store (see [BRIDGE-14](host-bridge-attack-vectors.md#bridge-14-the-bridge-trusts-the-universal-configuration-files-command-list) for what it doesn't check).  Nothing in the container can reach the store: it isn't mounted, and it isn't under the project clone.
 
 On Windows there are no mode checks; the profile's access control lists are relied on.  `flock` on a network home directory may lock only against this computer.  Any program running as you can still change the store, as it can change anything else of yours.
 
 **Red team:** replace a store file with a symlink, loosen a file's mode, or change a blob's contents, and check that the run refuses.  On Windows, check what another account can reach.  Look for a host command whose accepted arguments let it write into `~/.config/surf-scoter.d`.
 
-**When changing this code:** keep every store read going through the checks, and never mount the store, or put it under the workspace.
+**When changing this code:** keep every store read going through the checks, and never mount the store, or put it under the project clone.
 
 ### VER-9: Trusted containers
 

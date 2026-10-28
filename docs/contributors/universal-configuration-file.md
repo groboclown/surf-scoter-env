@@ -8,7 +8,7 @@ The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, wi
 
 ```
 gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
-              [--dev-container-workspace-dir DIR]
+              [--project-clone-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
               [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
@@ -17,12 +17,12 @@ gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
 
 * `--vcs-root`: the root of the repository holding the project, which `scoter` finds from the setup's VCS sections (see [Version control roots](../system-config-file.md#version-control-roots)).  It must exist and hold the project directory.  It's the `scoter` location `vcs-root`; setup files can't be read from inside it.  Without a `--project-dir` this time, a `--universal` file's carries over.
 * `--project-branch`: the project's branch, which `scoter` gets from the VCS section's `runs: current-branch`.  It's made safe as one path part and set as the `scoter` value `project-branch` (see [the `scoter:` section](../system-config-file.md#the-scoter-section)).  A `--universal` file's carries over while the project directory stays the same.  The generator also works out the `scoter` value `project-id` from the project directory, the same as the verified store's name for it.
-* `--project-dir`: the project: the directory holding the project files directory, with the project file in it (`scoter: values: project-files-dir` and `project-file-name` in the setup say where).  It must exist, and the setup files' `./` locations start there.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir`, `vcs-root`, `dev-container-path` and `dev-container-project-dir`, `current-project-setup`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings them along.
-* `--dev-container-workspace-dir` and `--dev-container-settings-dir`: the directories mounted in the launched dev container: the project workspace (writable), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.  With a project, the workspace also gives `dev-container-project-dir`: where the project is cloned in it (see [the development container](../project-configuration-file.md#the-development-container)'s `workspace-subdir`).
+* `--project-dir`: the project: the directory holding the project files directory, with the project file in it (`scoter: values: project-files-dir` and `project-file-name` in the setup say where).  It must exist, and the setup files' `./` locations start there.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir`, `vcs-root` and `dev-container-path`, `current-project-setup`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings them along.
+* `--project-clone-dir` and `--dev-container-settings-dir`: the host directories mounted in the launched dev container: the project's clone (writable, at the dev container's `mounts: project-clone`, or the project file's `container: mounts: project-clone`), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.  The persistent store isn't among them: it's a container volume, not a host directory.
 * `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  It wins over a `scoter: paths: distribution-dir` in the setup files.  The other setup file is the user's, found through `$SURF_SCOTER_HOME` or `$XDG_CONFIG_HOME` (by default `~/.config`); no setup file is ever read from a project.
-* `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path`, `dev-container-project-dir` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
+* `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `project-clone-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `$XDG_CONFIG_HOME` or `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
-* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`verification: paths: store`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, the workspace and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.  When its `dev-container: use` names one of the user's containers, that container (found in `dev-containers-search` directories outside the project directory and the VCS root, as are its parents) becomes the dev container: `dev-container-path` and `dev-container` are its, not the project's.
+* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`verification: paths: store`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, its clone and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.  When its `dev-container: use` names one of the user's containers, that container (found in `dev-containers-search` directories outside the project directory and the VCS root, as are its parents) becomes the dev container: `dev-container-path` and `dev-container` are its, not the project's.
 * `--previous-review`: an earlier acceptance's review file, from the verified store, which a new review starts from (step 17 of [Projects in v1](projects-v1.md)).  It's parsed as `--review` is, but not checked against the run: it has usually expired.  The file's `previous-review` gets its `file`, and its `data` as the user left it, `$comment`s and `$override`s included.  Nothing is accepted from it.
 * `--review`: the user's review file for the project (step 12 of [Projects in v1](projects-v1.md)).  It's read as the project file is, its `project-dir` must be this run's, its `expires-at` in the future, and a `dev-container: use: {name: ...}` one of the user's containers.  The file's `review` gets its `result`, and, unless it's `reject`, the accepted settings it gives, in `accepted.json`'s shape.  Nothing runs from a review: `host-brokered` doesn't change.
 * `--output`: the file to write; without it, the JSON goes to stdout.
@@ -52,7 +52,7 @@ The second run doesn't read the setup files again, but it does expand their sett
 `scoter-host` takes only a universal configuration file and the dev container's name:
 
 ```shell
-gen-scoter-uc --project-dir DIR --dev-container-workspace-dir WORKSPACE --output universal.json
+gen-scoter-uc --project-dir DIR --project-clone-dir CLONE --output universal.json
 scoter-host --universal universal.json CONTAINER_NAME
 ```
 
@@ -75,7 +75,7 @@ So `scoter-host` runs with exactly the configuration its invoker made, even if a
 
 What isn't in the file comes from where `scoter-host` runs: `@NAME@` environment values are its environment variables (expanded once, when it starts), and the system settings it expands again find programs on its `PATH`, with `~` as its home directory.
 
-The file must have a project and a `dev-container-workspace-dir`.  The workspace is the `dev-container-workspace-dir` on the host, mounted at the `dev-container`'s `mounts: workspace` in the container.
+The file must have a project and a `project-clone-dir`.  The project clone is the `project-clone-dir` on the host, mounted at the `dev-container`'s `mounts: project-clone` in the container, or at the project file's `container: mounts: project-clone` when it gives one.  Host commands only ever see paths in it.
 
 (`gen-scoter-uc --universal`, on the other hand, reads the project file and `dev-env.yaml` again, so it can pick up their changes.)
 
@@ -100,14 +100,10 @@ The general layout:
         "project-branch": "feature-x",
         "dev-container-path": "/home/user/my-project/.surf-scoter.d/dev-env",
         // The host directories mounted in the dev container:
-        //   --dev-container-workspace-dir - the cloned project workspace
+        //   --project-clone-dir - the project's clone
         //   --dev-container-settings-dir - the read-only settings directory
-        "dev-container-workspace-dir": "/home/user/my-project",
-        "dev-container-settings-dir": "/home/user/.cache/surf-scoter/my-project",
-        // Where the project is cloned: the workspace directory with the project file's
-        // `container: workspace-subdir` added (the workspace directory itself without one).
-        // `null` without a project or a workspace directory.
-        "dev-container-project-dir": "/home/user/my-project/src/my-project",
+        "project-clone-dir": "/home/user/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone",
+        "dev-container-settings-dir": "/home/user/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/setup",
         // The user's setup file found, and the user directory it's in (`null` when the file
         // was found as `~/.config/surf-scoter.setup.yaml`).
         "user-setup-file": "/home/user/.config/surf-scoter.d/setup.yaml",
@@ -154,9 +150,7 @@ The general layout:
             "paths": {
                 "cwd": "/home/user/my-project",
                 "dev-container-path": "/home/user/my-project/.surf-scoter.d/dev-env",
-                "dev-container-project-dir": "/home/user/my-project/src/my-project",
-                "dev-container-settings-dir": "/home/user/.cache/surf-scoter/my-project",
-                "dev-container-workspace-dir": "/home/user/my-project",
+                "dev-container-settings-dir": "/home/user/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/setup",
                 "distribution-bin-dir": "/home/user/.local/share/surf-scoter/bin",
                 "distribution-dir": "/home/user/.local/share/surf-scoter",
                 "project-config": "/home/user/my-project/.surf-scoter.d/project.yaml",
@@ -326,10 +320,9 @@ The general layout:
     "current-project-setup": {
         // `vcs` is for the `scoter` script; the host tools don't use it.
         "vcs": "git",
-        // `container: workspace-subdir` is as written: relative to the workspace, with `/`
-        // between names.  `active-config-locations`' `dev-container-project-dir` is it
-        // worked out.
-        "container": {"dev-container-path": "./dev-env", "workspace-subdir": "src/my-project"},
+        // `container: mounts: project-clone`, when given, is where the clone is mounted in
+        // the container, in place of the dev container's own.
+        "container": {"dev-container-path": "./dev-env", "mounts": {"project-clone": "/src/my-project"}},
         "egress": [{"host": "registry.npmjs.org", "protocol": "tls"}],
         "commands": [
             // ...
@@ -340,7 +333,11 @@ The general layout:
     // exists, this section is instead 'null'.
     "dev-container": {
         "user": "ubuntu",
-        "mounts": {"workspace": "/workspace", "setup": "/opt/surf-scoter-setup"},
+        "mounts": {
+            "project-clone": "/project",
+            "persistent-store": "/persistent-store",
+            "setup": "/opt/surf-scoter-setup"
+        },
         "broker-bin": "/usr/local/bin/scoter-container",
         // 'null' when the container picks the port; then 'sshd-port-env' is set.
         "sshd-port": 22022,
@@ -404,10 +401,10 @@ The file is written as compact JSON, on one line, to keep it small; `jq .` (or a
 
 Notes on the values:
 
-* Paths are absolute.  `dev-container-path` has symbolic links resolved.  `dev-container-project-dir` is the host path; in the container, the project is at the `dev-container`'s `mounts: workspace` with the same `workspace-subdir` added.
+* Paths are absolute.  `dev-container-path` has symbolic links resolved.  `project-clone-dir` is the host path of the clone; in the container, it's at the `current-project-setup`'s `container: mounts: project-clone` when that's given, else at the `dev-container`'s `mounts: project-clone`.
 * `active-config-locations` and the `resolved` `scoter` section's `paths` of the same names always hold the same values (a `null` location is left out of `paths`).
 * Every `resolved` entry has `paths`, `programs`, `runs`, `path-lists`, `value-lists` and `values`, possibly empty.  A section's `host-commands` checks aren't in `resolved`: they're in `host-command-checks`, combined with every other section's.
-* Every `host-command-checks` check has all its fields, possibly empty.  A check a setup file removes (with `null`) isn't in `checks`; the `check-removed` notice says so.  `commands` and `command-map` give the program found, as a `programs` value does, and `gen-scoter-uc` refuses (with an error) a program in the project directory, the project files directory, the workspace or the repository, or a command two checks map to different programs.
+* Every `host-command-checks` check has all its fields, possibly empty.  A check a setup file removes (with `null`) isn't in `checks`; the `check-removed` notice says so.  `commands` and `command-map` give the program found, as a `programs` value does, and `gen-scoter-uc` refuses (with an error) a program in the project directory, the project files directory, the project's clone or the repository, or a command two checks map to different programs.
 * `setup` is for `gen-scoter-uc`; read the expanded values from `resolved`.
 * `paths` and `path-lists` entries have `~` and `./` already resolved, and are given whether or not they exist.
 * `values` keep their types: text, numbers, `true`/`false` and `null`.  Only text has its `${...}` references expanded.

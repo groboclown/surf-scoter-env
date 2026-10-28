@@ -32,7 +32,7 @@ The command forms come from the `commands` section of the [project configuration
 
 `scoter-host` reaches *into* the container through the container runtime's exec channel.  Nothing listens on the host, so there's no port for the container, or anything on your network, to connect to.  When `scoter-host` stops, the bridge is gone.
 
-`scoter-host` reads its settings only from the universal configuration file that `scoter run` generates from your project directory's configuration.  The container's copy of the project configuration, in the workspace, has no effect.
+`scoter-host` reads its settings only from the universal configuration file that `scoter run` generates from your project directory's configuration.  The container's copy of the project configuration, in the project clone, has no effect.
 
 ### Every request is untrusted
 
@@ -51,15 +51,16 @@ A request runs only if an entry in `commands` matches it ([`analyze.rs`](../../h
 
 The container never picks the program.  The host runs the entry's `program`, or the command name found on the *host's* `PATH`.
 
-### Files stay in the workspace
+### Files stay in the project clone
 
 Path arguments (`path` placeholders) are the main defense against using a host command to reach host files:
 
-* A container path must be inside the workspace mount.  It's mapped to the host's workspace directory and resolved, following symlinks, and the result must still be inside the workspace and match the entry's `within` rule.  A symlink in the workspace pointing at `~/.ssh` is refused.
+* A container path must be inside the project clone's mount.  It's mapped to the host's clone directory and resolved, following symlinks, and the result must still be inside the clone and match the entry's `within` rule.  A symlink in the clone pointing at `~/.ssh` is refused.
+* The container's persistent store is a container volume, not a host directory, so there's nothing for a path in it to map to: it's refused like any other path outside the clone.  A host command can never read or write the store's files.
 * The host process gets the resolved host path, not the container's text.
 * `within: temp` gives the process a fresh file in a private temporary directory instead, which is deleted when the process exits.  The container picks at most the file's name, and only with `keep-name`, after checks for separators, `.`, `..` and Windows device names.
 
-The working directory follows the same rules.  Without a `cwd` rule the process runs in a new, empty temporary directory.  With one, the client's directory is resolved the same way and must match an `allowed-workspace-dirs` pattern.
+The working directory follows the same rules.  Without a `cwd` rule the process runs in a new, empty temporary directory.  With one, the client's directory is resolved the same way and must match an `allowed-project-clone-dirs` pattern.
 
 ### An empty environment
 

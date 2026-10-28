@@ -10,7 +10,8 @@
 //!       tag: local-surf-scoter-env/dev-env:build
 //! user: ubuntu
 //! mounts:
-//!     workspace: /workspace
+//!     project-clone: /project
+//!     persistent-store: /persistent-store
 //!     setup: /setup
 //! broker-bin: /usr/local/bin/scoter-container
 //! sshd-port: 22022
@@ -32,6 +33,10 @@
 //! `parents`: the local parents to build, as `{dir, tag}`, in build order.
 //!
 //! Other keys are allowed, and kept in `DevEnv::raw`.
+//!
+//! The mount points, `user` and `broker-bin` are written into host files and
+//! command lines (the compose `.env` file, `~/.ssh/config`), so each is
+//! limited to characters that mean nothing there (DEV-1, DEV-2).
 //!
 //! The dev container, and every parent `dir`, `name` and `file`, must resolve
 //! (following symlinks) to somewhere inside the project files directory (the
@@ -96,12 +101,32 @@ pub struct DevEnv {
     pub raw: Value,
 }
 
-/// Where directories are mounted in the container.
+/// Where things are mounted in the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mounts {
-    pub workspace: String,
+    /// The clone of the project, read-write.
+    pub project_clone: String,
+    /// The container's own volume, kept between runs.
+    pub persistent_store: String,
+    /// The settings directory, read-only.
     pub setup: String,
 }
+
+impl Mounts {
+    /// Each mount's key and container path.
+    pub fn named(&self) -> [(&'static str, &str); 3] {
+        [
+            (PROJECT_CLONE, &self.project_clone),
+            (PERSISTENT_STORE, &self.persistent_store),
+            (SETUP, &self.setup),
+        ]
+    }
+}
+
+/// The `mounts` keys.
+pub const PROJECT_CLONE: &str = "project-clone";
+pub const PERSISTENT_STORE: &str = "persistent-store";
+pub const SETUP: &str = "setup";
 
 /// A local parent image: its container directory, and the tag to build it
 /// with (the tag its children's `FROM` names).
@@ -577,25 +602,52 @@ pub fn parse(value: Value, file: &Path) -> Result<DevEnv, Vec<ConfigError>> {
             format!("must already be resolved into `{PARENT_BUILDS}`"),
         ));
     }
-    let user = text_field(&map, "", "user", false, &mut problems);
-    let (workspace, setup) = match map.get("mounts") {
-        Some(Value::Mapping(mounts)) => (
-            text_field(mounts, "mounts", "workspace", true, &mut problems),
-            text_field(mounts, "mounts", "setup", true, &mut problems),
-        ),
+    let user =
+        text_field(&map, "", "user", false, &mut problems).and_then(
+            |user| match user_name_problem(&user) {
+                Some(problem) => {
+                    problems.push(("user".to_string(), problem));
+                    None
+                }
+                None => Some(user),
+            },
+        );
+    let mounts = match map.get("mounts") {
+        Some(Value::Mapping(mounts)) => {
+            let mut path = |key| container_path_field(mounts, "mounts", key, &mut problems);
+            match (path(PROJECT_CLONE), path(PERSISTENT_STORE), path(SETUP)) {
+                (Some(project_clone), Some(persistent_store), Some(setup)) => {
+                    let mounts = Mounts {
+                        project_clone,
+                        persistent_store,
+                        setup,
+                    };
+                    match mounts_overlap(&mounts.named()) {
+                        Some(problem) => {
+                            problems.push(("mounts".to_string(), problem));
+                            None
+                        }
+                        None => Some(mounts),
+                    }
+                }
+                _ => None,
+            }
+        }
         Some(_) => {
             problems.push((
                 "mounts".to_string(),
-                "must be a mapping with `workspace` and `setup`".to_string(),
+                format!(
+                    "must be a mapping with `{PROJECT_CLONE}`, `{PERSISTENT_STORE}` and `{SETUP}`"
+                ),
             ));
-            (None, None)
+            None
         }
         None => {
             problems.push(("mounts".to_string(), "is required".to_string()));
-            (None, None)
+            None
         }
     };
-    let broker_bin = text_field(&map, "", "broker-bin", true, &mut problems);
+    let broker_bin = container_path_field(&map, "", "broker-bin", &mut problems);
     let sshd_port_env = match map.get(SSHD_PORT_ENV) {
         None | Some(Value::Null) => None,
         Some(Value::String(name)) if is_env_name(name) => Some(name.clone()),
@@ -660,8 +712,8 @@ pub fn parse(value: Value, file: &Path) -> Result<DevEnv, Vec<ConfigError>> {
         }
     };
 
-    match (user, workspace, setup, broker_bin) {
-        (Some(user), Some(workspace), Some(setup), Some(broker_bin)) if problems.is_empty() => {
+    match (user, mounts, broker_bin) {
+        (Some(user), Some(mounts), Some(broker_bin)) if problems.is_empty() => {
             // Every key the tools use is there, for those reading `raw`.
             for key in [SSHD_PORT, SSHD_PORT_ENV] {
                 map.entry(key.into()).or_insert(Value::Null);
@@ -670,7 +722,7 @@ pub fn parse(value: Value, file: &Path) -> Result<DevEnv, Vec<ConfigError>> {
                 .or_insert(Value::Sequence(Vec::new()));
             Ok(DevEnv {
                 user,
-                mounts: Mounts { workspace, setup },
+                mounts,
                 broker_bin,
                 sshd_port,
                 sshd_port_env,
@@ -682,6 +734,93 @@ pub fn parse(value: Value, file: &Path) -> Result<DevEnv, Vec<ConfigError>> {
             .into_iter()
             .map(|(key, message)| error(&key, message))
             .collect()),
+    }
+}
+
+/// Why `path` can't be a path in the container, written into the compose
+/// `.env` file or a command line, if it can't: absolute, not `/` itself,
+/// `/`-separated plain names (not empty, `.` or `..`), no trailing `/`, at
+/// most 255 characters, and only ASCII letters, digits, `.`, `_`, `-` and
+/// `/`.  Those mean nothing to compose, a shell or a mount option list.
+pub fn container_path_problem(path: &str) -> Option<String> {
+    const MAX_LEN: usize = 255;
+    let problem = if !path.starts_with('/') {
+        "must be an absolute path"
+    } else if path == "/" {
+        "can't be `/`"
+    } else if path.len() > MAX_LEN {
+        "must be at most 255 characters"
+    } else if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    {
+        "may only have ASCII letters, digits, `.`, `_`, `-` and `/`"
+    } else if path.ends_with('/') {
+        "must not end with `/`"
+    } else {
+        return path[1..].split('/').find_map(|part| match part {
+            "" => Some("has an empty part; separate names with one `/`".to_string()),
+            "." | ".." => Some(format!("can't have a `{part}` part")),
+            _ => None,
+        });
+    };
+    Some(problem.to_string())
+}
+
+/// Why `mounts` (each a key and a valid container path) can't be used
+/// together, if they can't: two at the same place, or one inside another.
+/// A mount inside another hides part of it, and the bridge would map paths
+/// there to the wrong host directory.
+pub fn mounts_overlap(mounts: &[(&str, &str)]) -> Option<String> {
+    mounts.iter().enumerate().find_map(|(i, (key, path))| {
+        mounts[i + 1..].iter().find_map(|(other, other_path)| {
+            if path == other_path {
+                Some(format!("`{key}` and `{other}` are both at {path}"))
+            } else if other_path.starts_with(&format!("{path}/")) {
+                Some(format!(
+                    "`{other}` ({other_path}) is inside `{key}` ({path})"
+                ))
+            } else if path.starts_with(&format!("{other_path}/")) {
+                Some(format!(
+                    "`{key}` ({path}) is inside `{other}` ({other_path})"
+                ))
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Why `user` can't be the container's user, if it can't: a plain user
+/// name, `[A-Za-z_][A-Za-z0-9._-]{0,31}`, as `ssh_hosts.py` writes into
+/// `~/.ssh/config` (DEV-1).
+pub fn user_name_problem(user: &str) -> Option<String> {
+    let mut chars = user.chars();
+    let valid = user.len() <= 32
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    (!valid).then(|| {
+        "must be a user name: a letter or `_`, then letters, digits, `.`, `_` or `-`, at most 32 characters"
+            .to_string()
+    })
+}
+
+/// A required container path, checked by `container_path_problem`.
+fn container_path_field(
+    map: &Mapping,
+    parent: &str,
+    key: &str,
+    problems: &mut Vec<(String, String)>,
+) -> Option<String> {
+    let path = text_field(map, parent, key, false, problems)?;
+    match container_path_problem(&path) {
+        Some(problem) => {
+            problems.push((child_key(parent, key), problem));
+            None
+        }
+        None => Some(path),
     }
 }
 
@@ -747,7 +886,7 @@ mod tests {
     use crate::config::testing::TempDir;
     use std::fs;
 
-    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
+    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  project-clone: /project\n  persistent-store: /persistent-store\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
 
     fn parse_text(text: &str) -> Result<DevEnv, Vec<String>> {
         parse(parse_yaml(text).unwrap(), Path::new("/c/dev-env.yaml")).map_err(|errors| {
@@ -776,7 +915,8 @@ mod tests {
         assert_eq!(
             env.mounts,
             Mounts {
-                workspace: "/workspace".to_string(),
+                project_clone: "/project".to_string(),
+                persistent_store: "/persistent-store".to_string(),
                 setup: "/setup".to_string()
             }
         );
@@ -803,10 +943,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            parse_text("user: 5\nmounts:\n  workspace: rel\n  setup: ''\nbroker-bin: bin/broker\nsshd-port: 70000\n").unwrap_err(),
+            parse_text("user: 5\nmounts:\n  project-clone: rel\n  persistent-store: /p\n  setup: ''\nbroker-bin: bin/broker\nsshd-port: 70000\n").unwrap_err(),
             [
                 "user: must be a string",
-                "mounts.workspace: must be an absolute path",
+                "mounts.project-clone: must be an absolute path",
                 "mounts.setup: must not be empty",
                 "broker-bin: must be an absolute path",
                 "sshd-port: must be a port number, 1 to 65535, or null",
@@ -821,6 +961,111 @@ mod tests {
             parse_text(&DEV_ENV.replace("22022", "0")).unwrap_err(),
             ["sshd-port: must be a port number, 1 to 65535, or null"]
         );
+    }
+
+    #[test]
+    fn parse_checks_container_paths() {
+        let with_clone = |path: &str| {
+            DEV_ENV.replace("project-clone: /project", &format!("project-clone: {path}"))
+        };
+        for path in ["/w", "/home/ubuntu", "/a.b/c_d-e", "/0"] {
+            assert_eq!(
+                parse_text(&with_clone(path)).unwrap().mounts.project_clone,
+                path
+            );
+        }
+        for (path, problem) in [
+            ("w", "must be an absolute path"),
+            ("/", "can't be `/`"),
+            ("/w/", "must not end with `/`"),
+            ("/a//b", "has an empty part"),
+            ("/a/../b", "can't have a `..` part"),
+            ("/a/./b", "can't have a `.` part"),
+            (
+                "\"/w\\nWORKSPACE_HOST=/home/you\"",
+                "may only have ASCII letters",
+            ),
+            ("'/w:/x'", "may only have ASCII letters"),
+            ("'/w,ro'", "may only have ASCII letters"),
+            ("'/w x'", "may only have ASCII letters"),
+            ("'/${HOME}'", "may only have ASCII letters"),
+            ("'/w#x'", "may only have ASCII letters"),
+            ("\"/w'x\"", "may only have ASCII letters"),
+            ("/caf\u{e9}", "may only have ASCII letters"),
+        ] {
+            let errors = parse_text(&with_clone(path)).unwrap_err();
+            assert_eq!(errors.len(), 1, "{path}: {errors:?}");
+            assert!(
+                errors[0].starts_with("mounts.project-clone: ") && errors[0].contains(problem),
+                "{path}: {errors:?}"
+            );
+        }
+        let long = format!("/{}", "a".repeat(255));
+        assert!(parse_text(&with_clone(&long)).unwrap_err()[0].contains("at most 255"));
+        // `broker-bin` is a container path too.
+        assert_eq!(
+            parse_text(&DEV_ENV.replace("/usr/local/bin/scoter-container", "'/bin/x;y'"))
+                .unwrap_err(),
+            ["broker-bin: may only have ASCII letters, digits, `.`, `_`, `-` and `/`"]
+        );
+    }
+
+    #[test]
+    fn parse_refuses_overlapping_mounts() {
+        for (clone, problem) in [
+            ("/setup", "`project-clone` and `setup` are both at /setup"),
+            (
+                "/persistent-store/p",
+                "`project-clone` (/persistent-store/p) is inside `persistent-store` (/persistent-store)",
+            ),
+            (
+                "/setup/x",
+                "`project-clone` (/setup/x) is inside `setup` (/setup)",
+            ),
+        ] {
+            assert_eq!(
+                parse_text(&DEV_ENV.replace(
+                    "project-clone: /project",
+                    &format!("project-clone: {clone}")
+                ))
+                .unwrap_err(),
+                [format!("mounts: {problem}")]
+            );
+        }
+        assert_eq!(
+            parse_text(&DEV_ENV.replace("setup: /setup", "setup: /project/s")).unwrap_err(),
+            ["mounts: `setup` (/project/s) is inside `project-clone` (/project)"]
+        );
+        // A shared prefix isn't nesting.
+        assert!(parse_text(&DEV_ENV.replace("setup: /setup", "setup: /project-setup")).is_ok());
+    }
+
+    #[test]
+    fn parse_checks_the_user() {
+        for user in ["ubuntu", "_u", "a.b-c_d", &"u".repeat(32)] {
+            assert_eq!(
+                parse_text(&DEV_ENV.replace("user: ubuntu", &format!("user: {user}")))
+                    .unwrap()
+                    .user,
+                user
+            );
+        }
+        for user in [
+            "'1u'",
+            "'-u'",
+            "'u u'",
+            "\"u\\nMatch all\"",
+            "'u:x'",
+            &"u".repeat(33),
+        ] {
+            let errors =
+                parse_text(&DEV_ENV.replace("user: ubuntu", &format!("user: {user}"))).unwrap_err();
+            assert_eq!(errors.len(), 1, "{user}: {errors:?}");
+            assert!(
+                errors[0].starts_with("user: must be a user name"),
+                "{user}: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -1115,7 +1360,8 @@ mod tests {
         assert_eq!(
             env.mounts,
             Mounts {
-                workspace: "/workspace".to_string(),
+                project_clone: "/project".to_string(),
+                persistent_store: "/persistent-store".to_string(),
                 setup: "/other".to_string()
             }
         );
@@ -1266,7 +1512,7 @@ mod tests {
         let child = container_with(
             &dir,
             "proj/env",
-            "parents: [{name: base, tag: 'base:1'}]\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 1\n",
+            "parents: [{name: base, tag: 'base:1'}]\nmounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\nsshd-port: 1\n",
         );
         let search = [
             dir.path().join("missing"),
@@ -1359,7 +1605,7 @@ mod tests {
                 "  - {name: named, tag: named}\n",
                 "  - {dir: ../local, tag: local}\n",
                 "  - {file: ../published.yaml}\n",
-                "mounts: {workspace: /w, setup: /s}\nbroker-bin: /b\n",
+                "mounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\n",
             ),
         );
         let env = load(&child, &roots(&dir), &[dir.path().join("search")])

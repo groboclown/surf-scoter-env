@@ -14,9 +14,10 @@ The weak points of [file access](files.md): how code in the development containe
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Everything in the workspace, including `.git`, the home directory, and symlinks in place of directories | Code in the container | `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py); `rm` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); the VCS `runs` in [`setup.yaml`](../../defaults/setup.yaml); `scoter kill --fetch` in [`main_kill.py`](../../scripts/main_kill.py); the developer's tools |
-| `container: workspace-subdir` | The project, as accepted | `set_dev_container_project_dir` in [`system.rs`](../../host/src/config/system.rs); `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py) |
-| Object files hard-linked between the project and the workspace | Code in the container | `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml) |
+| Everything in the project clone, including `.git` | Code in the container | `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py); `rm` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); the VCS `runs` in [`setup.yaml`](../../defaults/setup.yaml); `scoter kill --fetch` in [`main_kill.py`](../../scripts/main_kill.py); the developer's tools |
+| The persistent store | Code in the container | The container tool; nothing on the host reads it |
+| `container: mounts: project-clone` | The project, as accepted | `parse_container` in [`project.rs`](../../host/src/config/project.rs); `project_mount_problems` in [`config.rs`](../../host/src/config.rs) |
+| Object files hard-linked between the project and the clone | Code in the container | `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Setup directory files | `scoter`, and any local account that can write them | `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); `touch` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py) |
 | Changes brought back to the project | Code in the container, through the developer | The developer's review |
 
@@ -25,79 +26,79 @@ The weak points of [file access](files.md): how code in the development containe
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [FILE-1](#file-1-scoter-run-runs-git-inside-the-workspace) | `scoter run` runs Git inside the workspace | Critical | Open |
+| [FILE-1](#file-1-scoter-run-runs-git-inside-the-project-clone) | `scoter run` runs Git inside the project clone | Critical | Open |
 | [FILE-2](#file-2-object-files-shared-with-the-project-repository) | Object files shared with the project repository | High | Mitigated |
 | [FILE-3](#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |
-| [FILE-4](#file-4-host-tools-acting-on-the-workspace) | Host tools acting on the workspace | High | By design |
+| [FILE-4](#file-4-host-tools-acting-on-the-project-clone) | Host tools acting on the project clone | High | By design |
 | [FILE-5](#file-5-changes-brought-back-to-the-project) | Changes brought back to the project | High | By design |
-| [FILE-6](#file-6-the-workspace-and-setup-separation) | The workspace and setup separation | High | Mitigated |
+| [FILE-6](#file-6-the-project-clone-and-setup-separation) | The project clone and setup separation | High | Mitigated |
 | [FILE-7](#file-7-world-writable-setup-files) | World-writable setup files | Medium | Open |
 | [FILE-8](#file-8-everything-readable-in-the-container-is-exposed) | Everything readable in the container is exposed | Medium | By design |
-| [FILE-9](#file-9-the-workspace-inside-the-project-directory) | The workspace inside the project directory | Low | Mitigated by default |
-| [FILE-10](#file-10-the-workspace-sub-path-through-container-symlinks) | The workspace sub-path through container symlinks | High | Open |
-| [FILE-11](#file-11-kill---fetch-fetches-from-the-workspace-root) | `kill --fetch` fetches from the workspace root | Low | Open |
+| [FILE-9](#file-9-the-project-state-inside-the-project-directory) | The project state inside the project directory | Low | Mitigated by default |
+| [FILE-10](#file-10-the-clones-path-through-container-symlinks) | The clone's path through container symlinks | High | Closed |
+| [FILE-11](#file-11-kill---fetch-fetches-from-the-wrong-directory) | `kill --fetch` fetches from the wrong directory | Low | Closed |
 
-Related vectors elsewhere: crafted mount points ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)), the home directory kept in the workspace ([DEV-16](dev-container-attack-vectors.md#dev-16-the-home-directory-persists-in-the-workspace)), and permission bits left on workspace files ([DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker), [DEV-7](dev-container-attack-vectors.md#dev-7-setuid-files-that-run-as-the-developer), [DEV-10](dev-container-attack-vectors.md#dev-10-loosened-permissions-on-workspace-files)).
+Related vectors elsewhere: crafted mount points ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)), what the persistent store keeps between sessions ([DEV-16](dev-container-attack-vectors.md#dev-16-the-persistent-store-outlives-the-session)), and permission bits left on the clone's files ([DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker), [DEV-7](dev-container-attack-vectors.md#dev-7-setuid-files-that-run-as-the-developer), [DEV-10](dev-container-attack-vectors.md#dev-10-loosened-permissions-on-the-clones-files)).
 
 
 ## Vectors
 
-### FILE-1: `scoter run` runs Git inside the workspace
+### FILE-1: `scoter run` runs Git inside the project clone
 
 **Severity:** Critical.  **Status:** Open.
-**Where:** `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py); `git-vcs: runs: fetch-changes` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py); `git-vcs: runs: fetch-changes` in [`setup.yaml`](../../defaults/setup.yaml).
 
-When the workspace already exists, `scoter run` (unless given `--no-workspace-fetch`) runs `git fetch --all` on the host, with the workspace's clone of the project as its working directory.  Git reads the clone's `.git/config` and hooks, which an earlier container session could have rewritten.  A remote's `uploadpack` or `sshCommand` setting, or a `reference-transaction` hook, runs a program on the host.  Project verification doesn't help: the clone isn't part of what's reviewed.  With a `workspace-subdir`, the container can also choose *which* directory Git runs in ([FILE-10](#file-10-the-workspace-sub-path-through-container-symlinks)).
+When the project clone already exists, `scoter run` (unless given `--no-project-fetch`) runs `git fetch --all` on the host, with the clone as its working directory.  Git reads the clone's `.git/config` and hooks, which an earlier container session could have rewritten.  A remote's `uploadpack` or `sshCommand` setting, or a `reference-transaction` hook, runs a program on the host.  Project verification doesn't help: the clone isn't part of what's reviewed.
 
-**Red team:** from the container, set `remote.origin.uploadpack` in the workspace's `.git/config`, or plant `.git/hooks/reference-transaction`, then wait for the next `scoter run`.
+**Red team:** from the container, set `remote.origin.uploadpack` in the clone's `.git/config`, or plant `.git/hooks/reference-transaction`, then wait for the next `scoter run`.
 
-**When changing this code:** never run a VCS command with the workspace as its working directory or its repository.  Refresh the workspace from the project side instead, for example by pushing from the project into it.
+**When changing this code:** never run a VCS command with the clone as its working directory or its repository.  Refresh the clone from the project side instead, for example by pushing from the project into it.
 
 ### FILE-2: Object files shared with the project repository
 
-**Severity:** High.  **Status:** Mitigated, for workspaces created after the fix.
-**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py).
+**Severity:** High.  **Status:** Mitigated, for clones created after the fix.
+**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py).
 
-By default, `git clone` of a local path hard-links the object files when it can, and the workspace sits on the same file system as the project.  The project and the workspace then share each object file's inode, owned by the developer.  With `keep-id`, the container runs as that owner, so it can make an object file writable and replace its contents.  The developer's real repository then returns the attacker's content under the original, already-reviewed hash.
+By default, `git clone` of a local path hard-links the object files when it can, and the clone sits on the same file system as the project.  The project and the clone then share each object file's inode, owned by the developer.  With `keep-id`, the container runs as that owner, so it can make an object file writable and replace its contents.  The developer's real repository then returns the attacker's content under the original, already-reviewed hash.
 
-This was confirmed with loose objects: after the workspace copy of a blob was rewritten, `git show` in the source repository printed the new content.  A fresh checkout, a branch switch, `git archive` or a new local clone in the project would use it, without any review.  Only `git fsck` reported the mismatch.  Pushing would likely fail, because the receiving side recomputes object hashes.  Packed objects haven't been tested.
+This was confirmed with loose objects: after the clone's copy of a blob was rewritten, `git show` in the source repository printed the new content.  A fresh checkout, a branch switch, `git archive` or a new local clone in the project would use it, without any review.  Only `git fsck` reported the mismatch.  Pushing would likely fail, because the receiving side recomputes object hashes.  Packed objects haven't been tested.
 
-Both clones now use `--no-local`, which makes Git copy the objects through its normal transport, so the workspace shares no files with the project.  Workspaces created before the fix still share them, and need recreating with `scoter run --clean-workspace`.  A user setup file that overrides `local-clone` without the flag brings the vector back.
+Both clones now use `--no-local`, which makes Git copy the objects through its normal transport, so the clone shares no files with the project.  A user setup file that overrides `local-clone` without the flag brings the vector back.
 
-**Red team:** in a new workspace, look for any file whose link count is above one (`find .git -links +1`), or any other way the workspace shares storage with the project.  Check user setup files and other VCS implementations for clones without the flag.
+**Red team:** in a new clone, look for any file whose link count is above one (`find .git -links +1`), or any other way the clone shares storage with the project.  Check user setup files and other VCS implementations for clones without the flag.
 
-**When changing this code:** keep `--no-local`, and see the [VCS checklist](files.md#adding-a-vcs-implementation) before adding a new way to create the workspace.
+**When changing this code:** keep `--no-local`, and see the [VCS checklist](files.md#adding-a-vcs-implementation) before adding a new way to create the clone.
 
 ### FILE-3: The `file` VCS merge
 
 **Severity:** High, for projects that use it.  **Status:** Open.
 **Where:** `file-vcs: runs` in [`setup.yaml`](../../defaults/setup.yaml).
 
-`merge-changes` copies the whole workspace over the project with `cp -R`, with no review step and no protection against symlinks.  A symlink planted in one session, followed by a directory of the same name in the next, can make the copy write outside the project.  `show-fetch-changes` uses `diff -R`, which follows symlinks to host files.  `local-clone` copies untracked and ignored files, including secrets, into the workspace, and ignores `workspace-subdir`.
+`merge-changes` copies the whole project clone over the project with `cp -R`, with no review step and no protection against symlinks.  A symlink planted in one session, followed by a directory of the same name in the next, can make the copy write outside the project.  `show-fetch-changes` uses `diff -R`, which follows symlinks to host files.  `local-clone` copies untracked and ignored files, including secrets, into the clone.
 
-The workspace now also holds the container's home directory ([DEV-16](dev-container-attack-vectors.md#dev-16-the-home-directory-persists-in-the-workspace)), so `merge-changes` would copy `.ssh/`, the SSH host key, shell history, `.vscode-server` and the rest over the project.  No `scoter` command calls `merge-changes` or `show-fetch-changes` yet (`scoter fetch` isn't implemented), so this needs the developer to run them.
+The container's own files, in its persistent store, are a container volume, not part of the clone, so `merge-changes` doesn't copy them.  No `scoter` command calls `merge-changes` or `show-fetch-changes` yet (`scoter fetch` isn't implemented), so this needs the developer to run them.
 
 **Red team:** the two-step symlink-then-directory sequence against `merge-changes`; a symlink to a host secret, shown through `show-fetch-changes`.
 
 **When changing this code:** the `TODO` in `setup.yaml` proposes a dedicated script; it should refuse symlinks and special files, and copy only what the developer approves.
 
-### FILE-4: Host tools acting on the workspace
+### FILE-4: Host tools acting on the project clone
 
 **Severity:** High.  **Status:** By design; the developer must not use host tools there.
-**Where:** the developer's tools; the guidance in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-workspace-from-your-host).
+**Where:** the developer's tools; the guidance in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host).
 
-Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` scripts).  Opening or running any of them in `.dev-env/workspace` on the host runs the container's code there.
+Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` scripts).  Opening or running any of them in the project clone on the host runs the container's code there.
 
-**Red team:** plant each kind of file in the workspace and see which tools act on it when a developer browses the project directory on the host.
+**Red team:** plant each kind of file in the clone and see which tools act on it when a developer browses the project's state directory on the host.
 
-**When changing this code:** keep the workspace somewhere host tools are unlikely to visit (see FILE-9).
+**When changing this code:** keep the clone somewhere host tools are unlikely to visit (see FILE-9).
 
 ### FILE-5: Changes brought back to the project
 
 **Severity:** High.  **Status:** By design; the developer's review is the control.
 **Where:** the [recommended return path](files.md#bringing-changes-back).
 
-`git fetch` from the workspace runs nothing, but what it brings is code the container wrote.  Changes that are easy to miss in review:
+`git fetch` from the project clone runs nothing, but what it brings is code the container wrote.  Changes that are easy to miss in review:
 
 * build and test scripts, CI workflows, package manifests with install hooks;
 * anything in `.surf-scoter.d/` (the project file, and the dev containers' `Dockerfile`, `dev-env.yaml` and build files, and its `egress` rules), which widen what the *next* environment may do.  [Project verification](verification.md) asks for a new review before the next run uses them, which narrows this to the review's own gaps: changes that match on meaning ([VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled), [VER-2](verification-attack-vectors.md#ver-2-any-file-named-dev-envyaml-matches-on-meaning)), values the review doesn't show ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)), and exemptions ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed));
@@ -110,18 +111,16 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 
 **When changing this code:** tooling that highlights these categories in a fetched change would directly reduce this risk.
 
-### FILE-6: The workspace and setup separation
+### FILE-6: The project clone and setup separation
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `_setup_workspace` and `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); the mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `_setup_project_clone` and `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); the mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
 
-The workspace is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts and the bridge commands come from your accepted settings in the verified store, never from the project or the workspace, and the dev container is built from the accepted copy of `.surf-scoter.d`.  Nothing else from the host is mounted.
-
-The container's home directory is now kept in the workspace ([DEV-16](dev-container-attack-vectors.md#dev-16-the-home-directory-persists-in-the-workspace)).  That doesn't add anything from the host, but it does mean the SSH host private key, copied from the setup directory, is written back to the host disk.
+The project clone is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts and the bridge commands come from your accepted settings in the verified store, never from the project or the clone, and the dev container is built from the accepted copy of `.surf-scoter.d`.  The persistent store is a container volume, so it brings nothing from the host either.  Nothing else from the host is mounted.
 
 **Red team:** look for anything from the host that reaches the container: project files, environment, mounts added through settings, and anything that shares storage with the project, as in FILE-2.
 
-**When changing this code:** any new mount, any new file in the setup directory, and any change to how the workspace is created needs this vector rechecked.
+**When changing this code:** any new mount, any new file in the setup directory, and any change to how the clone or the persistent store is created needs this vector rechecked.
 
 ### FILE-7: World-writable setup files
 
@@ -137,59 +136,50 @@ The container's home directory is now kept in the workspace ([DEV-16](dev-contai
 ### FILE-8: Everything readable in the container is exposed
 
 **Severity:** Medium.  **Status:** By design.
-**Where:** the workspace.
+**Where:** the project clone, and the persistent store.
 
-Isolation limits where data can go, not what the container can read.  Committed secrets, the full Git history, and anything the `file` VCS copied are available to the code running there.
+Isolation limits where data can go, not what the container can read.  Committed secrets, the full Git history, anything the `file` VCS copied, and anything an earlier session left in the persistent store are available to the code running there.
 
-**Red team:** search the workspace and history for credentials.
+**Red team:** search the clone, its history and the persistent store for credentials.
 
-### FILE-9: The workspace inside the project directory
+### FILE-9: The project state inside the project directory
 
 **Severity:** Low.  **Status:** Mitigated by default.
-**Where:** `workspace: paths` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `project-state: paths` in [`setup.yaml`](../../defaults/setup.yaml).
 
-The workspace used to be under the project directory (`.dev-env/`), so host tools that walk the project tree (search indexers, test runners, language servers, backup tools) could find it too.  Its default is now outside the project: `${scoter:state-dir}/workspaces/${scoter:project-id}`.  A setup that moves it back inside the project has the risk again; `scoter run` then adds the directories to the project's ignore file (`ignore-file`), but other tools have their own rules.
+The project's run files used to be under the project directory (`.dev-env/`), so host tools that walk the project tree (search indexers, test runners, language servers, backup tools) could find them too.  Their default is now outside the project: `${scoter:state-dir}/projects/${scoter:project-id}`.  A setup that moves them back inside the project has the risk again; `scoter run` then adds the directories to the project's ignore file (`ignore-file`), but other tools have their own rules.
 
-**Red team:** with the workspace configured inside the project, list the host tools that descend into it from the project directory, and what each reads there.
+**Red team:** with the project state configured inside the project, list the host tools that descend into it from the project directory, and what each reads there.
 
-**When changing this code:** the default `state-dir` is in your home directory, often on the same file system as the project, so the workspace's clone still needs `--no-local` (FILE-2).
+**When changing this code:** the default `state-dir` is in your home directory, often on the same file system as the project, so the clone still needs `--no-local` (FILE-2).
 
-### FILE-10: The workspace sub-path through container symlinks
+### FILE-10: The clone's path through container symlinks
 
-**Severity:** High.  **Status:** Open.
-**Where:** `_setup_workspace` in [`main_run.py`](../../scripts/main_run.py); `rm` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); `set_dev_container_project_dir` and the `workspace-subdir` checks in [`system.rs`](../../host/src/config/system.rs) and [`project.rs`](../../host/src/config/project.rs).
+**Severity:** High.  **Status:** Closed.
+**Where:** `_setup_project_clone` and `_check_real_dir` in [`main_run.py`](../../scripts/main_run.py); `project-state: paths` in [`setup.yaml`](../../defaults/setup.yaml); the project clone mount in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
 
-The project file's `container: workspace-subdir` puts the project's clone in a sub-directory of the workspace, so the home directory can sit beside it ([DEV-16](dev-container-attack-vectors.md#dev-16-the-home-directory-persists-in-the-workspace)).  The value is checked (relative, no `.` or `..` parts, printable ASCII), then simply joined to the workspace.  But the workspace is the container's to change, and at the next `scoter run` the host uses `workspace/<subdir>` through whatever the container left there:
+The project file's old `container: workspace-subdir` put the clone in a sub-directory of the directory mounted in the container, beside the container's home directory, and the host joined the sub-path to it.  The container could replace a directory on that path with a symlink between sessions, so the next `scoter run` cloned into, ran Git in, or (with `--clean-workspace`) deleted a directory of the container's choosing, such as `~/bin` or `~/.ssh`.
 
-* With a sub-path of two or more parts, such as `x/bin`, the container replaces `x` with a symlink, for example a relative one up to your home directory.  Then:
-  * if the clone is missing, `local-clone` clones the project there (into `~/bin`, say, which may be on your `PATH`);
-  * `--clean-workspace` runs `rmtree` on it (`~/.ssh`, say), since `rm` checks only the last part for a symlink;
-  * otherwise, `fetch-changes` runs Git there.
-* With a single part, the container can still replace the clone itself with a symlink to any directory, and `fetch-changes` then runs `git fetch --all` with that directory as its working directory.
+Now the clone is the mounted directory itself (`project-state: paths: project-clone-dir`), so nothing the container can write lies on the host's path to it.  The project can only choose where the clone appears *inside* the container (`container: mounts: project-clone`); that's a container path, and the host never builds a path from it.  `scoter run` also checks that the clone directory isn't a symlink, or anything but a directory, before it clones, fetches or removes it.  The container's own files moved to the persistent store, a container volume.
 
-The sub-path comes from the accepted project file, but the review doesn't show it ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)), and nothing about a two-part name like `x/bin` looks dangerous.  It also makes [FILE-1](#file-1-scoter-run-runs-git-inside-the-workspace) easier to use.
+**Red team:** look for any other host path built below a directory the container can write, and for a way to make `project-clone-dir` a symlink between runs.
 
-**Red team:** with `workspace-subdir: x/bin`, replace `/workspace/x` from the container with a symlink pointing out of the workspace, stop the environment, and run `scoter run` and `scoter run --clean-workspace`.
+**When changing this code:** keep every host path the tools act on free of container-writable parts.  Never join a project-supplied value to a host directory the container can write.
 
-**When changing this code:** resolve the clone's path, and require it, and every directory between it and the workspace, to be real directories under the real workspace, with no symlinks, as `fileutil.private_dir` does for private directories.  Consider limiting `workspace-subdir` to a single part, and showing it in the review.
+### FILE-11: `kill --fetch` fetches from the wrong directory
 
-### FILE-11: `kill --fetch` fetches from the workspace root
+**Severity:** Low.  **Status:** Closed.
+**Where:** `project_clone_dir` in the environment record written by [`main_run.py`](../../scripts/main_run.py); the fetch in [`main_kill.py`](../../scripts/main_kill.py).
 
-**Severity:** Low.  **Status:** Open.
-**Where:** `workspace_dir` in the environment record written by [`main_run.py`](../../scripts/main_run.py); the fetch in [`main_kill.py`](../../scripts/main_kill.py).
+With the old `workspace-subdir`, the environment record kept the mounted directory, not the clone below it, so `scoter kill --fetch` fetched from the container's home directory, or whatever repository the container made there.  The record now keeps the clone's directory, which is the mounted directory itself, and that's what the fetch reads.
 
-The environment record keeps the workspace's root, not the clone's sub-directory, and `scoter kill --fetch` runs `fetch-changes-into` with it.  With a `workspace-subdir`, the root is the container's home directory, so the fetch fails, or fetches from whatever repository the container made there.  It runs in your repository, through `git upload-pack` on the workspace side, so it doesn't run the container's code, and what it brings is container-written either way.  But you may review a branch from a repository you didn't expect.
-
-**Red team:** with a `workspace-subdir`, create a repository with a `main` branch in the home directory from the container, then run `scoter kill --fetch`.
-
-**When changing this code:** record the clone's directory for fetching, and check that it's the clone `scoter run` made.
+**Red team:** check that `scoter kill --fetch` reads from the clone `scoter run` made.
 
 
 ## Sensitive code
 
-* [`scripts/main_run.py`](../../scripts/main_run.py): workspace creation and refresh, the clone's sub-path, and the setup directory.
-* [`scripts/main_kill.py`](../../scripts/main_kill.py): fetching from the workspace.
-* [`defaults/setup.yaml`](../../defaults/setup.yaml): the `git-vcs` and `file-vcs` commands, and the workspace locations.
+* [`scripts/main_run.py`](../../scripts/main_run.py): creating and refreshing the clone, the persistent store, and the setup directory.
+* [`scripts/main_kill.py`](../../scripts/main_kill.py): fetching from the clone, and removing the clone and the persistent store.
+* [`defaults/setup.yaml`](../../defaults/setup.yaml): the `git-vcs` and `file-vcs` commands, and the `project-state` locations.
 * [`scripts/surf_scoter_lib/fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py): file modes, and removal.
-* [`containers/dev-env/entrypoint.sh`](../../containers/dev-env/entrypoint.sh): the home directory in the workspace.
 * The `volumes` of [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml).

@@ -35,7 +35,7 @@ grep -E "^scoter-my-project-c593c7ec2d55 " ~/.ssh/known_hosts
 scoter-my-project-c593c7ec2d55 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxnu2CtdL0PdsqsgQSfQuxO0drqIhP0ZM73PQUxP0Xc
 ```
 
-The host key stays the same from run to run of the project: it's kept with the project's workspace.
+The host key stays the same from run to run of the project: it's kept with the project's state, beside its clone.
 
 We now have all the pieces necessary to get started.
 

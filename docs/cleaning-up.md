@@ -1,6 +1,6 @@
 # Cleaning Up After Surf Scoter
 
-Surf Scoter keeps a few things on your computer between runs: your project's workspace, the settings you've accepted, and the container images it built.  Most of it is meant to be kept, and reused by the next run.  This page says what each one is, where it lives, and how to clear it out when you want the space back, or a fresh start.
+Surf Scoter keeps a few things on your computer between runs: your project's clone, its dev container's persistent store, the settings you've accepted, and the container images it built.  Most of it is meant to be kept, and reused by the next run.  This page says what each one is, where it lives, and how to clear it out when you want the space back, or a fresh start.
 
 `scoter cleanup` sweeps up what's safe to remove in one go (see [The Cleanup Command](#the-cleanup-command)); the sections after it cover each part, and the commands for clearing one thing at a time.
 
@@ -12,16 +12,18 @@ Surf Scoter keeps a few things on your computer between runs: your project's wor
 scoter cleanup                          # List what's left behind, and ask.
 scoter cleanup --dry-run                # Only list it.
 scoter cleanup --force                  # Remove it without asking (for scripts).
-scoter cleanup --workspaces --images    # Workspaces and images too.
+scoter cleanup --project-state --persistent-stores --images
+                                        # Project state, persistent stores and images too.
 ```
 
 Without a terminal to ask at, and without `--force`, it only lists.  What it removes:
 
-* **Environments whose run is gone**: a record of a running environment whose `scoter run` process isn't running any more (it crashed, or the computer restarted).  It stops their containers and forgets them, as `scoter kill` does, and keeps their workspaces.  On Windows it can't tell whether a run's process is still there, so it leaves them to `scoter kill`.
+* **Environments whose run is gone**: a record of a running environment whose `scoter run` process isn't running any more (it crashed, or the computer restarted).  It stops their containers and forgets them, as `scoter kill` does, and keeps their project clones and persistent stores.  On Windows it can't tell whether a run's process is still there, so it leaves them to `scoter kill`.
 * **A run's files no environment uses**: a `state/environments/HOST` directory with no record, and the temporary directories a run that stopped part way left in `state`.
 * **The accepted settings of projects whose directory is gone**, as `scoter list-accepted` marks them: a project you deleted, or moved (an acceptance is for the directory it was made in).  A project on a drive that isn't mounted looks gone too: check the list before you say yes.
 * **The verified store's leftovers**: copies of files no acceptance uses, directories no project names, and temporary files, from a command that stopped part way.
-* With **`--workspaces`**, the workspaces no running environment uses, in the default place (`state/workspaces`).  Anything in them that you haven't fetched back into your project is lost, so it only removes them when you ask.
+* With **`--project-state`**, the project state directories (each project's clone, setup and resources directories) no running environment uses, in the default place (`state/projects`).  Anything in a clone that you haven't fetched back into your project is lost, so it only removes them when you ask.
+* With **`--persistent-stores`**, the dev containers' persistent store volumes (named starting `scoter-`) that no running environment uses.  The next run starts that project's container with an empty one.
 * With **`--images`**, the images Surf Scoter built (`local-surf-scoter/...`) that no running environment uses, and then the layers no image uses any more (`image prune`).  The next run builds what it needs again.
 
 * **SSH entries** for environments that aren't running, as `ssh: values: config-cleanup` says (see [SSH Entries](#ssh-entries)): with `auto`, with the rest; with `ask`, it asks about them on their own, even with `--force`; with `no`, it only says how many there are.
@@ -36,7 +38,8 @@ The locations below are the defaults; your [setup file](system-config-file.md) c
 |---|---|---|
 | A running environment's record | `~/.config/surf-scoter.d/state/running-env.json` | The run ends, `scoter kill`, or `scoter cleanup` once its run is gone |
 | A running environment's configuration | `~/.config/surf-scoter.d/state/environments/HOST/` | The run ends, `scoter kill`, or `scoter cleanup` |
-| The project's workspace: its clone, setup and resources directories | `~/.config/surf-scoter.d/state/workspaces/PROJECT-ID/` | You remove it, or `scoter cleanup --workspaces` |
+| The project's state: its clone (`project-clone`), setup and resources directories | `~/.config/surf-scoter.d/state/projects/PROJECT-ID/` | `scoter run --clean-project-clone`, `scoter kill --clean-project-clone`, or `scoter cleanup --project-state` |
+| The dev container's persistent store | A volume in your container tool, `scoter-PROJECT-ID-store` | `scoter run --clean-persistent-store`, `scoter kill --clean-persistent-store`, or `scoter cleanup --persistent-stores` |
 | Your accepted settings, with a copy of the project files you accepted | `~/.config/surf-scoter.d/verified/` | `scoter revoke`, or `scoter cleanup` once the project's directory is gone |
 | The container images | Your container tool's image store, tagged `local-surf-scoter/...` (and the dev container's parents' tags) | You remove them, or `scoter cleanup --images` |
 | Each environment's ssh entries | `~/.ssh/config` and `~/.ssh/known_hosts` | The environment stops, as `ssh: values: config-cleanup` says; or `scoter cleanup` |
@@ -52,17 +55,35 @@ scoter kill --host HOST       # Any environment, from anywhere.
 
 If more than one is running, or there's no project where you are, it lists the running ones for you to choose from.  `scoter cleanup` stops every environment whose run is gone, without your naming them.
 
-The workspace is kept, so your work isn't lost.  Before you clear it, you can bring your changes back into your project with `--fetch BRANCH`, which fetches the workspace's branch into your repository for you to review.  `--force-clean` removes the workspace once the containers are stopped.  Only use it once you've fetched what you need.
+The project clone and the persistent store are kept, so your work isn't lost.  Before you clear the clone, you can bring your changes back into your project with `--fetch BRANCH`, which fetches the clone's branch into your repository for you to review.  `--clean-project-clone` (or `--clean-project`) removes the clone once the containers are stopped; only use it once you've fetched what you need.  `--clean-persistent-store` removes the persistent store.
 
-## Workspaces
+## The Project Clone
 
-Each project has one workspace, reused by each run.  At the start of a run, your project's latest commits are fetched into the workspace; your changes in the container stay there until you fetch them back (see [Don't run git or your IDE on the workspace from your host](../README.md#dont-run-git-or-your-ide-on-the-workspace-from-your-host)).
+Each project has one clone, reused by each run, and mounted into the dev container at its `mounts: project-clone`.  At the start of a run, your project's latest commits are fetched into the clone (unless you give `--no-project-fetch`); your changes in the container stay there until you fetch them back (see [Don't run git or your IDE on the project clone from your host](../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host)).
 
-* `scoter run --clean-workspace` starts the workspace over, from a fresh clone of your project.  Do this if anything in it looks suspicious.
-* `scoter cleanup --workspaces` removes every workspace no running environment uses (it lists them, and asks, first).
-* To remove one workspace without running, delete its `workspaces/PROJECT-ID` directory, once the project's environment isn't running.  A project you've deleted or moved leaves its workspace behind: it's safe to delete.
+* `scoter run --clean-project-clone` (or `--clean-project`) starts the clone over, from a fresh clone of your project.  Do this if anything in it looks suspicious.  It keeps the persistent store.
+* `scoter kill --clean-project-clone` removes it once the environment is stopped.
+* `scoter cleanup --project-state` removes every project's state directory no running environment uses (it lists them, and asks, first).
+* To remove one without running, delete its `projects/PROJECT-ID` directory, once the project's environment isn't running.  A project you've deleted or moved leaves its state behind: it's safe to delete.
 
-Anything in a workspace you haven't fetched back into your project is lost when it's removed.
+Anything in a clone you haven't fetched back into your project is lost when it's removed.
+
+## The Persistent Store
+
+The dev container keeps its own files between runs, such as its IDE server, caches and shell history, in a *persistent store*: a volume in your container tool, mounted at its `mounts: persistent-store`, and named `scoter-PROJECT-ID-store` (`project-state: values: persistent-store-volume`).  It isn't a directory on your computer, so host commands can't reach it, and neither can tools you run on your computer.  Stopping an environment keeps it.
+
+* `scoter run --clean-persistent-store` starts the container with an empty one.  Do this if anything the container keeps looks suspicious.
+* `scoter kill --clean-persistent-store` removes it once the environment is stopped.
+* `scoter cleanup --persistent-stores` removes every one no running environment uses.
+* By hand: `docker volume ls --filter name=^scoter-` lists them, and `docker volume rm NAME` removes one.
+
+## Upgrading From Workspaces
+
+Before the project clone and the persistent store, each project had a *workspace*, in `state/workspaces`, which held both the clone and the container's home directory.  The new version doesn't read the old running environment records, so:
+
+* **Stop every environment before you upgrade**, with `scoter kill` (or `scoter kill --fetch BRANCH` to bring back what's in its workspace first).
+* If you upgraded with one still running, stop its containers with your container tool (`docker ps` lists them, named `scoter-...`), then delete `~/.config/surf-scoter.d/state/running-env.json`.
+* Fetch anything you need from the old workspaces, then delete `~/.config/surf-scoter.d/state/workspaces`.  Nothing uses it any more, and `scoter cleanup` doesn't look there.
 
 ## Accepted Settings
 

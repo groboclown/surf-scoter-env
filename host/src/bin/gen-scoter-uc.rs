@@ -3,7 +3,7 @@
 //! `docs/contributors/universal-configuration-file.md`.
 //!
 //! Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
-//!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
+//!                      [--project-clone-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
 //!                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
@@ -43,7 +43,7 @@ const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
 const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME] \
-                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
+                     [--project-clone-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml] \
                      [--previous-review REVIEW.yaml] \
@@ -71,7 +71,7 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
                 "--project-branch gives the project's branch, as its VCS names it; `${{scoter:project-branch}}` is it made safe as one path part."
             );
             println!(
-                "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
+                "--project-clone-dir and --dev-container-settings-dir give the host directories mounted in the dev container: the project's clone, and the settings."
             );
             println!(
                 "--distribution-dir gives where Surf Scoter is installed; the user's setup file comes from SURF_SCOTER_HOME or XDG_CONFIG_HOME (by default ~/.config)."
@@ -150,7 +150,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     let mut project_dir: Option<OsString> = None;
     let mut vcs_root: Option<OsString> = None;
     let mut project_branch: Option<OsString> = None;
-    let mut dev_container_workspace_dir: Option<OsString> = None;
+    let mut project_clone_dir: Option<OsString> = None;
     let mut dev_container_settings_dir: Option<OsString> = None;
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
@@ -182,7 +182,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             "--project-dir" => &mut project_dir,
             "--vcs-root" => &mut vcs_root,
             "--project-branch" => &mut project_branch,
-            "--dev-container-workspace-dir" => &mut dev_container_workspace_dir,
+            "--project-clone-dir" => &mut project_clone_dir,
             "--dev-container-settings-dir" => &mut dev_container_settings_dir,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
@@ -209,7 +209,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
             project_dir: project_dir.map(PathBuf::from),
             vcs_root: vcs_root.map(PathBuf::from),
             project_branch: project_branch.map(|b| b.to_string_lossy().into_owned()),
-            dev_container_workspace_dir: dev_container_workspace_dir.map(PathBuf::from),
+            project_clone_dir: project_clone_dir.map(PathBuf::from),
             dev_container_settings_dir: dev_container_settings_dir.map(PathBuf::from),
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
@@ -254,7 +254,7 @@ mod tests {
             "--vcs-root",
             "/repo",
             "--project-branch=feature/x",
-            "--dev-container-workspace-dir",
+            "--project-clone-dir",
             "/ws",
             "--dev-container-settings-dir=settings",
             "--distribution-dir",
@@ -273,7 +273,7 @@ mod tests {
                     project_dir: Some(PathBuf::from("proj")),
                     vcs_root: Some(PathBuf::from("/repo")),
                     project_branch: Some("feature/x".to_string()),
-                    dev_container_workspace_dir: Some(PathBuf::from("/ws")),
+                    project_clone_dir: Some(PathBuf::from("/ws")),
                     dev_container_settings_dir: Some(PathBuf::from("settings")),
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),
@@ -338,7 +338,7 @@ mod tests {
         fs::write(dir.join(".surf-scoter.d/env/Dockerfile"), "FROM scratch\n").unwrap();
         fs::write(
             dir.join(".surf-scoter.d/env/dev-env.yaml"),
-            "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+            "user: u\nmounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
         )
         .unwrap();
         fs::write(

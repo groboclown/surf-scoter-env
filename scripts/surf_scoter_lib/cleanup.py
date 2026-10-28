@@ -12,7 +12,11 @@ what nothing else removes:
 * gone projects: the verified store's projects whose directory is gone;
 * the store's leftovers: directories no record names, blobs nothing uses,
   temporary files;
-* with `workspaces`, the workspaces no running environment uses;
+* with `project_state`, the project state directories (each project's
+  clone, settings and resources) no running environment uses;
+* with `persistent_stores`, the persistent store volumes
+  (`project-state: values: persistent-store-prefix`) no running environment
+  uses;
 * with `images`, the images (`dev-env: values: dev-env-image-prefix`) no
   running environment uses.
 
@@ -27,15 +31,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fileutil
+from . import fileutil, persistent_store
 from .active_env import ActiveEnvironmentSet, EnvironmentDesc
 from .user_config import Echo, OnError, UserConfig
 from .verified import records, revoke, store
 
 # Where the run keeps each environment's files (`main_run.SUC_COPY_DIR`),
-# and, by default, each project's workspace.
+# and, by default, each project's state (its clone, settings and resources).
 ENVIRONMENTS_DIR = "environments"
-WORKSPACES_DIR = "workspaces"
+PROJECTS_DIR = "projects"
 EXEMPT_PREFIX = "exempt-"
 # An `exempt-*` directory lasts as long as a run takes to read its project's
 # files; one older than this was left by a run that stopped.
@@ -259,12 +263,12 @@ def remove_store_leftovers(verified_store: store.VerifiedStore) -> StoreLeftover
 
 
 # ---------------------------------------------------------------------
-# Workspaces
+# Project state
 
 
-def workspaces_dir(config: UserConfig) -> Path:
-    """Where the workspaces are, by default: `${scoter:state-dir}/workspaces`."""
-    return config.require_path("scoter", "state-dir") / WORKSPACES_DIR
+def project_state_root(config: UserConfig) -> Path:
+    """Where the projects' state directories are, by default: `${scoter:state-dir}/projects`."""
+    return config.require_path("scoter", "state-dir") / PROJECTS_DIR
 
 
 def _in_use(envs: Iterable[EnvironmentDesc]) -> tuple[list[Path], set[str]]:
@@ -272,14 +276,14 @@ def _in_use(envs: Iterable[EnvironmentDesc]) -> tuple[list[Path], set[str]]:
     used: list[Path] = []
     starting: set[str] = set()
     for env in envs:
-        used.extend(_real(d) for d in (env.workspace_dir, env.setup_dir, env.resources_dir) if d)
+        used.extend(_real(d) for d in (env.project_clone_dir, env.setup_dir, env.resources_dir) if d)
         if env.project_dir:
-            # A run that's starting hasn't recorded its workspace yet.
+            # A run that's starting hasn't recorded its clone yet.
             starting.add(store.environment_id(_real(env.project_dir)))
     return used, starting
 
 
-def _unused_workspaces(root: Path, envs: Iterable[EnvironmentDesc]) -> list[Path]:
+def _unused_project_state(root: Path, envs: Iterable[EnvironmentDesc]) -> list[Path]:
     if not root.is_dir() or root.is_symlink():
         return []
     used, starting = _in_use(envs)
@@ -295,23 +299,92 @@ def _unused_workspaces(root: Path, envs: Iterable[EnvironmentDesc]) -> list[Path
     return found
 
 
-def find_workspaces(config: UserConfig, keep: Iterable[EnvironmentDesc]) -> list[Path]:
-    """The workspaces (each project's directory under `workspaces_dir`) the runs `keep` don't use."""
-    return _unused_workspaces(workspaces_dir(config), keep)
+def find_project_state(config: UserConfig, keep: Iterable[EnvironmentDesc]) -> list[Path]:
+    """The project state directories (under `project_state_root`) the runs `keep` don't use."""
+    return _unused_project_state(project_state_root(config), keep)
 
 
-def remove_workspaces(config: UserConfig, paths: Iterable[Path]) -> list[Path]:
-    """Remove the workspaces `find_workspaces` found, that still aren't used; those removed.
+def remove_project_state(config: UserConfig, paths: Iterable[Path]) -> list[Path]:
+    """Remove the directories `find_project_state` found, that still aren't used; those removed.
 
     Under the running environments' lock, so no run starts meanwhile.
     """
     file, lock_file = _envs_file(config)
     removed: list[Path] = []
     with ActiveEnvironmentSet.locked(file, lock_file) as envs:
-        still = set(_unused_workspaces(workspaces_dir(config), envs.environs.values()))
+        still = set(_unused_project_state(project_state_root(config), envs.environs.values()))
         for path in paths:
             if path in still and fileutil.rm(path):
                 removed.append(path)
+    return removed
+
+
+# ---------------------------------------------------------------------
+# Persistent stores
+
+
+def persistent_store_prefix(config: UserConfig) -> str:
+    """The prefix every persistent store volume's name starts with."""
+    prefix = config.require_value("project-state", "persistent-store-prefix")
+    if not prefix or not persistent_store.VOLUME_NAME.fullmatch(prefix):
+        raise OSError(f"`project-state: values: persistent-store-prefix` isn't a volume name prefix: {prefix!r}")
+    return prefix
+
+
+def stores_in_use(envs: Iterable[EnvironmentDesc]) -> set[str]:
+    """The persistent store volumes the runs `envs` use, from the configuration each ran with.
+
+    A run that's only reserved (or starting) has none recorded: its project's
+    volume is kept by its project id instead (`_starting_ids`).
+    """
+    used: set[str] = set()
+    for env in envs:
+        if env.suc:
+            volume = UserConfig(env.suc).optional_value("project-state", "persistent-store-volume")
+            if volume:
+                used.add(volume)
+    return used
+
+
+def _starting_ids(envs: Iterable[EnvironmentDesc]) -> set[str]:
+    return {store.environment_id(_real(env.project_dir)) for env in envs if env.project_dir}
+
+
+def find_persistent_stores(config: UserConfig, keep: Iterable[EnvironmentDesc]) -> list[str]:
+    """The persistent store volumes the runs `keep` don't use, from the container tool."""
+    prefix = persistent_store_prefix(config)
+    res = config.run_command(
+        "docker", "list-volumes", on_error=OnError.RETURN, echo=Echo.QUIET,
+        template={"prefix": prefix},
+    )
+    if res.returncode != 0:
+        raise OSError("the container tool couldn't list its volumes")
+    listed = list(keep)
+    used = stores_in_use(listed)
+    starting = _starting_ids(listed)
+    names = [line.strip() for line in res.stdout.decode("utf-8", errors="replace").splitlines()]
+    return sorted({
+        name for name in names
+        if name.startswith(prefix) and name not in used
+        and not any(project_id in name for project_id in starting)
+    })
+
+
+def remove_persistent_stores(config: UserConfig, names: Iterable[str]) -> list[str]:
+    """Remove the volumes `find_persistent_stores` found, that still aren't used; those removed."""
+    file, lock_file = _envs_file(config)
+    removed: list[str] = []
+    with ActiveEnvironmentSet.locked(file, lock_file) as envs:
+        listed = list(envs.environs.values())
+        used = stores_in_use(listed)
+        starting = _starting_ids(listed)
+        for name in names:
+            if name in used or any(project_id in name for project_id in starting):
+                continue
+            if persistent_store.remove(config, name):
+                removed.append(name)
+            else:
+                print(f"Couldn't remove the volume {name}.", file=sys.stderr)
     return removed
 
 

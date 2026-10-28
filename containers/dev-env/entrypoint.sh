@@ -1,42 +1,65 @@
 #!/bin/sh
 set -e
 
-# This expects the workspace directory to be a parent (at some level) to the
-# cloned project directory.  On first startup, this will ensure that the user's
-# home path is a symlink to the workspace directory, and will copy the original
-# files to the new one.
-export WORKSPACE_DIR=/workspace
-if [ ! -L "${HOME}" ] ; then
-    # 1. Change to a non-working directory.
-    cd /tmp
-    # 2. Copy (without replace) the original home directory files into the workspace directory.
-    for src in "${HOME}"/* "${HOME}"/.* ; do
-        # One of the globs may not exist, which means it appears as a '*'.
-        if [ -e "${src}" ] ; then
-            name="$( basename "${src}" )"
-            tgt="${WORKSPACE_DIR}/${name}"
-            if [ ! -e "${tgt}" ] ; then
-                cp -R "${src}" "${tgt}"
-            fi
-        fi
-    done
-    # 3. Backup the original.  Note that this requires write access to the /home directory.
-    parent="$( dirname "${HOME}" )"
-    mv "${HOME}" "${HOME}.backup"
-    # 4. Link home.
-    ln -s "${WORKSPACE_DIR}" "${HOME}"
+# `scoter run` says where it mounted the project's clone and the persistent
+# store (the dev container's `mounts`), through the compose file.
+if [ -z "${SCOTER_PROJECT_CLONE}" ] || [ -z "${SCOTER_PERSISTENT_STORE}" ] ; then
+    echo "SCOTER_PROJECT_CLONE and SCOTER_PERSISTENT_STORE must be set; start this with scoter run" >&2
+    exit 1
+fi
+if [ ! -w "${SCOTER_PERSISTENT_STORE}" ] ; then
+    echo "The persistent store, ${SCOTER_PERSISTENT_STORE}, isn't writable by $( id -un )" >&2
+    exit 1
 fi
 
-# Set up the sshd configuration file with the SSHD port.
-envsubst '${SCOTER_SSHD_PORT}' \
-    < /home/ubuntu/.config/sshd/sshd_config.template \
-    > /home/ubuntu/.config/sshd/sshd_config
+# Keep what /etc/scoter/persistent-store.txt lists in the persistent store:
+# each one is linked from the home directory into the store, copied there
+# from the image the first time.  Everything else in the home directory comes
+# from the image, as it is on every start.
+cd /tmp
+while IFS= read -r entry ; do
+    case "${entry}" in
+        ''|'#'*) continue ;;
+        /*|*..*) echo "Skipping the persistent store entry '${entry}'" >&2 ; continue ;;
+    esac
+    rel="${entry%/}"
+    home_path="${HOME}/${rel}"
+    store_path="${SCOTER_PERSISTENT_STORE}/${rel}"
+    # The store is the container's own: an earlier session may have put a
+    # link there.  Use only what's really there.
+    if [ -L "${store_path}" ] ; then
+        echo "Skipping the persistent store entry '${entry}': it's a link in the store" >&2
+        continue
+    fi
+    if [ ! -e "${store_path}" ] ; then
+        mkdir -p "$( dirname "${store_path}" )"
+        if [ -e "${home_path}" ] && [ ! -L "${home_path}" ] ; then
+            cp -a "${home_path}" "${store_path}"
+        elif [ "${entry}" != "${rel}" ] ; then
+            mkdir -p "${store_path}"
+        else
+            : > "${store_path}"
+        fi
+    fi
+    rm -rf "${home_path}"
+    mkdir -p "$( dirname "${home_path}" )"
+    ln -s "${store_path}" "${home_path}"
+done < /etc/scoter/persistent-store.txt
 
-# Assemble the files from the working directory.
-cp /opt/surf-scoter-setup/authorized_keys "${HOME}/.ssh/authorized_keys"
-test -f "${HOME}/.config/sshd/ssh_host_ed25519_key" && rm -f "${HOME}/.config/sshd/ssh_host_ed25519_key"
-cp /opt/surf-scoter-setup/ssh_host_ed25519_key "${HOME}/.config/sshd/ssh_host_ed25519_key"
-chmod 0400 "${HOME}/.config/sshd/ssh_host_ed25519_key"
+# Git refuses a repository another user owns, as the clone may be.
+git config --global --replace-all safe.directory "${SCOTER_PROJECT_CLONE}"
+
+# The SSH server's configuration, host key and authorized keys, fresh from
+# the image and the read-only setup directory on every start.
+sshd_dir=/run/scoter-sshd
+envsubst '${SCOTER_SSHD_PORT}' \
+    < /etc/scoter/sshd_config.template \
+    > "${sshd_dir}/sshd_config"
+cp /opt/surf-scoter-setup/authorized_keys "${sshd_dir}/authorized_keys"
+chmod 0600 "${sshd_dir}/authorized_keys"
+rm -f "${sshd_dir}/ssh_host_ed25519_key"
+cp /opt/surf-scoter-setup/ssh_host_ed25519_key "${sshd_dir}/ssh_host_ed25519_key"
+chmod 0400 "${sshd_dir}/ssh_host_ed25519_key"
 
 # Read the 'bridge-cmds.txt' file and link the bridge client to those names
 # in /usr/local/scoter-bridge, which comes first on the PATH.  The container
@@ -52,4 +75,5 @@ for name in $( cat /opt/surf-scoter-setup/bridge-cmds.txt ) ; do
 done
 
 # Keep running with the SSHD process.
-exec /usr/sbin/sshd -D -e -f "${HOME}/.config/sshd/sshd_config"
+cd "${SCOTER_PROJECT_CLONE}"
+exec /usr/sbin/sshd -D -e -f "${sshd_dir}/sshd_config"

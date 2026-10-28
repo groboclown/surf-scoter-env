@@ -2,7 +2,7 @@
 Port ${SCOTER_SSHD_PORT}
 ListenAddress 127.0.0.1
 
-HostKey /home/ubuntu/.config/sshd/ssh_host_ed25519_key
+HostKey /run/scoter-sshd/ssh_host_ed25519_key
 PidFile none
 
 PubkeyAuthentication yes
@@ -10,7 +10,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 
-AuthorizedKeysFile /home/ubuntu/.ssh/authorized_keys
+AuthorizedKeysFile /run/scoter-sshd/authorized_keys
 
 UsePAM no
 PermitRootLogin no

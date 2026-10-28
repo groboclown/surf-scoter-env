@@ -10,7 +10,7 @@ This file tells the Scoter tools which development container the project uses.  
 
 The file is only a suggestion: its host commands and egress rules do nothing until you accept them.  `scoter verify` shows them, resolved for your computer (each command's program as an absolute path, each `${section:key}` worked out), with what the checks found as `#scoter:` comments, and asks whether to use them, edit them or deny them.  When you've accepted the project before (on this branch, if you have; expired acceptances count), the review compares with that acceptance: what changed since is shown in full, with your earlier version beside anything the project changed; what didn't change is one line; and your own changes, notes (`$comment`) and overrides are kept.  The review starts with what your setup changes about the host command checks (`--skip-setup-review` leaves that out), and is shown through `PAGER` when it's set; `[v]iew` shows it again.  Edit opens the review in `VISUAL`, or else `EDITOR` (on Windows, or else Notepad), and after you save it, it's read and checked again before you're asked again.  Pressing Enter denies.  It needs a terminal; `scoter verify --output FILE` only writes the review.  Your acceptance is kept in your `verification: paths: store`, never in the project, and later runs use the settings exactly as you accepted them.  `scoter revoke` lists your acceptances of the project, and revokes them by branch, by fingerprint, or all (`--all`), so the next run asks for a review again.  `scoter list-accepted` lists every project you've accepted, with each acceptance's id and expiry, and any exemption; `scoter revoke ID` revokes one from anywhere, and `scoter revoke $(scoter list-accepted -q)` revokes them all.  `scoter run` won't start a project you haven't accepted, and says why (never accepted, expired, your setup changed, or which files changed), and builds its container from the copy of `.surf-scoter.d` kept with your acceptance, not from the files in the project.  The review can also choose one of your own containers instead of the project's (`dev-container: use: {name: NAME}`, found outside the project), or replace the images the project's Dockerfiles start from (`images`).  While you work on the project's container, `scoter exempt` lets runs use the container files as they are, without a review, for a day (on the current branch); `scoter verify --with-exemption` picks up changes to the project file and `dev-env.yaml` files meanwhile, when the checks refuse nothing.  See [Exemptions](system-config-file.md#exemptions).
 
-You can also use this with the [scoter-host](../host/) executable to describe ways the container can communicate with the host ("host bypass").  This allows you to grant very limited access to additional privileges that the container normally shouldn't do (access to credentials, the Docker daemon, and so on).  Because those actions run on the host, everything they touch on the file system is restricted to the workspace (or a throwaway temporary directory).
+You can also use this with the [scoter-host](../host/) executable to describe ways the container can communicate with the host ("host bypass").  This allows you to grant very limited access to additional privileges that the container normally shouldn't do (access to credentials, the Docker daemon, and so on).  Because those actions run on the host, everything they touch on the file system is restricted to the project's clone (or a throwaway temporary directory).
 
 **Caution!**  Only allow commands that truly need the host's privileges: a command that works inside the container, or that the user can run on the host themselves, doesn't belong here.  Don't allow `find` just because it makes things a little easier.
 
@@ -25,8 +25,10 @@ container:
   dev-container-path: ./dev-env
   # Or, instead, the name of one found in the system configuration's `scoter` `path-lists: dev-containers-search`.
   # dev-container: dev-env
-  # optional; where under the workspace the project is cloned (default: the workspace itself)
-  workspace-subdir: src/my-project
+  # optional; where the project's clone is mounted in the container
+  # (default: the dev container's `mounts: project-clone`)
+  mounts:
+    project-clone: /src/my-project
 # optional; the network destinations the container needs (see "Egress")
 egress:
   - host: registry.npmjs.org
@@ -56,7 +58,7 @@ commands:
     args: [compose, up]
     # optional; run in the client's directory, when it matches one of these
     cwd:
-      allowed-workspace-dirs:
+      allowed-project-clone-dirs:
         - services/*
         - infra/**
 ```
@@ -74,7 +76,7 @@ The `container` section sets exactly one of:
 
 The container directory, and every parent its `dev-env.yaml` builds on, must be inside `.surf-scoter.d` or one of the `dev-containers-search` directories, once symlinks are resolved.  The directory is the container's build context, so keep files you don't want in the image, such as `.env` files and keys, out of it.
 
-`workspace-subdir` (optional) says where under the workspace the project is cloned, so the container sees it at that path under its workspace mount (`/workspace/src/my-project`, say, rather than `/workspace`).  Without it, the project is the workspace itself.  It's a relative path, with `/` between names, and each name is ASCII without spaces or control characters, isn't `.` or `..`, has no `\`, doesn't start with `-`, and isn't one Windows reads as more than a file name (one with a `:`, or a device name such as `NUL`), since it's joined to the workspace on every host.  Tools find the result as the `scoter` path `dev-container-project-dir` in the [universal configuration file](contributors/universal-configuration-file.md).
+`mounts: project-clone` (optional) says where the project's clone is mounted in the container, in place of the dev container's own `mounts: project-clone` (`/src/my-project`, say, rather than `/project`).  It's a container path, held to the same rules as the dev container's mount points (see [the `dev-env.yaml` file](project-dockerfile.md#the-dev-envyaml-file)), and it can't be at, or inside, the container's other mounts.  It only moves where the container sees the clone: on the host, the clone is always the setup's `project-state: paths: project-clone-dir` itself.
 
 The `dev-env.yaml` file says how to run the container, including where the broker is inside it (`broker-bin`).  The command that starts the broker comes from the system configuration's `docker` section (its `runs: broker` key).
 
@@ -94,11 +96,11 @@ The `dev-env.yaml` file says how to run the container, including where the broke
 
 `command` is the name the client was run as in the container.  `program` is the name of the program the host runs (by default, the same as `command`).  Both are names, never paths: the host finds the program by its name, through your system configuration's [`command-map`](system-config-file.md#host-command-checks), or else on its `PATH`.  A name is ASCII without spaces or control characters, doesn't start with `-`, and has no `/`, `\` or `:`, and isn't a Windows device name (such as `NUL` or `COM1`).  A request is allowed by the first entry with that command whose `args` match (and whose current working directory (`cwd`) allows the client's directory, when the entry has one).
 
-Without `cwd`, the process runs in a new temporary directory.  With `cwd`, it runs in the host directory matching the client's working directory.  That directory must be inside the workspace once symlinks are resolved, and its resolved path must match one of the `allowed-workspace-dirs` patterns:
+Without `cwd`, the process runs in a new temporary directory.  With `cwd`, it runs in the host directory matching the client's working directory.  That directory must be inside the project clone once symlinks are resolved, and its resolved path must match one of the `allowed-project-clone-dirs` patterns:
 
-* Patterns are relative to the workspace directory; `.` is the workspace itself, and a leading `./` is allowed.
+* Patterns are relative to the project clone; `.` is the clone itself, and a leading `./` is allowed.
 * `*` matches any characters within one directory name, and `?` matches one character.
-* `**`, as a whole directory name, matches any number of directories, including none: `infra/**` allows `infra` too, and `**` allows the whole workspace.
+* `**`, as a whole directory name, matches any number of directories, including none: `infra/**` allows `infra` too, and `**` allows the whole project clone.
 * Quote patterns that start with `*`; YAML reads a bare `*...` as an alias.
 
 `args` is a list of tokens, matched one-to-one against the client's arguments.  A string token must match exactly.  A map token is a placeholder, `any` or `path`.
@@ -112,10 +114,10 @@ Without `cwd`, the process runs in a new temporary directory.  With `cwd`, it ru
 `path` matches a file path, which the host process receives as the resolved host path.  `within` says where it may be:
 
 * `{path: {within: cwd}}`: at or below the client's working directory.
-* `{path: {within: workspace, allowed: [build/**, '*.txt']}}`: in the workspace, matching one of `allowed` (patterns like `allowed-workspace-dirs`, but they may name files too).
+* `{path: {within: project-clone, allowed: [build/**, '*.txt']}}`: in the project clone, matching one of `allowed` (patterns like `allowed-project-clone-dirs`, but they may name files too).
 * `{path: {within: temp}}`: a throwaway file in a temporary directory, deleted when the process exits.  The client's value only picks the file name, and only with `keep-name: true`; otherwise the name is generated.  Kept names may not contain separators or characters Windows refuses, nor be `.`, `..` or a Windows device name like `NUL`.
 
-Client paths are relative to the client's working directory, or absolute container paths; either way they must be inside the workspace mount.  They are resolved on the host following symlinks, and the result must still be in the workspace (and match the `within` rule).  A path that doesn't exist yet (such as an output file) is allowed when its directory exists.  `allow-leading-dash` is also a `path` option.
+Client paths are relative to the client's working directory, or absolute container paths; either way they must be inside the project clone's mount.  They are resolved on the host following symlinks, and the result must still be in the project clone (and match the `within` rule).  Paths in the persistent store, or anywhere else in the container, are refused: there's no host directory to map them to.  A path that doesn't exist yet (such as an output file) is allowed when its directory exists.  `allow-leading-dash` is also a `path` option.
 
 ## Host command environment
 

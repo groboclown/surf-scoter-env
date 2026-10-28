@@ -64,7 +64,7 @@ python3 ~/.local/share/surf-scoter-self-host/scoter.py run
 
 `make self-host-install`:
 
-* exports `SELF_HOST_REF` (default `main`) with `git archive`, so only committed files go in: never uncommitted changes, untracked files, or the workspace;
+* exports `SELF_HOST_REF` (default `main`) with `git archive`, so only committed files go in: never uncommitted changes, untracked files, or the project clone;
 * builds the host programs from that export (not from your checkout);
 * installs the result in `SELF_HOST_DIR` (default `~/.local/share/surf-scoter-self-host`), outside the repository, read-only, with a `.surf-scoter-self-host` file recording the commit.
 

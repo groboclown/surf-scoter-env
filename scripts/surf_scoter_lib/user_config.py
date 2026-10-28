@@ -249,10 +249,17 @@ class UserConfig:
         return val
 
     def dev_container_mounts(self) -> dict[str, str]:
-        """Get the dev-container volume mount points."""
+        """The dev container's mount points, by `mounts` key.
+
+        The project file's `container: mounts: project-clone`, when it sets
+        one, takes the place of the container's own, as in the generator.
+        """
         ret: dict[str, str] = {}
         for path in self.__req_dict_keys("dev-container", "mounts"):
             ret[str(path[-1])] = self.__req_str(*path)
+        project_clone = self.project_str("container", "mounts", "project-clone")
+        if project_clone is not None:
+            ret["project-clone"] = project_clone
         return ret
 
     def dev_container_parent_builds(self) -> list[tuple[str, Path]]:

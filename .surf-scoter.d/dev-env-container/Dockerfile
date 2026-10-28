@@ -19,7 +19,9 @@ RUN set -x \
         cargo \
         build-essential \
 # Clean up installs.
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+# Keep Cargo's downloads between runs, in the persistent store.
+ && printf '.cargo/registry/\n.cargo/git/\n' >> /etc/scoter/persistent-store.txt
 
 # End with user-mode installs and setup.
 USER ubuntu
@@ -35,6 +37,4 @@ RUN set -x \
  && chmod +x /tmp/rust-installer \
  && /tmp/rust-installer -y \
  # Ensure Rust runs.
- && "${HOME}/.cargo/bin/cargo" --version \
- # The ownership of the mounted /workspace directory will trigger git messages.
- && git config --global --add safe.directory /workspace
+ && "${HOME}/.cargo/bin/cargo" --version

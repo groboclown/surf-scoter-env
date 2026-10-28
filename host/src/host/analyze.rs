@@ -2,9 +2,9 @@
 //!
 //! The host bypass is for actions the container can't perform itself because
 //! they need the host's privileges.  Since those actions run on the host,
-//! every file they're given is restricted to the workspace (or a throwaway
-//! temporary directory): paths are mapped from the container's workspace
-//! mount to the host's workspace directory and resolved, following symlinks,
+//! every file they're given is restricted to the project clone (or a throwaway
+//! temporary directory): paths are mapped from the container's project clone
+//! mount to the host's project clone directory and resolved, following symlinks,
 //! before they're checked.  Commands the container or the user's host can run
 //! on their own don't belong in the configuration.
 //!
@@ -31,7 +31,7 @@ use surf_scoter_env_launcher::comm::client_host::Invocation;
 use scoter_host::config::project::{Commands, MatchOptions, PathOptions, Token, Within};
 
 use super::exec::{Arg, ExecRequest};
-use super::workspace::Workspace;
+use super::project_clone::ProjectClone;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
@@ -40,11 +40,11 @@ pub(crate) enum Decision {
     Deny(String),
 }
 
-/// `workspace` is how container paths map to host paths.
+/// `workspace` (the project clone) is how container paths map to host paths.
 pub(crate) fn analyze(
     invocation: &Invocation,
     commands: &Commands,
-    workspace: &Workspace,
+    workspace: &ProjectClone,
 ) -> Decision {
     let Some(arg0) = invocation.args.first() else {
         return Decision::Deny("no command given".to_string());
@@ -69,7 +69,7 @@ pub(crate) fn analyze(
             Some(cwd_rule) => match request.client_dir() {
                 Some(dir)
                     if cwd_rule
-                        .allowed_workspace_dirs
+                        .allowed_project_clone_dirs
                         .iter()
                         .any(|pattern| pattern.matches(&dir.names())) =>
                 {
@@ -108,13 +108,13 @@ pub(crate) fn analyze(
 struct Request<'a> {
     /// The client's working directory, in the container.
     cwd: &'a str,
-    workspace: &'a Workspace,
+    workspace: &'a ProjectClone,
     /// Resolved on first use.
     client_dir: OnceCell<Option<HostPath>>,
 }
 
 impl Request<'_> {
-    /// The client's working directory on the host; `None` when it isn't in the workspace.
+    /// The client's working directory on the host; `None` when it isn't in the project clone.
     fn client_dir(&self) -> Option<&HostPath> {
         self.client_dir
             .get_or_init(|| resolve_dir(self.cwd, self.workspace))
@@ -122,11 +122,11 @@ impl Request<'_> {
     }
 }
 
-/// A resolved path inside the host's workspace directory.
+/// A resolved path inside the host's project clone directory.
 #[derive(Debug, PartialEq, Eq)]
 struct HostPath {
     path: PathBuf,
-    /// The names below the workspace directory.
+    /// The names below the project clone directory.
     below_workspace: Vec<String>,
 }
 
@@ -137,18 +137,22 @@ impl HostPath {
 }
 
 /// Resolve a container directory on the host; see `resolve`.  It must exist as a directory.
-fn resolve_dir(container_dir: &str, workspace: &Workspace) -> Option<HostPath> {
+fn resolve_dir(container_dir: &str, workspace: &ProjectClone) -> Option<HostPath> {
     resolve(container_dir, workspace, false).filter(|dir| dir.path.is_dir())
 }
 
 /// Map an absolute container path to the host, following symlinks.  `None`
-/// when it isn't under the workspace mount, doesn't exist on the host, or
-/// resolves to somewhere outside the host's workspace directory.
+/// when it isn't under the project clone mount, doesn't exist on the host, or
+/// resolves to somewhere outside the host's project clone directory.
 ///
 /// With `may_be_missing`, a path that doesn't exist yet (such as an output
 /// file) is allowed when its directory exists, as long as it isn't a dangling
 /// symlink.
-fn resolve(container_path: &str, workspace: &Workspace, may_be_missing: bool) -> Option<HostPath> {
+fn resolve(
+    container_path: &str,
+    workspace: &ProjectClone,
+    may_be_missing: bool,
+) -> Option<HostPath> {
     let rest = container_path.strip_prefix(workspace.container.as_str())?;
     if !rest.is_empty() && !rest.starts_with('/') {
         // A sibling such as `/workspace2`.
@@ -268,7 +272,7 @@ fn match_path(options: &PathOptions, value: &str, request: &Request) -> Option<A
     let allowed = match options.within {
         // At or below: `starts_with` compares whole names.
         Within::Cwd => resolved.path.starts_with(&request.client_dir()?.path),
-        Within::Workspace => options
+        Within::ProjectClone => options
             .allowed
             .iter()
             .any(|pattern| pattern.matches(&resolved.names())),
@@ -336,8 +340,8 @@ mod tests {
         ))
     }
 
-    fn workspace() -> Workspace {
-        Workspace {
+    fn workspace() -> ProjectClone {
+        ProjectClone {
             host: std::path::PathBuf::from("/home/me/ws"),
             container: "/workspace".to_string(),
         }
@@ -410,9 +414,9 @@ mod tests {
         );
     }
 
-    /// Decide in a fresh workspace, with the client at the workspace root.
+    /// Decide in a fresh project clone, with the client at the project clone root.
     fn decide(args: &[&str]) -> Decision {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         analyze(&invocation(args), &commands(), &ws.workspace)
     }
 
@@ -446,7 +450,7 @@ mod tests {
 
     #[test]
     fn s3_copy_bucket_to_container() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let decide = |args: &[&str]| analyze(&invocation(args), &commands(), &ws.workspace);
         assert_eq!(
             decide(&[
@@ -710,26 +714,26 @@ mod tests {
 
     // ---- cwd ----
 
-    /// A real workspace directory on the host:
+    /// A real project clone directory on the host:
     ///   services/api, services/web, infra/a/b, notes.txt
-    struct TestWorkspace {
+    struct TestProjectClone {
         /// Removes the directory when the test ends.
         _dir: TempDir,
-        workspace: Workspace,
+        workspace: ProjectClone,
     }
 
-    impl TestWorkspace {
+    impl TestProjectClone {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
             for sub in ["services/api", "services/web", "infra/a/b"] {
                 fs::create_dir_all(dir.path().join(sub)).unwrap();
             }
             fs::write(dir.path().join("notes.txt"), b"").unwrap();
-            let workspace = Workspace {
+            let workspace = ProjectClone {
                 host: dir.path().canonicalize().unwrap(),
                 container: "/workspace".to_string(),
             };
-            TestWorkspace {
+            TestProjectClone {
                 _dir: dir,
                 workspace,
             }
@@ -767,13 +771,13 @@ mod tests {
             "  - command: docker\n",
             "    args: [compose, up]\n",
             "    cwd:\n",
-            "      allowed-workspace-dirs: [services/*, infra/**]\n",
+            "      allowed-project-clone-dirs: [services/*, infra/**]\n",
         ))
     }
 
     #[test]
     fn cwd_allowed_runs_in_host_dir() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         assert_eq!(
             ws.decide(&commands, "/workspace/services/api"),
@@ -796,7 +800,7 @@ mod tests {
 
     #[test]
     fn cwd_client_path_is_normalized() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         assert_eq!(
             ws.cwd_of(&commands, "/workspace/services/./api/"),
@@ -814,7 +818,7 @@ mod tests {
 
     #[test]
     fn cwd_not_matching_patterns() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         ws.assert_denied_in(&commands, "/workspace");
         ws.assert_denied_in(&commands, "/workspace/services");
@@ -824,7 +828,7 @@ mod tests {
 
     #[test]
     fn cwd_outside_workspace() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         ws.assert_denied_in(&commands, "/");
         ws.assert_denied_in(&commands, "/tmp");
@@ -836,7 +840,7 @@ mod tests {
 
     #[test]
     fn cwd_must_exist_as_a_directory() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         ws.assert_denied_in(&commands, "/workspace/services/missing");
         ws.assert_denied_in(&commands, "/workspace/infra/notes.txt");
@@ -846,9 +850,9 @@ mod tests {
 
     #[test]
     fn cwd_mismatch_tries_next_entry() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = parse_commands(concat!(
-            "  - {command: docker, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
+            "  - {command: docker, args: [compose, up], cwd: {allowed-project-clone-dirs: [services/*]}}\n",
             "  - {command: docker, args: [compose, up]}\n",
         ));
         assert_eq!(
@@ -862,10 +866,10 @@ mod tests {
 
     #[test]
     fn cwd_later_entry_allows_others() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = parse_commands(concat!(
-            "  - {command: docker, program: docker-a, args: [compose, up], cwd: {allowed-workspace-dirs: [services/*]}}\n",
-            "  - {command: docker, program: docker-b, args: [compose, up], cwd: {allowed-workspace-dirs: [.]}}\n",
+            "  - {command: docker, program: docker-a, args: [compose, up], cwd: {allowed-project-clone-dirs: [services/*]}}\n",
+            "  - {command: docker, program: docker-b, args: [compose, up], cwd: {allowed-project-clone-dirs: [.]}}\n",
         ));
         let program = |cwd: &str| match ws.decide(&commands, cwd) {
             Decision::Allow(req) => req.program,
@@ -878,7 +882,7 @@ mod tests {
 
     #[test]
     fn cwd_ignored_without_rule() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = parse_commands("  - {command: docker, args: [compose, up]}\n");
         assert_eq!(ws.cwd_of(&commands, "/workspace/services/api"), None);
         assert_eq!(ws.cwd_of(&commands, "not even a path"), None);
@@ -886,7 +890,7 @@ mod tests {
 
     #[test]
     fn cwd_mismatch_reason_unchanged() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let mut inv = invocation(&["docker", "compose", "down"]);
         inv.cwd = "/workspace/services/api".to_string();
         assert_eq!(
@@ -898,8 +902,8 @@ mod tests {
     #[test]
     fn mount_trailing_name_overlap() {
         // The mount itself may be nested, e.g. /home/dev/ws.
-        let ws = TestWorkspace::new();
-        let workspace = Workspace {
+        let ws = TestProjectClone::new();
+        let workspace = ProjectClone {
             host: ws.workspace.host.clone(),
             container: "/home/dev/ws".to_string(),
         };
@@ -918,7 +922,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cwd_symlink_out_is_refused() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let outside = TempDir::new().unwrap();
         fs::create_dir(outside.path().join("api")).unwrap();
         // A link the container could create, pointing at a host directory.
@@ -933,7 +937,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cwd_symlink_matches_target() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let commands = compose_commands();
         // services/link -> infra/a: the name matches `services/*`, but the
         // target is what's checked (and it matches `infra/**`).
@@ -949,7 +953,7 @@ mod tests {
 
     #[test]
     fn resolve_dir_reports_names() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let dir = resolve_dir("/workspace/infra/a/b", &ws.workspace).unwrap();
         assert_eq!(dir.below_workspace, vec!["infra", "a", "b"]);
         assert!(Path::new(&dir.path).is_absolute());
@@ -962,13 +966,13 @@ mod tests {
         parse_commands(concat!(
             "  - {command: tool, args: [cwd, {path: {within: cwd}}]}\n",
             "  - {command: tool, args: [cwd-dash, {path: {within: cwd, allow-leading-dash: true}}]}\n",
-            "  - {command: tool, args: [ws, {path: {within: workspace, allowed: ['infra/**', 'services/*/*.json', notes.txt]}}]}\n",
+            "  - {command: tool, args: [ws, {path: {within: project-clone, allowed: ['infra/**', 'services/*/*.json', notes.txt]}}]}\n",
             "  - {command: tool, args: [temp, {path: {within: temp}}]}\n",
             "  - {command: tool, args: [temp-name, {path: {within: temp, keep-name: true}}]}\n",
         ))
     }
 
-    impl TestWorkspace {
+    impl TestProjectClone {
         /// The path argument an allowed `tool MODE VALUE` gets, run from `cwd`.
         fn path_arg(&self, cwd: &str, mode: &str, value: &str) -> Option<Arg> {
             let mut inv = invocation(&["tool", mode, value]);
@@ -986,7 +990,7 @@ mod tests {
 
     #[test]
     fn path_within_cwd() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let cwd = "/workspace/services";
         // At or below the client's directory, existing or not.
         assert_eq!(ws.path_arg(cwd, "cwd", "."), ws.host_arg("services"));
@@ -1019,7 +1023,7 @@ mod tests {
 
     #[test]
     fn cwd_path_needs_client_inside() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         assert_eq!(ws.path_arg("/", "cwd", "workspace/notes.txt"), None);
         assert_eq!(
             ws.path_arg("/home/dev", "cwd", "/workspace/notes.txt"),
@@ -1035,7 +1039,7 @@ mod tests {
 
     #[test]
     fn path_within_workspace() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let cwd = "/workspace/services";
         assert_eq!(ws.path_arg(cwd, "ws", "../infra"), ws.host_arg("infra"));
         assert_eq!(
@@ -1064,7 +1068,7 @@ mod tests {
 
     #[test]
     fn path_missing_parent_refused() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         assert_eq!(ws.path_arg("/workspace", "cwd", "missing/out.txt"), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "notes.txt/out.txt"), None);
         assert_eq!(ws.path_arg("/workspace", "ws", "infra/missing/x"), None);
@@ -1074,7 +1078,7 @@ mod tests {
 
     #[test]
     fn path_dash_and_empty() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         assert_eq!(ws.path_arg("/workspace", "cwd", ""), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "-"), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "--out"), None);
@@ -1087,7 +1091,7 @@ mod tests {
 
     #[test]
     fn path_mount_lookalike() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         assert_eq!(
             ws.path_arg("/workspace", "cwd", "/workspacex/notes.txt"),
             None
@@ -1102,7 +1106,7 @@ mod tests {
     #[test]
     fn path_symlinks_are_resolved() {
         use std::os::unix::fs::symlink;
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let outside = TempDir::new().unwrap();
         fs::write(outside.path().join("secret"), b"").unwrap();
         symlink(outside.path(), ws.host("services/api/escape")).unwrap();
@@ -1130,7 +1134,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn path_dangling_symlink_refused() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let outside = TempDir::new().unwrap();
         // Writing to `out.txt` would create the file outside the workspace.
         std::os::unix::fs::symlink(outside.path().join("created"), ws.host("services/out.txt"))
@@ -1142,7 +1146,7 @@ mod tests {
 
     #[test]
     fn path_within_temp() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let generated = Some(Arg::TempFile { name: None });
         // The client's value doesn't matter, not even outside the workspace.
         assert_eq!(ws.path_arg("/workspace", "temp", "out.txt"), generated);
@@ -1152,7 +1156,7 @@ mod tests {
 
     #[test]
     fn path_within_temp_keeps_name() {
-        let ws = TestWorkspace::new();
+        let ws = TestProjectClone::new();
         let kept = |name: &str| {
             Some(Arg::TempFile {
                 name: Some(name.to_string()),

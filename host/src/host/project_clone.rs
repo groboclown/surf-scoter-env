@@ -1,21 +1,21 @@
-//! The workspace directory: where it is on the host and in the container.
+//! The project clone directory: where it is on the host and in the container.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The workspace directory, shared between the host and the container: the
-/// universal configuration's `dev-container-workspace-dir`, mounted at the
-/// dev container's `mounts: workspace`.
+/// The project clone directory, shared between the host and the container: the
+/// universal configuration's `project-clone-dir`, mounted at the
+/// dev container's `mounts: project-clone`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Workspace {
+pub(crate) struct ProjectClone {
     /// Canonical path of the directory on the host.
     pub host: PathBuf,
     /// Absolute path where it's mounted in the container, without a trailing '/'.
     pub container: String,
 }
 
-impl Workspace {
-    /// The workspace at `host`, mounted at `container`.  The host directory
+impl ProjectClone {
+    /// The project clone at `host`, mounted at `container`.  The host directory
     /// must exist.
     pub(crate) fn new(host: &Path, container: &str) -> Result<Self, String> {
         let container = normalize_container_path(container)?;
@@ -25,7 +25,7 @@ impl Workspace {
         if !host_dir.is_dir() {
             return Err(format!("host directory '{shown}' is not a directory"));
         }
-        Ok(Workspace {
+        Ok(ProjectClone {
             host: host_dir,
             container,
         })
@@ -60,15 +60,15 @@ mod tests {
     }
 
     fn workspace_error(host: &Path, container: &str) -> String {
-        Workspace::new(host, container).unwrap_err()
+        ProjectClone::new(host, container).unwrap_err()
     }
 
     #[test]
     fn workspace_new() {
         let host = host_dir();
         assert_eq!(
-            Workspace::new(&host, "/workspace"),
-            Ok(Workspace {
+            ProjectClone::new(&host, "/workspace"),
+            Ok(ProjectClone {
                 host: host.clone(),
                 container: "/workspace".to_string()
             })
@@ -79,7 +79,9 @@ mod tests {
     fn workspace_host_is_canonical() {
         let host = host_dir();
         assert_eq!(
-            Workspace::new(&host.join("."), "/workspace").unwrap().host,
+            ProjectClone::new(&host.join("."), "/workspace")
+                .unwrap()
+                .host,
             host
         );
     }
@@ -93,7 +95,7 @@ mod tests {
             ("/a", "/a"),
         ] {
             assert_eq!(
-                Workspace::new(&host, given).unwrap().container,
+                ProjectClone::new(&host, given).unwrap().container,
                 expected,
                 "{given}"
             );

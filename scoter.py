@@ -74,7 +74,7 @@ def load_config(
     settings = generate_config(
         distribution_dir=dist_dir,
         project_dir=None,
-        dev_container_workspace_dir=None,
+        project_clone_dir=None,
         dev_container_settings_dir=None,
         universal_file=None,
         no_setup_search=False,
@@ -327,7 +327,7 @@ def reprocess_config(
             distribution_dir=dist_dir,
             project_dir=str(project_dir),
             vcs_root=str(vcs_root) if vcs_root else None,
-            dev_container_workspace_dir=None,
+            project_clone_dir=None,
             dev_container_settings_dir=None,
             universal_file=tmp,
             no_setup_search=True,
@@ -447,7 +447,7 @@ def generate_config(
     *,
     distribution_dir: Path,
     project_dir: str | None,
-    dev_container_workspace_dir: str | None,
+    project_clone_dir: str | None,
     vcs_root: str | None = None,
     dev_container_settings_dir: str | None,
     universal_file: str | None,
@@ -467,8 +467,8 @@ def generate_config(
         args.extend(("--project-dir", project_dir))
     if vcs_root:
         args.extend(("--vcs-root", vcs_root))
-    if dev_container_workspace_dir:
-        args.extend(("--dev-container-workspace-dir", dev_container_workspace_dir))
+    if project_clone_dir:
+        args.extend(("--project-clone-dir", project_clone_dir))
     if dev_container_settings_dir:
         args.extend(("--dev-container-settings-dir", dev_container_settings_dir))
     if universal_file:
@@ -712,7 +712,6 @@ def config_scope(sub_cmd: str | None, dist_dir: Path) -> ConfigScope:
 
 def _is_subcmd_in(sub_cmd: str, file: Path) -> bool:
     """Check whether the sub-command is in the file."""
-    print(f"Reading {file}")
     try:
         return sub_cmd in file.read_text(encoding="utf-8").splitlines()
     except BaseException as err:

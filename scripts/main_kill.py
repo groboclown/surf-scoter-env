@@ -2,9 +2,10 @@
 """Surf Scoter Sub-command: kill
 
 Stops a dev environment whose `scoter run` is gone, or stuck: stops its
-containers, fetches its workspace's changes into the project if asked,
-removes its workspace if asked, and forgets it (its entry in the running
-environments file, and `${scoter:state-dir}/environments/HOST`).
+containers, fetches its project clone's changes into the project if asked,
+removes its project clone or persistent store if asked, and forgets it (its
+entry in the running environments file, and
+`${scoter:state-dir}/environments/HOST`).
 """
 import enum
 import os
@@ -18,6 +19,7 @@ from surf_scoter_lib import (
     UserConfig,
     fileutil,
     gen_parser,
+    persistent_store,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
@@ -29,12 +31,15 @@ from surf_scoter_lib.user_config import Capture, OnError
 SUC_COPY_DIR = "environments"
 
 
-class Workspace(enum.Enum):
-    """What `run_kill` does with the environment's workspace."""
+class Clean(enum.Flag):
+    """What `run_kill` removes once the environment stops."""
 
-    KEEP = "keep"
-    # Remove it (`--force-clean`), unless it is, or holds, something else.
-    REMOVE = "remove"
+    NOTHING = 0
+    # The project's clone (`--clean-project-clone`), unless it is, or holds,
+    # something else.
+    PROJECT_CLONE = enum.auto()
+    # The persistent store volume (`--clean-persistent-store`).
+    PERSISTENT_STORE = enum.auto()
 
 
 class SshEntries(enum.Enum):
@@ -51,7 +56,7 @@ def run_kill(
     *,
     host: str | None,
     fetch_branch: str | None,
-    workspace: Workspace,
+    clean: Clean = Clean.NOTHING,
     ssh: SshEntries = SshEntries.RELEASE,
 ) -> int:
     """Stop the environment `host`, or the project's one.
@@ -93,17 +98,25 @@ def run_kill(
         print("It was only reserved: its run stopped before it started any containers.")
 
     if fetch_branch and not _fetch(recorded, env, fetch_branch):
-        print("Its workspace is kept, and it's still listed.", file=sys.stderr)
+        print("Its project clone is kept, and it's still listed.", file=sys.stderr)
         return 1
-    if workspace == Workspace.REMOVE and env.workspace_dir:
-        problem = _unsafe_to_remove(Path(env.workspace_dir), recorded)
+    if Clean.PROJECT_CLONE in clean and env.project_clone_dir:
+        problem = _unsafe_to_remove(Path(env.project_clone_dir), recorded)
         if problem:
-            print(f"Not removing the workspace {env.workspace_dir}: {problem}.", file=sys.stderr)
+            print(f"Not removing the project clone {env.project_clone_dir}: {problem}.", file=sys.stderr)
         else:
-            print(f"Removing the workspace {env.workspace_dir}...")
-            fileutil.rm(Path(env.workspace_dir))
-    elif env.workspace_dir:
-        print(f"The workspace is kept: {env.workspace_dir}")
+            print(f"Removing the project clone {env.project_clone_dir}...")
+            fileutil.rm(Path(env.project_clone_dir))
+    elif env.project_clone_dir:
+        print(f"The project clone is kept: {env.project_clone_dir}")
+    if Clean.PERSISTENT_STORE in clean:
+        try:
+            volume = persistent_store.volume_name(recorded)
+        except SurfScoterErr as err:
+            print(f"Not removing the persistent store: {err}", file=sys.stderr)
+        else:
+            if not persistent_store.remove(recorded, volume):
+                print(f"Couldn't remove the persistent store {volume}.", file=sys.stderr)
 
     try:
         with ActiveEnvironmentSet.locked(file, lock_file) as envs:
@@ -161,37 +174,37 @@ def _list(envs: Iterable[EnvironmentDesc]) -> None:
 
 
 def _fetch(config: UserConfig, env: EnvironmentDesc, branch: str) -> bool:
-    """Fetch the workspace's `branch` into the project; False, having said why, if it can't be."""
+    """Fetch the project clone's `branch` into the project; False, having said why, if it can't be."""
     try:
         section = config.get_vcs_section()
     except SurfScoterErr as err:
         print(f"Can't fetch: {err}", file=sys.stderr)
         return False
-    if section is None or not env.workspace_dir or not env.project_dir:
-        print("Can't fetch: the project has no version control system, or no workspace.", file=sys.stderr)
+    if section is None or not env.project_clone_dir or not env.project_dir:
+        print("Can't fetch: the project has no version control system, or no clone.", file=sys.stderr)
         return False
     root = config.active_location("vcs-root") or Path(env.project_dir)
-    print(f"Fetching {branch} from the workspace into {root}...")
+    print(f"Fetching {branch} from the project clone into {root}...")
     try:
         res = config.run_command(
             section, "fetch-changes-into", cwd=Path(root), on_error=OnError.RETURN,
             capture=Capture.NONE,
-            template={"workspace-dir": env.workspace_dir, "branch": branch},
+            template={"project-clone-dir": env.project_clone_dir, "branch": branch},
         )
     except (OSError, SubprocessError, SurfScoterErr) as err:
         print(f"Couldn't fetch: {err}", file=sys.stderr)
         return False
     if res.returncode != 0:
-        print("Couldn't fetch the workspace's changes.", file=sys.stderr)
+        print("Couldn't fetch the project clone's changes.", file=sys.stderr)
         return False
     print("Fetched.  Review them before you merge them (`show-fetch-changes`, for Git `git log -p HEAD..FETCH_HEAD`).")
     return True
 
 
-def _unsafe_to_remove(workspace: Path, config: UserConfig) -> str | None:
-    """Why removing `workspace` would remove more than a workspace, if it would."""
-    real = Path(os.path.realpath(workspace))
-    if not real.is_dir() or os.path.islink(workspace):
+def _unsafe_to_remove(clone: Path, config: UserConfig) -> str | None:
+    """Why removing `clone` would remove more than a project clone, if it would."""
+    real = Path(os.path.realpath(clone))
+    if not real.is_dir() or os.path.islink(clone):
         return "it isn't a directory"
     guarded: list[tuple[str, Path | None]] = [
         ("the project directory", config.active_location("project-dir")),
@@ -230,18 +243,25 @@ def main(argv: Sequence[str]) -> int:
         action="store",
         dest="fetch_branch",
         help=(
-            "Fetch the files from the workspace into your project directory into this branch."
+            "Fetch this branch from the project's clone into your project directory."
         ),
     )
     parser.add_argument(
-        "--force-clean",
+        "--clean-project-clone", "--clean-project",
         action="store_true",
         default=False,
-        dest="force_clean",
+        dest="clean_project_clone",
         help=(
-            "Force delete of the workspace files.  Setting this can potentially "
-            "delete changes, so you should use this with the '--fetch' argument."
+            "Once it's stopped, remove the project's clone.  Changes in it you haven't "
+            "fetched are lost, so use it with '--fetch'.  The persistent store is kept."
         ),
+    )
+    parser.add_argument(
+        "--clean-persistent-store",
+        action="store_true",
+        default=False,
+        dest="clean_persistent_store",
+        help="Once it's stopped, remove the dev container's persistent store.",
     )
 
     args = parser.parse_args(argv)
@@ -249,7 +269,10 @@ def main(argv: Sequence[str]) -> int:
         config,
         host=args.host,
         fetch_branch=args.fetch_branch,
-        workspace=Workspace.REMOVE if args.force_clean else Workspace.KEEP,
+        clean=(
+            (Clean.PROJECT_CLONE if args.clean_project_clone else Clean.NOTHING)
+            | (Clean.PERSISTENT_STORE if args.clean_persistent_store else Clean.NOTHING)
+        ),
     )
 
 

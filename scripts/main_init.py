@@ -72,7 +72,6 @@ vcs: @FOUND_VCS@
 # Location of the container files that run a dev environment.
 container:
   dev-container-path: dev-env-container
-  workspace-subdir: proj
 
 # Where the dev container may connect, through the network gateway.
 egress:
@@ -95,9 +94,6 @@ RUN set -x \
 
 # End with user-mode installs and setup.
 USER ubuntu
-RUN set -x \
-# The ownership of the mounted /workspace directory will trigger git messages.
- && git config --global --add safe.directory /workspace/proj
 """
 
 CONTAINER_YAML_FILE = "dev-env-container/dev-env.yaml"

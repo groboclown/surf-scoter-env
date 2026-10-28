@@ -10,7 +10,7 @@
 //! The host bypass exists so the container can perform an action that needs
 //! privileges the container doesn't have (credentials, the Docker daemon, and
 //! so on).  Because those actions run on the host, everything they touch on
-//! the file system is restricted to the workspace (or a throwaway temporary
+//! the file system is restricted to the project clone (or a throwaway temporary
 //! directory).  Only allow commands that truly need the host's privileges: a
 //! command that works inside the container, or that the user can run on the
 //! host themselves, doesn't belong here.
@@ -26,9 +26,10 @@
 //!   dev-container-path: ./dev-env
 //!   # ...or the name of one found in the system's `scoter` `path-lists: dev-containers-search`.
 //!   # dev-container: dev-env
-//!   # optional; where under the workspace the project is cloned, as a
-//!   # relative path (default: the workspace itself)
-//!   workspace-subdir: src/my-project
+//!   # optional; where the project's clone is mounted in the container,
+//!   # in place of the dev container's `mounts: project-clone`
+//!   mounts:
+//!     project-clone: /src/my-project
 //!
 //! # The environment of the host processes, for every command (optional).
 //! env:
@@ -52,7 +53,7 @@
 //!     args: [compose, up]
 //!     # optional; run in the client's directory, when it matches one of these
 //!     cwd:
-//!       allowed-workspace-dirs:
+//!       allowed-project-clone-dirs:
 //!         - services/*
 //!         - infra/**
 //! ```
@@ -67,15 +68,15 @@
 //!
 //! Without `cwd`, the process runs in a new temporary directory.  With `cwd`,
 //! it runs in the host directory matching the client's working directory.  That
-//! directory must be inside the workspace once symlinks are resolved, and its
-//! resolved path must match one of the `allowed-workspace-dirs` patterns:
-//!   * Patterns are relative to the workspace directory; `.` is the workspace
+//! directory must be inside the project clone once symlinks are resolved, and its
+//! resolved path must match one of the `allowed-project-clone-dirs` patterns:
+//!   * Patterns are relative to the project clone directory; `.` is the project clone
 //!     itself, and a leading `./` is allowed.
 //!   * `*` matches any characters within one directory name, and `?` matches
 //!     one character.
 //!   * `**`, as a whole directory name, matches any number of directories,
 //!     including none: `infra/**` allows `infra` too, and `**` allows the
-//!     whole workspace.
+//!     whole project clone.
 //!   * Quote patterns that start with `*`; YAML reads a bare `*...` as an alias.
 //!
 //! `args` is a list of tokens, matched one-to-one against the client's
@@ -92,9 +93,9 @@
 //! `path` matches a file path, which the host process receives as the
 //! resolved host path.  `within` says where it may be:
 //!   * `{path: {within: cwd}}`: at or below the client's working directory.
-//!   * `{path: {within: workspace, allowed: [build/**, '*.txt']}}`: in the
-//!     workspace, matching one of `allowed` (patterns like
-//!     `allowed-workspace-dirs`, but they may name files too).
+//!   * `{path: {within: project-clone, allowed: [build/**, '*.txt']}}`: in the
+//!     project clone, matching one of `allowed` (patterns like
+//!     `allowed-project-clone-dirs`, but they may name files too).
 //!   * `{path: {within: temp}}`: a throwaway file in a temporary directory,
 //!     deleted when the process exits.  The client's value only picks the
 //!     file name, and only with `keep-name: true`; otherwise the name is
@@ -102,9 +103,9 @@
 //!     Windows refuses, nor be `.`, `..` or a Windows device name like `NUL`.
 //!
 //! Client paths are relative to the client's working directory, or absolute
-//! container paths; either way they must be inside the workspace mount.  They
+//! container paths; either way they must be inside the project clone mount.  They
 //! are resolved on the host following symlinks, and the result must still be
-//! in the workspace (and match the `within` rule).  A path that doesn't exist
+//! in the project clone (and match the `within` rule).  A path that doesn't exist
 //! yet (such as an output file) is allowed when its directory exists.
 //! `allow-leading-dash` is also a `path` option.
 //!
@@ -118,10 +119,11 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use yaml_serde::Value;
 
+use super::dev_env::container_path_problem;
 use super::egress::{self, EgressRule};
 use super::environment::{EnvPlan, EnvRules};
-use super::host_commands::{command_name_problem, windows_name_problem};
-use super::pattern::WorkspacePattern;
+use super::host_commands::command_name_problem;
+use super::pattern::ClonePattern;
 use super::read::{parse_yaml, read_regular_file, tag_errors};
 use super::{ConfigError, child_key, index_key};
 
@@ -131,10 +133,10 @@ pub struct ProjectConfig {
     /// The file, as an absolute path.
     pub path: PathBuf,
     pub container: ContainerRef,
-    /// `container: workspace-subdir`: where under the workspace the project
-    /// is cloned, as written: relative, `/`-separated, each part a plain
-    /// name.  `None` is the workspace itself.
-    pub workspace_subdir: Option<String>,
+    /// `container: mounts: project-clone`: where the project's clone is
+    /// mounted in the container, in place of the dev container's own.  A
+    /// container path, checked by `dev_env::container_path_problem`.
+    pub project_clone_mount: Option<String>,
     /// How the project's files are kept, for the `scoter` script: any
     /// non-empty text.
     pub vcs: Option<String>,
@@ -178,7 +180,15 @@ struct ContainerSection {
     #[serde(default)]
     dev_container: Option<String>,
     #[serde(default)]
-    workspace_subdir: Option<String>,
+    mounts: Option<ContainerMounts>,
+}
+
+/// `container: mounts`: the dev container's mounts the project may change.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct ContainerMounts {
+    #[serde(default)]
+    project_clone: Option<String>,
 }
 
 pub type Commands = Vec<CommandRule>;
@@ -227,7 +237,7 @@ pub struct CommandRule {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CwdRule {
     /// The client's directory must match one of these.
-    pub allowed_workspace_dirs: Vec<WorkspacePattern>,
+    pub allowed_project_clone_dirs: Vec<ClonePattern>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -255,9 +265,9 @@ pub struct MatchOptions {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct PathOptions {
     pub within: Within,
-    /// For `within: workspace`: the path must match one of these.
+    /// For `within: project-clone`: the path must match one of these.
     #[serde(default)]
-    pub allowed: Vec<WorkspacePattern>,
+    pub allowed: Vec<ClonePattern>,
     /// For `within: temp`: use the client's file name instead of a generated one.
     #[serde(default)]
     pub keep_name: bool,
@@ -271,8 +281,8 @@ pub struct PathOptions {
 pub enum Within {
     /// At or below the client's working directory.
     Cwd,
-    /// In the workspace, matching `allowed`.
-    Workspace,
+    /// In the project clone, matching `allowed`.
+    ProjectClone,
     /// A throwaway temporary file.
     Temp,
 }
@@ -408,7 +418,7 @@ fn parse_checked(
     };
 
     let mut container = None;
-    let mut workspace_subdir = None;
+    let mut project_clone_mount = None;
     let mut commands = Commands::new();
     let mut raw_commands = Vec::new();
     let mut env = EnvRules::default();
@@ -419,7 +429,7 @@ fn parse_checked(
         match key.as_str() {
             Some("container") => {
                 has_container = true;
-                (container, workspace_subdir) = parse_container(value, &mut problems);
+                (container, project_clone_mount) = parse_container(value, &mut problems);
             }
             Some("commands") => {
                 (commands, raw_commands) = parse_commands(value, "commands", &mut problems);
@@ -445,7 +455,7 @@ fn parse_checked(
         Some(container) if problems.is_empty() => Ok(ProjectConfig {
             path: path.to_path_buf(),
             container: container.clone(),
-            workspace_subdir,
+            project_clone_mount,
             vcs,
             egress: egress_rules,
             env,
@@ -551,8 +561,8 @@ pub fn wildcard_errors<'a>(
         .collect()
 }
 
-/// The dev container, and the `workspace-subdir`; each `None` when it has a
-/// problem (or, for the subdir, isn't given).
+/// The dev container, and the `mounts: project-clone`; each `None` when it
+/// has a problem (or, for the mount, isn't given).
 fn parse_container(
     value: Value,
     problems: &mut Vec<(String, String)>,
@@ -573,13 +583,13 @@ fn parse_container(
             return (None, None);
         }
     };
-    let workspace_subdir = match section.workspace_subdir {
-        Some(subdir) => match workspace_subdir_problem(&subdir) {
+    let project_clone_mount = match section.mounts.and_then(|mounts| mounts.project_clone) {
+        Some(path) => match container_path_problem(&path) {
             Some(message) => {
-                problem("workspace-subdir", message);
+                problem("mounts.project-clone", message);
                 None
             }
-            None => Some(subdir),
+            None => Some(path),
         },
         None => None,
     };
@@ -612,38 +622,7 @@ fn parse_container(
             None
         }
     };
-    (container, workspace_subdir)
-}
-
-/// Why `subdir` can't be a `workspace-subdir`, if it can't.  It's joined to
-/// the workspace on every host, so it's relative, `/`-separated, and each
-/// part is a plain name: not empty, `.` or `..`; ASCII without spaces or
-/// control characters; no `\` or leading `-`; and nothing Windows reads as
-/// more than a file name.
-fn workspace_subdir_problem(subdir: &str) -> Option<String> {
-    if subdir.is_empty() {
-        return Some("must not be empty; leave it out for the workspace itself".to_string());
-    }
-    if subdir.starts_with('/') {
-        return Some(format!("'{subdir}' must be relative to the workspace"));
-    }
-    subdir.split('/').find_map(|part| {
-        let problem = if part.is_empty() {
-            "has an empty part; separate names with one `/`".to_string()
-        } else if part == "." || part == ".." {
-            format!("can't have a `{part}` part")
-        } else if !part.chars().all(|c| c.is_ascii_graphic()) {
-            "must be ASCII, without spaces or control characters".to_string()
-        } else if part.contains('\\') {
-            "must separate names with `/`, not `\\`".to_string()
-        } else if part.starts_with('-') {
-            format!("can't have a part starting with `-` ('{part}')")
-        } else {
-            // It names the part itself.
-            return windows_name_problem(part).map(|problem| format!("'{subdir}': {problem}"));
-        };
-        Some(format!("'{subdir}' {problem}"))
-    })
+    (container, project_clone_mount)
 }
 
 pub(crate) fn parse_env(value: Value, problems: &mut Vec<(String, String)>) -> EnvRules {
@@ -733,11 +712,11 @@ impl CommandRule {
         if self
             .cwd
             .as_ref()
-            .is_some_and(|cwd| cwd.allowed_workspace_dirs.is_empty())
+            .is_some_and(|cwd| cwd.allowed_project_clone_dirs.is_empty())
         {
             problems.push((
                 key.to_string(),
-                "cwd.allowed-workspace-dirs must not be empty".to_string(),
+                "cwd.allowed-project-clone-dirs must not be empty".to_string(),
             ));
         }
         self.env.validate(&child_key(key, "env"), problems);
@@ -754,11 +733,11 @@ impl CommandRule {
 impl PathOptions {
     fn validate(&self) -> Result<(), String> {
         match self.within {
-            Within::Workspace if self.allowed.is_empty() => {
-                return Err("a path within the workspace needs `allowed` patterns".to_string());
+            Within::ProjectClone if self.allowed.is_empty() => {
+                return Err("a path within the project clone needs `allowed` patterns".to_string());
             }
             Within::Cwd | Within::Temp if !self.allowed.is_empty() => {
-                return Err("`allowed` only applies to paths within the workspace".to_string());
+                return Err("`allowed` only applies to paths within the project clone".to_string());
             }
             _ => {}
         }
@@ -831,8 +810,8 @@ mod tests {
         }
     }
 
-    fn pattern(text: &str) -> WorkspacePattern {
-        WorkspacePattern::parse(text).unwrap()
+    fn pattern(text: &str) -> ClonePattern {
+        ClonePattern::parse(text).unwrap()
     }
 
     // ---- container ----
@@ -844,7 +823,7 @@ mod tests {
             ProjectConfig {
                 path: PathBuf::from(PROJECT),
                 container: ContainerRef::Name("dev-env".to_string()),
-                workspace_subdir: None,
+                project_clone_mount: None,
                 vcs: None,
                 egress: Vec::new(),
                 env: EnvRules::default(),
@@ -899,41 +878,42 @@ mod tests {
     }
 
     #[test]
-    fn parse_workspace_subdir() {
-        let with = |subdir: &str| {
-            format!("container:\n  dev-container: dev-env\n  workspace-subdir: {subdir}\n")
+    fn parse_project_clone_mount() {
+        let with = |path: &str| {
+            format!("container:\n  dev-container: dev-env\n  mounts:\n    project-clone: {path}\n")
         };
-        for subdir in ["my-project", "src/my-project", "a.b/c_d"] {
-            let config = parse_text(&with(subdir)).unwrap();
-            assert_eq!(config.workspace_subdir.as_deref(), Some(subdir));
+        for path in ["/my-project", "/src/my-project", "/a.b/c_d"] {
+            let config = parse_text(&with(path)).unwrap();
+            assert_eq!(config.project_clone_mount.as_deref(), Some(path));
             // Kept as written, for the universal configuration file.
-            assert_eq!(config.raw["container"]["workspace-subdir"], subdir);
+            assert_eq!(config.raw["container"]["mounts"]["project-clone"], path);
         }
-        for (subdir, problem) in [
-            ("''", "must not be empty"),
-            ("/abs", "must be relative to the workspace"),
-            ("a/../b", "can't have a `..` part"),
-            ("'..'", "can't have a `..` part"),
-            ("./a", "can't have a `.` part"),
-            ("a//b", "has an empty part"),
-            ("a/", "has an empty part"),
-            ("'a\\b'", "not `\\`"),
-            ("'a b'", "must be ASCII"),
-            ("caf\u{e9}", "must be ASCII"),
-            ("-x", "starting with `-`"),
-            ("'C:x'", "can't have a `:`"),
-            ("a/nul", "'a/nul': 'nul' is a Windows device name"),
+        for (path, problem) in [
+            ("''", "must be an absolute path"),
+            ("rel", "must be an absolute path"),
+            ("/", "can't be `/`"),
+            ("/a/../b", "can't have a `..` part"),
+            ("/a//b", "has an empty part"),
+            ("/a/", "must not end with `/`"),
+            ("'/a b'", "may only have ASCII letters"),
+            ("'/a:b'", "may only have ASCII letters"),
         ] {
-            let message = error(&with(subdir));
+            let message = error(&with(path));
             assert!(
-                message.starts_with("container.workspace-subdir: ") && message.contains(problem),
-                "{subdir}: {message}"
+                message.starts_with("container.mounts.project-clone: ")
+                    && message.contains(problem),
+                "{path}: {message}"
             );
         }
+        // Only the clone's mount can be changed.
+        assert!(
+            error("container:\n  dev-container: dev-env\n  mounts:\n    setup: /s\n")
+                .starts_with("container: ")
+        );
         // Not text.
         assert!(error(&with("[a]")).starts_with("container: "));
         // The dev container is still worked out, so its problems are reported too.
-        let (result, container) = parse_checked(&with("/abs"), Path::new(PROJECT));
+        let (result, container) = parse_checked(&with("rel"), Path::new(PROJECT));
         assert!(result.is_err());
         assert_eq!(container, Some(ContainerRef::Name("dev-env".to_string())));
     }
@@ -977,7 +957,7 @@ mod tests {
             "  - {command: a/b, program: '', args: []}\n",
             "  - {command: ok, args: [5]}\n",
             "  - {command: ok, args: []}\n",
-            "  - {command: ok, args: [{path: {within: workspace}}, {path: {within: cwd, keep-name: true}}]}\n",
+            "  - {command: ok, args: [{path: {within: project-clone}}, {path: {within: cwd, keep-name: true}}]}\n",
             "extra: 1\n",
         ))
         .unwrap_err();
@@ -995,7 +975,7 @@ mod tests {
         );
         assert_eq!(
             errors[4],
-            "commands[3].args[0]: a path within the workspace needs `allowed` patterns"
+            "commands[3].args[0]: a path within the project clone needs `allowed` patterns"
         );
         assert_eq!(
             errors[5],
@@ -1073,12 +1053,12 @@ mod tests {
         );
         assert_eq!(
             args(
-                "[{path: {within: workspace, allowed: [build/**, '*.txt'], allow-leading-dash: true}}]"
+                "[{path: {within: project-clone, allowed: [build/**, '*.txt'], allow-leading-dash: true}}]"
             ),
             vec![Token::Path(PathOptions {
                 allowed: vec![pattern("build/**"), pattern("*.txt")],
                 allow_leading_dash: true,
-                ..path_opts(Within::Workspace)
+                ..path_opts(Within::ProjectClone)
             }),]
         );
     }
@@ -1093,24 +1073,24 @@ mod tests {
         assert!(args_error("[{path: {within: cwd, allow-empty: true}}]").contains("allow-empty"));
         // Bad patterns.
         assert!(
-            args_error("[{path: {within: workspace, allowed: [/abs]}}]")
-                .contains("must be relative to the workspace")
+            args_error("[{path: {within: project-clone, allowed: [/abs]}}]")
+                .contains("must be relative to the project clone")
         );
     }
 
     #[test]
     fn validate_path_options() {
         assert_eq!(
-            args_error("[x, {path: {within: workspace}}]"),
-            "commands[0].args[1]: a path within the workspace needs `allowed` patterns",
+            args_error("[x, {path: {within: project-clone}}]"),
+            "commands[0].args[1]: a path within the project clone needs `allowed` patterns",
         );
         assert_eq!(
             args_error("[{path: {within: cwd, allowed: ['**']}}]"),
-            "commands[0].args[0]: `allowed` only applies to paths within the workspace",
+            "commands[0].args[0]: `allowed` only applies to paths within the project clone",
         );
         assert_eq!(
             args_error("[{path: {within: temp, allowed: ['**']}}]"),
-            "commands[0].args[0]: `allowed` only applies to paths within the workspace",
+            "commands[0].args[0]: `allowed` only applies to paths within the project clone",
         );
         assert_eq!(
             args_error("[{path: {within: cwd, keep-name: true}}]"),
@@ -1447,39 +1427,41 @@ mod tests {
     #[test]
     fn cwd_uses_workspace_patterns() {
         let config = parse_text(&format!(
-            "{CONTAINER}commands:\n  - command: docker\n    args: [compose, up]\n    cwd:\n      allowed-workspace-dirs:\n        - services/*\n        - .\n        - '**'\n",
+            "{CONTAINER}commands:\n  - command: docker\n    args: [compose, up]\n    cwd:\n      allowed-project-clone-dirs:\n        - services/*\n        - .\n        - '**'\n",
         ))
         .unwrap();
         let cwd = config.commands[0].cwd.as_ref().unwrap();
         assert_eq!(
-            cwd.allowed_workspace_dirs,
+            cwd.allowed_project_clone_dirs,
             vec![pattern("services/*"), pattern("."), pattern("**")]
         );
-        assert_eq!(cwd.allowed_workspace_dirs[0].text, "services/*");
+        assert_eq!(cwd.allowed_project_clone_dirs[0].text, "services/*");
     }
 
     #[test]
     fn parse_cwd_errors() {
         assert!(
-            error(&cwd_entry("{allowed-workspace-dirs: ['/abs/path']}"))
-                .contains("must be relative to the workspace")
+            error(&cwd_entry("{allowed-project-clone-dirs: ['/abs/path']}"))
+                .contains("must be relative to the project clone")
         );
         assert!(
-            error(&cwd_entry("{allowed-workspace-dirs: ['{workspace}/x']}"))
-                .contains("leave out {workspace}")
+            error(&cwd_entry(
+                "{allowed-project-clone-dirs: ['{project-clone}/x']}"
+            ))
+            .contains("leave out {project-clone}")
         );
         // A bare {...} is a YAML map, not a pattern.
         assert!(
-            error(&cwd_entry("{allowed-workspace-dirs: [{a: b}]}"))
-                .contains("a directory pattern relative to the workspace")
+            error(&cwd_entry("{allowed-project-clone-dirs: [{a: b}]}"))
+                .contains("a directory pattern relative to the project clone")
         );
         // The old key, and the snake_case spelling, are unknown.
         assert!(!error(&cwd_entry("{allowed: [services]}")).is_empty());
-        assert!(!error(&cwd_entry("{allowed_workspace_dirs: [services]}")).is_empty());
+        assert!(!error(&cwd_entry("{allowed_project_clone_dirs: [services]}")).is_empty());
         assert!(!error(&cwd_entry("{}")).is_empty());
         assert_eq!(
-            error(&cwd_entry("{allowed-workspace-dirs: []}")),
-            "commands[0]: cwd.allowed-workspace-dirs must not be empty",
+            error(&cwd_entry("{allowed-project-clone-dirs: []}")),
+            "commands[0]: cwd.allowed-project-clone-dirs must not be empty",
         );
     }
 }

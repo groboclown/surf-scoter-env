@@ -19,9 +19,23 @@ USER ubuntu
 ## Don'ts
 
 
-## The `workspace` directory
+## The project clone
 
-The container will have the host's "workspace" directory mounted to it.  This contains a clone of the project root.
+The container will have a clone of your project mounted to it, read-write, at its `mounts: project-clone` (or where the project file's `container: mounts: project-clone` says).  The clone is of the repository holding the project, from its root.  It's the only directory host commands can work on.
+
+## The persistent store
+
+The container will have its *persistent store* mounted to it, read-write, at its `mounts: persistent-store`.  It's a volume in the container tool, kept between runs, for the container's own files: its IDE server, caches, shell history.  It isn't a directory on the host, so host commands can't reach it.  The image must have a directory at the mount point that the container's user can write, since a new volume takes its owner from it.
+
+The distribution's `dev-env` container keeps the home directory entries listed in `/etc/scoter/persistent-store.txt` in the store, linked from the home directory, and takes everything else in the home directory fresh from the image on each start.  An image built on it can add lines to that file:
+
+```Dockerfile
+USER root
+RUN printf '.cargo/registry/\n.cargo/git/\n' >> /etc/scoter/persistent-store.txt
+USER ubuntu
+```
+
+Keep the store to state and caches.  Anything there that the container runs, such as shell start-up files or programs on the `PATH`, outlives a rebuild of the image, so an earlier session's change to it outlives the session.
 
 ## The `setup` directory
 
@@ -42,7 +56,8 @@ Once its [parents](#parents) are merged in, the file must provide at a minimum t
 ```yaml
 user: USERNAME
 mounts:
-    workspace: "PATH"
+    project-clone: "PATH"
+    persistent-store: "PATH"
     setup: "PATH"
 broker-bin: "PATH"
 sshd-port: 22022
@@ -50,10 +65,13 @@ sshd-port: 22022
 
 The keys are:
 
-* `"user"` - the user that the container runs as.  In particular, this must also align as the user that the `sshd` process will accept requests.
-* `"mounts": "workspace"` - the directory in the container to mount the [workspace directory](#the-workspace-directory).
+* `"user"` - the user that the container runs as.  In particular, this must also align as the user that the `sshd` process will accept requests.  It's written into your `~/.ssh/config`, so it must be a plain user name: a letter or `_`, then letters, digits, `.`, `_` or `-`, at most 32 characters.
+* `"mounts": "project-clone"` - the directory in the container to mount the [project clone](#the-project-clone).
+* `"mounts": "persistent-store"` - the directory in the container to mount the [persistent store](#the-persistent-store).
 * `"mounts": "setup"` - the directory in the container to mount the [setup directory](#the-setup-directory).
 * `"broker-bin"` - the path to the broker binary.  The host service will connect to this file.
+
+The mount points and `broker-bin` are written into files and command lines on your host, so each must be an absolute container path: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..` names, a trailing `/`, or more than 255 characters, and not `/` itself.  The three mount points must differ, and none may be inside another.
 * `"sshd-port"` - the port number on the loopback (localhost) interface that the SSHD process listens for connections.  It may be `null` (or left out) only when `sshd-port-env` is set; the container then picks the port itself when it starts.
 * `"sshd-port-env"` - optional: the name of an environment variable given to the container, set to the SSHD port.  With a `sshd-port`, the container is told that port; without one, it is told the port picked for it at run time.
 * `"parents"` - optional: the dev-env images this one builds on.  See [below](#parents).

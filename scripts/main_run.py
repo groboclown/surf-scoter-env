@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from surf_scoter_lib import (
     gen_parser,
     generator,
     jdata,
+    persistent_store,
     setup_check,
     ssh_hosts,
 )
@@ -44,6 +46,15 @@ MODE_SETTINGS_FILE = 0o666
 CONTAINER_POLL_SECONDS = 1.0
 # `inspect-container`'s exit code while the container isn't there yet.
 EXIT_CONTAINER_NOT_FOUND = 125
+
+# What a single-quoted value in the compose `.env` file can't hold: a control
+# character (a newline adds a line, DEV-2), the closing quote, or the escapes
+# python-dotenv (podman-compose) decodes inside single quotes.  Inside single
+# quotes, `$` and `#` are text.  The project's values, the mount points, are
+# also held to `CONTAINER_PATH`, as the generator holds them.
+ENV_VALUE_REFUSED = re.compile(r"[\x00-\x1f\x7f']|\\[\\']")
+# A container mount point, as the generator checks it.
+CONTAINER_PATH = re.compile(r"(/[A-Za-z0-9._-]+)+")
 
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
@@ -89,19 +100,24 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
         # Remember to mark the work directories as ignored.
 
-        # -- workspace directory
+        # -- the project's clone
         # Its parent first: by default in `state-dir`, so only yours.
-        _make_work_parent(config)
-        # Setup the workspace directory via the vcs command.
-        workspace_dir = _setup_workspace(
-            config, vcs_section, args.clean_workspace, args.workspace_fetch
+        _make_state_dir(config)
+        clone_dir = _setup_project_clone(
+            config, vcs_section, args.clean_project_clone, args.project_fetch
         )
-        _ignore_directory(config, vcs_section, workspace_dir)
+        _ignore_directory(config, vcs_section, clone_dir)
+
+        # -- the persistent store
+        volume = persistent_store.volume_name(config)
+        if args.clean_persistent_store:
+            persistent_store.remove(config, volume)
+        persistent_store.create(config, volume)
 
         # -- settings directory
         setup_dir = config.active_location("dev-container-settings-dir")
         if setup_dir is None:
-            setup_dir = config.require_path("workspace", "setup-dir")
+            setup_dir = config.require_path("project-state", "setup-dir")
             config.set_active_location("dev-container-settings-dir", setup_dir)
         setup_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, setup_dir)
@@ -136,7 +152,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             inp.write("\n".join(config.project_bridge_commands()))
 
         # -- resources directory
-        resources_dir = config.require_path("workspace", "resources-dir")
+        resources_dir = config.require_path("project-state", "resources-dir")
         resources_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, resources_dir)
 
@@ -146,7 +162,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         # Setup the .env file in the resources directory.
         _write_compose_env_file(
             config=config, file=resources_dir / defaults.COMPOSE_ENV_FILENAME,
-            host=host, workspace_dir=workspace_dir,
+            host=host, clone_dir=clone_dir, volume=volume,
             settings_dir=setup_dir, gateway_config=gateway_config,
         )
 
@@ -174,7 +190,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
                 project_dir=str(config.require_active_location("project-dir")),
                 resources_dir=str(resources_dir),
-                workspace_dir=str(workspace_dir),
+                project_clone_dir=str(clone_dir),
                 setup_dir=str(setup_dir),
                 compose_file=str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
                 compose_env_file=str(resources_dir / defaults.COMPOSE_ENV_FILENAME),
@@ -257,7 +273,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # ... currently kept to help debugging.
     #fileutil.rm(setup_dir)
     #fileutil.rm(resources_dir)
-    # Keep the 'workspace' directory, though.
+    # Keep the project's clone and its persistent store, though.
 
     return 1 if failed else 0
 
@@ -513,58 +529,60 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
     return False
 
 
-def _setup_workspace(
-    config: UserConfig,
-    vcs_section: str | None,
-    clean_workspace: bool,
-    workspace_fetch: bool
+def _setup_project_clone(
+    config: UserConfig, vcs_section: str | None, clean: bool, fetch: bool,
 ) -> Path:
-    # Setup the workspace's cloned project directory.
-    workspace_dir = config.active_location("dev-container-workspace-dir")
-    if workspace_dir is None:
-        workspace_dir = config.require_path("workspace", "workspace-dir")
-        config.set_active_location("dev-container-workspace-dir", workspace_dir)
-    clone_project_dir = config.active_location("dev-container-project-dir")
-    if clone_project_dir is None:
-        clone_project_dir = workspace_dir
-        workspace_subdir = config.project_str("container", "workspace-subdir")
-        if workspace_subdir:
-            clone_project_dir = clone_project_dir / workspace_subdir
-        config.set_active_location("dev-container-project-dir", clone_project_dir)
-    if clone_project_dir.exists():
-        if clean_workspace:
-            print(f"Cleaning out the workspace directory ({clone_project_dir})")
-            fileutil.rm(clone_project_dir)
-        elif workspace_fetch and vcs_section:
-            print(f"Fetching your project into {clone_project_dir} ...")
+    """Make or refresh the project's clone; its directory.
+
+    The clone is the directory itself, mounted whole in the container, so
+    nothing the container can write is on the way to it (FILE-10).  It's
+    checked not to be a symlink, or anything but a directory, all the same.
+    """
+    clone_dir = config.active_location("project-clone-dir")
+    if clone_dir is None:
+        clone_dir = config.require_path("project-state", "project-clone-dir")
+        config.set_active_location("project-clone-dir", clone_dir)
+    _check_real_dir(clone_dir)
+    if clone_dir.exists():
+        if clean:
+            print(f"Cleaning out the project's clone ({clone_dir})")
+            fileutil.rm(clone_dir)
+        elif fetch and vcs_section:
+            print(f"Fetching your project into {clone_dir} ...")
             config.run_command(
                 vcs_section,
                 "fetch-changes",
-                cwd=clone_project_dir,
+                cwd=clone_dir,
             )
         else:
-            print("Not copying project into the workspace.")
-    if not clone_project_dir.exists():
+            print("Not copying project into its clone.")
+    if not clone_dir.exists():
         if vcs_section:
-            print("Cloning into the workspace")
-            print(f"Cloning your project into {clone_project_dir} ...")
+            print(f"Cloning your project into {clone_dir} ...")
             config.run_command(
                 vcs_section,
                 "local-clone",
                 cwd=config.active_location("project-dir"),
                 template={
-                    "workspace-dir": str(clone_project_dir),
+                    "project-clone-dir": str(clone_dir),
                 }
             )
         else:
-            print("Not copying project into the workspace (no version control system defined).")
-            clone_project_dir.mkdir(parents=True)
-    return workspace_dir
+            print("Not copying project into its clone (no version control system defined).")
+            clone_dir.mkdir(parents=True)
+    _check_real_dir(clone_dir)
+    return clone_dir
 
 
-def _make_work_parent(config: UserConfig) -> None:
-    """Make the workspace's parent directory, readable only by you, if it isn't there."""
-    parent = config.optional_path("workspace", "workspace-parent-dir")
+def _check_real_dir(path: Path) -> None:
+    """Refuse `path` if it's there and isn't a real directory: a symlink, or a file."""
+    if os.path.lexists(path) and (os.path.islink(path) or not path.is_dir()):
+        raise ConfigErr(f"{path}: not a directory (or a symlink); remove it, and run again")
+
+
+def _make_state_dir(config: UserConfig) -> None:
+    """Make the project's state directory, readable only by you, if it isn't there."""
+    parent = config.optional_path("project-state", "project-state-dir")
     if parent is not None and not parent.exists():
         parent.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
 
@@ -572,7 +590,7 @@ def _make_work_parent(config: UserConfig) -> None:
 def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -> None:
     """Mark the directory as ignored by adding the name to the parent's ignore file.
 
-    Only a directory in the project needs it (the workspace's default is
+    Only a directory in the project needs it (the project state's default is
     outside, in `state-dir`).
     """
     if not vcs_section:
@@ -704,15 +722,22 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
 def _write_compose_env_file(
     *,
     config: UserConfig, file: Path,
-    host: str, workspace_dir: Path, settings_dir: Path, gateway_config: Path,
+    host: str, clone_dir: Path, volume: str, settings_dir: Path, gateway_config: Path,
 ) -> None:
     """Write the settings the docker-compose file uses to its `.env` file.
 
     Most of them have well-defined meanings that every docker-compose file must use.
+    Each value is checked, then single-quoted, so compose reads it as text.
     """
     mounts = config.dev_container_mounts()
-    if "workspace" not in mounts or "setup" not in mounts:
-        raise ConfigErr(f"dev-env does not have expected mounts; has {mounts}")
+    for key in ("project-clone", "persistent-store", "setup"):
+        if key not in mounts:
+            raise ConfigErr(f"dev-env.yaml has no `mounts: {key}`; it has {sorted(mounts)}")
+        if not _is_container_path(mounts[key]):
+            raise ConfigErr(f"dev-env.yaml's `mounts: {key}` isn't a plain container path: {mounts[key]!r}")
+    gateway_mount = config.require_value("dev-env", "network-gateway-config-mount")
+    if not _is_container_path(gateway_mount):
+        raise ConfigErr(f"`dev-env: values: network-gateway-config-mount` isn't a plain container path: {gateway_mount!r}")
 
     lines: dict[str, str] = {
         # Image tags
@@ -726,15 +751,17 @@ def _write_compose_env_file(
         "NETWORK_GATEWAY_NAME": f"{host}-ng",
         "CONTAINER_NAME": host,
 
-        # File paths
-        "WORKSPACE_HOST": str(workspace_dir),
+        # File paths and the volume
+        "PROJECT_CLONE_HOST": str(clone_dir),
         "SETTINGS_HOST": str(settings_dir),
         "GATEWAY_CONFIG_HOST": str(gateway_config),
+        "PERSISTENT_STORE_VOLUME": volume,
 
         # Mount points
-        "WORKSPACE_CONTAINER": mounts["workspace"],
+        "PROJECT_CLONE_CONTAINER": mounts["project-clone"],
+        "PERSISTENT_STORE_CONTAINER": mounts["persistent-store"],
         "SETTINGS_CONTAINER": mounts["setup"],
-        "GATEWAY_CONFIG_CONTAINER": config.require_value("dev-env", "network-gateway-config-mount"),
+        "GATEWAY_CONFIG_CONTAINER": gateway_mount,
 
         # Limits
         "PIDS_LIMIT": config.require_value("dev-env", "pids-limit"),
@@ -746,7 +773,28 @@ def _write_compose_env_file(
         "SSHD_PORT_ENV": (config.dev_container_sshd_port_env() or "SSHD_PORT_ENV_UNSET"),
         "SSHD_PORT": (config.dev_container_sshd_port() or "not set"),
     }
-    file.write_text("\n".join([f"{k}={v}" for k, v in lines.items()]), encoding="utf-8")
+    file.write_text("".join(env_line(k, v) for k, v in lines.items()), encoding="utf-8")
+
+
+def env_line(key: str, value: str) -> str:
+    """`KEY='value'` and a newline, for a compose `.env` file.
+
+    Refuses a value compose could read as more than text: a newline would
+    add a line (DEV-2), and a quote would end the value early.
+    """
+    if ENV_VALUE_REFUSED.search(value):
+        raise ConfigErr(
+            f"Won't write {key}={value!r} into the compose .env file: it has a control "
+            "character, a `'`, or a backslash before a backslash or `'`."
+        )
+    return f"{key}='{value}'\n"
+
+
+def _is_container_path(path: str) -> bool:
+    """Whether `path` is a plain absolute container path, without `.` or `..` parts."""
+    return bool(CONTAINER_PATH.fullmatch(path)) and not any(
+        part in (".", "..") for part in path.split("/")
+    )
 
 
 def main(argv: Sequence[str]) -> int:
@@ -761,26 +809,35 @@ def main(argv: Sequence[str]) -> int:
     if not config:
         return BAD_EXECUTION_ARGS_CODE
     parser.add_argument(
-        "--clean-workspace",
+        "--clean-project-clone", "--clean-project",
         action="store_true",
-        dest="clean_workspace",
+        dest="clean_project_clone",
         default=False,
         help=(
-            "If the dev-env workspace directory already exists from a previous run, "
-            "remove it and recreate it."
+            "Remove the project's clone from a previous run, and clone the project "
+            "again.  Changes in it you haven't fetched are lost.  The persistent "
+            "store is kept."
         ),
     )
     parser.add_argument(
-        "--no-workspace-fetch",
+        "--clean-persistent-store",
+        action="store_true",
+        dest="clean_persistent_store",
+        default=False,
+        help=(
+            "Remove the dev container's persistent store from previous runs, and "
+            "start with an empty one.  The project's clone is kept."
+        ),
+    )
+    parser.add_argument(
+        "--no-project-fetch",
         action="store_false",
-        dest="workspace_fetch",
+        dest="project_fetch",
         default=True,
         help=(
-            "If the workspace directory exists, then don't fetch updates into it "
-            "from the project directory.  This can lead to the workspace directory "
-            "becoming out-of-date.  If the workspace directory doesn't exist, it "
-            "will still be populated from the project (essentially ignoring this "
-            "flag)."
+            "If the project's clone exists, don't fetch updates into it from the "
+            "project directory, so it can become out-of-date.  A clone that doesn't "
+            "exist is still made."
         ),
     )
     parser.add_argument(

@@ -58,6 +58,16 @@ docker:
         list-images: ${exec} image ls --filter reference={x:pattern} --format {{.Repository}}:{{.Tag}}
         remove-image: ${exec} image rm {x:name}
         prune-images: ${exec} image prune -f
+        # The dev container's persistent store, a named volume kept between
+        # runs (`project-state: values: persistent-store-volume`).  The compose
+        # file declares it `external`, so `compose-down --volumes` leaves it;
+        # `scoter run` creates it, and `--clean-persistent-store` removes it.
+        # `create-volume` must succeed when the volume already exists.
+        # `list-volumes` gives the names matching `{x:prefix}`, one a line,
+        # for `scoter cleanup --persistent-stores`.
+        create-volume: ${exec} volume create {x:name}
+        remove-volume: ${exec} volume rm {x:name}
+        list-volumes: ${exec} volume ls --quiet --filter name=^{x:prefix}
 
 # The Python interpreter that runs the sub-command scripts (the distribution's
 # `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
@@ -83,19 +93,32 @@ python:
             - ${script}
             - '{x:script}'
 
-# Where a project's run keeps its files: the workspace (the clone the
-# container works in), and the run's settings and resources.
-workspace:
+# Where a project's run keeps its state: the project's clone (which the
+# container works in), its persistent store, and the run's settings and
+# resources.
+project-state:
     paths:
         # Outside the project, named by its id (`${scoter:project-id}`, the same
         # for the same project directory), so the project's own files, and the
-        # container's, stay apart (FILE-9).  For a workspace per branch, add
+        # container's, stay apart (FILE-9).  For a clone per branch, add
         # `/${scoter:project-branch}`: the branch the VCS names, made safe as one
         # path part, and not set when there's none.
-        workspace-parent-dir: ${scoter:state-dir}/workspaces/${scoter:project-id}
-        setup-dir: ${workspace-parent-dir}/setup
-        resources-dir: ${workspace-parent-dir}/resources
-        workspace-dir: ${workspace-parent-dir}/workspace
+        project-state-dir: ${scoter:state-dir}/projects/${scoter:project-id}
+        setup-dir: ${project-state-dir}/setup
+        resources-dir: ${project-state-dir}/resources
+        # The clone is the directory itself, mounted at the dev container's
+        # `mounts: project-clone`.  Nothing the container can write is above it.
+        project-clone-dir: ${project-state-dir}/project-clone
+    values:
+        # The container volume mounted at the dev container's `mounts:
+        # persistent-store`: the container's own files, kept between runs.  It
+        # isn't a host directory, so host commands can't reach it.  It must be
+        # a valid volume name (`[a-z0-9][a-z0-9_.-]*`), and differ for each
+        # project; for one per branch, add `-${scoter:project-branch}`.  It
+        # starts with `persistent-store-prefix`, which `scoter cleanup
+        # --persistent-stores` looks for: only volumes named with it are its.
+        persistent-store-prefix: scoter-
+        persistent-store-volume: ${persistent-store-prefix}${scoter:project-id}-store
 
 
 # The 'git' VCS tool.
@@ -125,19 +148,19 @@ git-vcs:
         exec: git
     runs:
         # SECURITY: keep `--no-local`.  Without it, git clones a local path by
-        # hard-linking the object files, so the project and the workspace share
+        # hard-linking the object files, so the project and its clone share
         # them.  The container owns those files (through the user namespace
         # mapping), and could rewrite objects in your real repository behind
         # already-reviewed hashes.  See FILE-2 in
         # docs/security/files-attack-vectors.md.
-        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:workspace-dir}
-        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
+        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:project-clone-dir}
+        fetch-changes-into: ${exec} fetch {x:project-clone-dir} {x:branch}
         fetch-changes: ${exec} fetch --all
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
 
         # Requires the user to review the changes and does not commit them.
-        # But it's potentially dangerous because it makes those workspace
-        # files active.
+        # But it's potentially dangerous because it makes those files from
+        # the project clone active.
         merge-changes: ${exec} merge {x:branch}
 
         find-root:
@@ -175,10 +198,10 @@ file-vcs:
         diff: diff
         noop: echo
     runs:
-        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
+        local-clone: ${cp} -R ${scoter:project-dir} ${project-state:project-clone-dir}
         fetch-changes: ${noop}
-        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
-        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+        show-fetch-changes: ${diff} -R ${project-state:project-clone-dir} ${scoter:project-dir}
+        merge-changes: ${cp} -R ${project-state:project-clone-dir} ${scoter:project-dir}
     values:
         ignore-file: ""
 
@@ -419,9 +442,9 @@ verification:
         version-manager:
             action: warn
             reason: >-
-                Dealing with version commits should stay within the workspace, and
+                Dealing with version commits should stay within the project clone, and
                 not call out to the host for performing these actions.  It could cause
-                the container to force the workspace to add a new remote repository,
+                the container to force the project clone to add a new remote repository,
                 promote changes in your name to the parent repository, or even run
                 arbitrary commands like commit hooks.
             commands: [git, hg, svn, cvs, p4]
@@ -430,7 +453,7 @@ verification:
             reason: >-
                 A version manager's shim picks the real program from a file (such as
                 `.tool-versions`) in its working directory, which may be the
-                workspace.  Name the real program instead.
+                project clone.  Name the real program instead.
             paths:
                 - ~/.asdf/shims
                 - ~/.local/share/mise/shims
@@ -456,7 +479,7 @@ verification:
     paths:
         # Where your acceptances of projects' settings are kept.  They decide what
         # each project may do, so this must be an absolute path outside any
-        # project, its workspace, and its repository.
+        # project, its clone, and its repository.
         store: ~/.config/surf-scoter.d/verified
 
     path-lists:
@@ -669,7 +692,7 @@ verification:
             - python:runs:script
             - python:runs:sub-command
             - scoter:runs:find-acceptance
-            # `--no-local` keeps the workspace from sharing your repository's
+            # `--no-local` keeps the clone from sharing your repository's
             # objects (FILE-2); finding the root and branch reads files, not Git.
             - git-vcs:runs:local-clone
             - git-vcs:runs:find-root
@@ -680,7 +703,8 @@ verification:
             # Where acceptances and state are kept, and where the run's files go.
             - verification:paths:store
             - scoter:paths:state-dir
-            - workspace:paths:*
+            - project-state:paths:*
+            - project-state:values:*
             # The network: the gateway, its configuration, and the containers.
             - dev-env:values:network-gateway-name
             - dev-env:runs:network-gateway-write-config

@@ -24,8 +24,7 @@ PROJECT_LOCATIONS = (
     "project-config",
     "cwd",
     "dev-container-path",
-    "dev-container-workspace-dir",
-    "dev-container-project-dir",
+    "project-clone-dir",
     "dev-container-settings-dir",
 )
 
@@ -156,14 +155,14 @@ def _project_roots(config: UserConfig) -> list[tuple[str, Path]]:
     roots: list[tuple[str, Path]] = []
     project_dir = config.active_location("project-dir")
     project_config = config.active_location("project-config")
-    workspace = config.active_location("dev-container-workspace-dir")
+    clone = config.active_location("project-clone-dir")
     vcs_root = config.active_location("vcs-root")
     if project_dir:
         roots.append(("the project directory", project_dir))
     if project_config:
         roots.append(("the project files directory", project_config.parent))
-    if workspace:
-        roots.append(("the workspace", workspace))
+    if clone:
+        roots.append(("the project clone", clone))
     if vcs_root:
         roots.append(("the repository", vcs_root))
     return roots

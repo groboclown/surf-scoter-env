@@ -8,7 +8,7 @@ The weak points of [the host bridge](host-bridge.md): how code in the developmen
 An allowed command runs on the host, as the developer, with the developer's credentials.  Code in the container that can steer one wants to:
 
 * run arbitrary programs on the host;
-* read or change host files outside the workspace;
+* read or change host files outside the project clone;
 * use the host command's credentials, or bring them back into the container;
 * exhaust host resources.
 
@@ -20,7 +20,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | The invocation: command name, arguments, working directory, environment | Code in the container | [`analyze.rs`](../../host/src/host/analyze.rs), [`environment.rs`](../../host/src/config/environment.rs) |
 | Wire messages from the broker | Code in the container (the broker is part of the image) | [`host.rs`](../../host/src/host.rs), [`comm/`](../../containers/dev-env/src/comm.rs) |
 | Standard input and signals for a running command | Code in the container | [`exec.rs`](../../host/src/host/exec.rs) |
-| Workspace files named in path arguments | Code in the container, at any time | `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); the host program |
+| Project clone files named in path arguments | Code in the container, at any time | `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); the host program |
 | The `commands` configuration | The project, as you accepted it | [`project.rs`](../../host/src/config/project.rs), [`pattern.rs`](../../host/src/config/pattern.rs), [`accepted.rs`](../../host/src/config/accepted.rs), [`checks.py`](../../scripts/surf_scoter_lib/checks.py) |
 | The universal configuration file | `scoter`, as you | `load_universal` in [`config.rs`](../../host/src/config.rs); [`accepted.rs`](../../host/src/config/accepted.rs) |
 | The accepted programs on the host | Whoever can write them or their directories | `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs) |
@@ -54,7 +54,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 **Severity:** Critical, when configured.  **Status:** By design; the configuration is the control.
 **Where:** the project's `commands`; [`analyze.rs`](../../host/src/host/analyze.rs).
 
-The bridge checks the command line, not what the program does with it.  A program that reads configuration or code from its working directory, from a file argument or from its environment (`docker compose`, `make`, `npm run`, `terraform`, `docker build`, `git`, any shell or interpreter) runs whatever the container wrote there.  Allowing `docker compose up` in a workspace directory gives the container root on the host.
+The bridge checks the command line, not what the program does with it.  A program that reads configuration or code from its working directory, from a file argument or from its environment (`docker compose`, `make`, `npm run`, `terraform`, `docker build`, `git`, any shell or interpreter) runs whatever the container wrote there.  Allowing `docker compose up` in a directory of the project clone gives the container root on the host.
 
 **Red team:** for each allowed command in real project configurations, list every file and variable it reads, and check which of them the container can write.
 
@@ -83,9 +83,9 @@ What's left:
 **Severity:** High.  **Status:** Open.
 **Where:** `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); process start in [`exec.rs`](../../host/src/host/exec.rs).
 
-A path argument is resolved and checked when the request arrives, then passed to the host program as a path.  The container can change the workspace in between, for example by replacing a checked directory with a symlink, and the host program then follows it outside the workspace.
+A path argument is resolved and checked when the request arrives, then passed to the host program as a path.  The container can change the clone in between, for example by replacing a checked directory with a symlink, and the host program then follows it outside the clone.
 
-**Red team:** with an allowed command that takes a workspace path, change the path's parent directories while requests are in flight, and check where the host program actually reads or writes.
+**Red team:** with an allowed command that takes a path in the clone, change the path's parent directories while requests are in flight, and check where the host program actually reads or writes.
 
 **When changing this code:** consider passing open file descriptors, opening with `O_NOFOLLOW` along the path, or copying inputs to the request's temporary directory.  Until then, `within: temp` is the safer choice for files a host command writes.
 
@@ -105,7 +105,7 @@ Everything a host command prints goes back to the container, and the container s
 **Severity:** High.  **Status:** By design; the configuration is the control.
 **Where:** [`environment.rs`](../../host/src/config/environment.rs); `env_plan` use in [`analyze.rs`](../../host/src/host/analyze.rs).
 
-Commands start with an empty environment, and only variables the configuration allows come through.  But many variables change what a program loads or where it connects (`LD_PRELOAD`, `PATH`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `AWS_CONFIG_FILE`, `DOCKER_HOST`), and broad `allow` patterns pass them.  Combined with knowledge of the workspace's host path, a library or configuration file in the workspace can be loaded by the host program.
+Commands start with an empty environment, and only variables the configuration allows come through.  But many variables change what a program loads or where it connects (`LD_PRELOAD`, `PATH`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `AWS_CONFIG_FILE`, `DOCKER_HOST`), and broad `allow` patterns pass them.  Combined with knowledge of the clone's host path, a library or configuration file in the clone can be loaded by the host program.
 
 **Red team:** in configurations with broad `allow` patterns, find variables that redirect the allowed program's loading or configuration.
 
@@ -114,13 +114,13 @@ Commands start with an empty environment, and only variables the configuration a
 ### BRIDGE-6: Path mapping and resolution
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`workspace.rs`](../../host/src/host/workspace.rs).
+**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`project_clone.rs`](../../host/src/host/project_clone.rs).
 
-Container paths must be inside the workspace mount.  They're mapped to the host's workspace directory and resolved following symlinks, and the result must still be inside the workspace and match the entry's `within` rule.  Missing paths are allowed only when their directory exists and they aren't dangling symlinks.
+Container paths must be inside the project clone's mount (the effective `mounts: project-clone`).  They're mapped to the host's clone directory and resolved following symlinks, and the result must still be inside the clone and match the entry's `within` rule.  Missing paths are allowed only when their directory exists and they aren't dangling symlinks.
 
-**Red team:** try relative paths, `..`, repeated separators, symlink chains, dangling symlinks, hard links to files outside the workspace, very long paths and non-UTF-8 names.
+**Red team:** try relative paths, `..`, repeated separators, symlink chains, dangling symlinks, hard links to files outside the clone, very long paths and non-UTF-8 names.
 
-With a `workspace-subdir` ([FILE-10](files-attack-vectors.md#file-10-the-workspace-sub-path-through-container-symlinks)), the workspace mount holds the container's home directory as well as the project's clone, and `within: workspace`, `allowed` patterns and `cwd: allowed-workspace-dirs` are all relative to the mount, not the clone.  A configuration written when the clone was the whole workspace now also lets host commands work on the container's home directory.
+The container's persistent store is a container volume, not a host directory, so it has no host path to map to: a path there is refused like any other outside the clone.  The mount points can't be inside one another, so no part of the clone's mount is really another mount ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)).  `within: project-clone`, `allowed` patterns and `cwd: allowed-project-clone-dirs` are relative to the clone's root.
 
 **When changing this code:** every path a host process receives must come from this resolution.  Add tests for any new `within` mode.
 
@@ -184,7 +184,7 @@ Now `scoter-host` runs exactly the absolute program the universal configuration 
 ### BRIDGE-12: Windows hosts
 
 **Severity:** Medium.  **Status:** Unverified.
-**Where:** path mapping in [`analyze.rs`](../../host/src/host/analyze.rs) and [`workspace.rs`](../../host/src/host/workspace.rs); temporary file names; signal handling in [`exec.rs`](../../host/src/host/exec.rs).
+**Where:** path mapping in [`analyze.rs`](../../host/src/host/analyze.rs) and [`project_clone.rs`](../../host/src/host/project_clone.rs); temporary file names; signal handling in [`exec.rs`](../../host/src/host/exec.rs).
 
 The bridge supports Windows hosts, where path rules differ: case-insensitive names, short (8.3) names, junctions, alternate data streams, device names and `\\?\` prefixes.  The temporary file name checks cover separators, `.`, `..` and device names, but the path resolution hasn't been tested against the rest.
 
@@ -199,11 +199,11 @@ The bridge supports Windows hosts, where path rules differ: case-insensitive nam
 
 The review checks each program's location, owner and permissions, and the acceptance records its absolute path.  At each run, the generator checks only that the path is still an executable file outside the project, and `scoter-host` checks only that it's absolute and still an executable file, following symlinks.  Nothing records the program's contents.  So anything that can replace the program, or change a symlink along its path, between the review and a request (up to the acceptance's 30 days) gets its replacement run: a package upgrade, a version manager switching what a link points to, or a host command whose accepted arguments let it write there.
 
-The workspace also isn't counted as part of the project when the review and the generator check where a program lives, so a program found through a `PATH` entry inside the workspace isn't refused.  The project can't name such a path itself (`program` is a bare name), so this needs your own `PATH` to reach into the workspace.
+The project clone also isn't counted as part of the project when the review and the generator check where a program lives, so a program found through a `PATH` entry inside the clone isn't refused.  The project can't name such a path itself (`program` is a bare name), so this needs your own `PATH` to reach into the clone.
 
-**Red team:** accept a command, then change the program or a link on its path, and check whether the request is refused.  Put a workspace directory on the host's `PATH` and accept a command found there.
+**Red team:** accept a command, then change the program or a link on its path, and check whether the request is refused.  Put a directory of the clone on the host's `PATH` and accept a command found there.
 
-**When changing this code:** record each program's hash, owner and mode at the review, and check them again before running it, opening the file once and running what was checked where the platform allows.  Count the workspace as part of the project in every location check.
+**When changing this code:** record each program's hash, owner and mode at the review, and check them again before running it, opening the file once and running what was checked where the platform allows.  Count the project clone as part of the project in every location check.
 
 ### BRIDGE-14: The bridge trusts the universal configuration file's command list
 

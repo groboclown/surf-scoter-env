@@ -36,8 +36,9 @@ class KillTest(unittest.TestCase):
         self.state = self.tmp / "state"
         self.state.mkdir()
         self.project = self.tmp / "proj"
-        self.workspace = self.project / ".dev-env" / "workspace"
-        self.workspace.mkdir(parents=True)
+        self.clone = self.tmp / "projects" / "proj-0123456789ab" / "project-clone"
+        self.clone.mkdir(parents=True)
+        self.project.mkdir()
         self.resources = self.tmp / "resources"
         self.resources.mkdir()
         for name in ("docker-compose.yaml", "compose.env"):
@@ -58,8 +59,12 @@ class KillTest(unittest.TestCase):
                     "running-envs": str(self.state / "running-env.json"),
                     "running-envs-lock": str(self.state / "running-env.json.lock"),
                 }},
-                "docker": {"runs": {"compose-down": [*recorder, "down", "{x:compose-file}"]}},
-                "git-vcs": {"runs": {"fetch-changes-into": [*recorder, "fetch", "{x:workspace-dir}", "{x:branch}"]}},
+                "docker": {"runs": {
+                    "compose-down": [*recorder, "down", "{x:compose-file}"],
+                    "remove-volume": [*recorder, "volume-rm", "{x:name}"],
+                }},
+                "git-vcs": {"runs": {"fetch-changes-into": [*recorder, "fetch", "{x:project-clone-dir}", "{x:branch}"]}},
+                "project-state": {"values": {"persistent-store-volume": "scoter-proj-0123456789ab-store"}},
             },
         }
 
@@ -69,7 +74,7 @@ class KillTest(unittest.TestCase):
             host=f"dev-me-2222-{suffix}",
             dev_env_name="dev", firewall_router_name="fr", network_gateway_name="ng",
             project_dir=str(self.project), resources_dir="" if reserved else str(self.resources),
-            workspace_dir="" if reserved else str(self.workspace), setup_dir="",
+            project_clone_dir="" if reserved else str(self.clone), setup_dir="",
             compose_file="" if reserved else str(self.resources / "docker-compose.yaml"),
             compose_env_file="" if reserved else str(self.resources / "compose.env"),
             dev_env_ssh_port="2222", dev_env_ssh_user="me", created_at="2026-10-21T00:00:00",
@@ -80,13 +85,13 @@ class KillTest(unittest.TestCase):
         (self.state / "environments" / env.host).mkdir(parents=True)
         return env
 
-    def kill(self, *, host: str | None = None, fetch: str | None = None, clean: bool = False,
+    def kill(self, *, host: str | None = None, fetch: str | None = None,
+             clean: main_kill.Clean = main_kill.Clean.NOTHING,
              project: bool = True) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main_kill.run_kill(
-                UserConfig(self.suc(project=project)), host=host, fetch_branch=fetch,
-                workspace=main_kill.Workspace.REMOVE if clean else main_kill.Workspace.KEEP,
+                UserConfig(self.suc(project=project)), host=host, fetch_branch=fetch, clean=clean,
             )
         return code, out.getvalue() + err.getvalue()
 
@@ -99,15 +104,15 @@ class KillTest(unittest.TestCase):
         return [e.host for e in ActiveEnvironmentSet.read(self.state / "running-env.json").environs.values()]
 
     def test_projects_environment(self) -> None:
-        """Without --host, the project's one: its containers stopped, it's forgotten, the workspace kept."""
+        """Without --host, the project's one: its containers stopped, it's forgotten, its clone and store kept."""
         env = self.start()
         code, text = self.kill()
         self.assertEqual(code, 0, text)
         self.assertEqual(self.ran(), [["down", env.compose_file]])
         self.assertEqual(self.listed(), [])
         self.assertFalse((self.state / "environments" / env.host).exists())
-        self.assertTrue(self.workspace.is_dir())
-        self.assertIn("The workspace is kept", text)
+        self.assertTrue(self.clone.is_dir())
+        self.assertIn("The project clone is kept", text)
 
     def test_by_host_outside_project(self) -> None:
         """--host stops it without a project."""
@@ -149,19 +154,56 @@ class KillTest(unittest.TestCase):
         self.assertEqual(len(self.listed()), 1)
 
     def test_fetch_and_clean(self) -> None:
-        """--fetch brings the workspace's branch into the project first; --force-clean removes the workspace."""
+        """--fetch brings the clone's branch into the project first; --clean-project-clone removes the clone only."""
         env = self.start()
-        code, text = self.kill(fetch="feature", clean=True)
+        code, text = self.kill(fetch="feature", clean=main_kill.Clean.PROJECT_CLONE)
         self.assertEqual(code, 0, text)
-        self.assertEqual(self.ran(), [["down", env.compose_file], ["fetch", str(self.workspace), "feature"]])
-        self.assertFalse(self.workspace.exists())
+        self.assertEqual(self.ran(), [["down", env.compose_file], ["fetch", str(self.clone), "feature"]])
+        self.assertFalse(self.clone.exists())
+
+    def test_clean_persistent_store(self) -> None:
+        """--clean-persistent-store removes the volume, and keeps the clone."""
+        env = self.start()
+        code, text = self.kill(clean=main_kill.Clean.PERSISTENT_STORE)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.ran(), [["down", env.compose_file], ["volume-rm", "scoter-proj-0123456789ab-store"]])
+        self.assertTrue(self.clone.is_dir())
+
+    def test_clean_both(self) -> None:
+        """Both clean options together."""
+        self.start()
+        code, text = self.kill(clean=main_kill.Clean.PROJECT_CLONE | main_kill.Clean.PERSISTENT_STORE)
+        self.assertEqual(code, 0, text)
+        self.assertFalse(self.clone.exists())
+        self.assertIn(["volume-rm", "scoter-proj-0123456789ab-store"], self.ran())
+
+    def test_clean_aliases(self) -> None:
+        """`--clean-project` is `--clean-project-clone`."""
+        parsed = {}
+
+        def run_kill(config: UserConfig, **kwargs: object) -> int:
+            parsed.update(kwargs)
+            return 0
+        original = main_kill.run_kill
+        main_kill.run_kill = run_kill  # type: ignore[assignment]
+        self.addCleanup(setattr, main_kill, "run_kill", original)
+        universal = self.tmp / "suc.json"
+        universal.write_text(json.dumps(self.suc()), encoding="utf-8")
+        for flags, clean in [
+            (["--clean-project"], main_kill.Clean.PROJECT_CLONE),
+            (["--clean-project-clone"], main_kill.Clean.PROJECT_CLONE),
+            (["--clean-persistent-store"], main_kill.Clean.PERSISTENT_STORE),
+            ([], main_kill.Clean.NOTHING),
+        ]:
+            main_kill.main(["main_kill.py", str(universal), "kill", *flags])
+            self.assertEqual(parsed["clean"], clean, flags)
 
     def test_clean_keeps_the_project(self) -> None:
-        """A workspace that is, or holds, the project isn't removed."""
+        """A clone that is, or holds, the project isn't removed."""
         env = self.start()
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.json.lock") as envs:
-            envs.environs[env.host] = EnvironmentDesc(**{**env.__dict__, "workspace_dir": str(self.tmp)})
-        code, text = self.kill(clean=True)
+            envs.environs[env.host] = EnvironmentDesc(**{**env.__dict__, "project_clone_dir": str(self.tmp)})
+        code, text = self.kill(clean=main_kill.Clean.PROJECT_CLONE)
         self.assertEqual(code, 0, text)
         self.assertIn("is, or holds, the project directory", text)
         self.assertTrue(self.project.is_dir())
