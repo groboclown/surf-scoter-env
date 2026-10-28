@@ -87,11 +87,16 @@ def project_branch(config: UserConfig) -> str | None:
 
 def is_settings_file(config: UserConfig, rel: str) -> bool:
     """Whether a snapshot's file is one whose accepted version an exemption keeps:
-    the project file or a `dev-env.yaml` (settings, not a container's files)."""
-    return (
-        rel == config.optional_value("scoter", "project-file-name")
-        or rel.rsplit("/", 1)[-1] == snapshot.DEV_ENV_FILE
-    )
+    the project file or a `dev-env.yaml` the dev container is merged from
+    (settings, not a container's files).  Another file of that name is a
+    container's file like any other (VER-2)."""
+    if rel == config.optional_value("scoter", "project-file-name"):
+        return True
+    files_dir = config.optional_value("scoter", "project-files-dir")
+    project = config.active_location("project-dir")
+    if files_dir is None or project is None:
+        return False
+    return rel in snapshot.dev_env_paths(project / files_dir, container_dirs(config))
 
 
 def settings_files(config: UserConfig, manifest: snapshot.Manifest) -> list[str]:

@@ -30,7 +30,7 @@ Verification is now the control that several other vectors depend on: [NET-2](ne
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
 | [VER-1](#ver-1-the-dockerfile-meaning-match-can-be-fooled) | The Dockerfile meaning match can be fooled | High | Closed |
-| [VER-2](#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Open |
+| [VER-2](#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Closed |
 | [VER-3](#ver-3-the-review-doesnt-show-everything-it-accepts) | The review doesn't show everything it accepts | High | Open |
 | [VER-4](#ver-4-exemptions-accept-what-nobody-reviewed) | Exemptions accept what nobody reviewed | High | By design, partly Open |
 | [VER-5](#ver-5-branch-names-dont-agree) | Branch names don't agree | Medium | Open |
@@ -72,14 +72,16 @@ Acceptances made before the change kept the old meaning hashes, so a Dockerfile 
 
 ### VER-2: Any file named `dev-env.yaml` matches on meaning
 
-**Severity:** High.  **Status:** Open.
-**Where:** `canonical_hash` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py).
+**Severity:** High.  **Status:** Closed.
+**Where:** `canonical_hash` and `dev_env_paths` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); `is_settings_file` in [`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py).
 
-Every file named `dev-env.yaml`, wherever it is in a container directory, gets the canonical hash of the merged dev container, whatever its bytes are.  Only the dev container's own `dev-env.yaml` (and its parents') feed that merge.  A file of the same name elsewhere, such as `env/files/dev-env.yaml` copied into the image, can change freely and still match on meaning, so it's carried forward without a review.
+Every file named `dev-env.yaml`, wherever it was in a container directory, got the canonical hash of the merged dev container, whatever its bytes were.  Only the dev container's own `dev-env.yaml` (and its parents') feed that merge.  A file of the same name elsewhere, such as `env/files/dev-env.yaml` copied into the image, could change freely and still match on meaning, so it was carried forward without a review.  Exemptions used the same rule to keep the accepted version of every such file, as if it were settings.
 
-**Red team:** add `files/dev-env.yaml` to an accepted container directory, have the Dockerfile `COPY` and run it, then change its contents and check whether `scoter run` asks for a review.
+**What closed it:** the merged hash goes only to the `dev-env.yaml` the generator merges, by path: the one at the top of each container directory the dev container builds from (its own, and its local parents', inside the project files directory).  Any other file of that name is hashed by its bytes, and under an exemption is a container file like any other, used as it is.
 
-**When changing this code:** give the parsed hash only to the `dev-env.yaml` files the generator actually read, by path, and hash every other file by its bytes.
+**Red team:** look for another way a file's meaning hash can stand for content the build reads: a `file:` parent's `dev-env.yaml` inside the project files directory but outside a container directory, which isn't in the snapshot at all, and the project file's own path.
+
+**When changing this code:** give a parsed hash only to a file the parse actually read, named by its path, never by its name.
 
 ### VER-3: The review doesn't show everything it accepts
 

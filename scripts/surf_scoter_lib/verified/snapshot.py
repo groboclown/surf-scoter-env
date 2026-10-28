@@ -16,7 +16,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -150,9 +150,10 @@ class ParsedFiles:
 
     They're in the SUC (`project` and `dev-container`).  The tools have no
     YAML parser, so these give the YAML files their canonical hashes: the
-    project file's is its parsed data's, and every `dev-env.yaml`'s is the
-    merged dev container's (a change to a parent that the merge hides
-    changes nothing).
+    project file's is its parsed data's, and each `dev-env.yaml` the merge
+    read (the dev container's own, and its parents', by path) has the merged
+    dev container's: a change to a parent that the merge hides changes
+    nothing.  Any other file named `dev-env.yaml` is just a file (VER-2).
     """
 
     project: jdata.JsonData = None
@@ -277,12 +278,19 @@ def _no_constants(name: str) -> None:
     raise ValueError(f"{name} isn't JSON")
 
 
-def canonical_hash(rel_path: str, data: bytes, parsed: ParsedFiles, project_file: str) -> str | None:
-    """The canonical hash of the file at `rel_path`, or None for bytes only."""
+def canonical_hash(
+    rel_path: str, data: bytes, parsed: ParsedFiles, project_file: str,
+    dev_env_files: Collection[str] = (),
+) -> str | None:
+    """The canonical hash of the file at `rel_path`, or None for bytes only.
+
+    `dev_env_files` are the paths of the `dev-env.yaml` files the merged dev
+    container was read from (`dev_env_paths`); only they get its hash.
+    """
     name = rel_path.rsplit("/", 1)[-1]
     if rel_path == project_file and parsed.project is not None:
         return json_id(parsed.project)
-    if name == DEV_ENV_FILE and parsed.dev_container is not None:
+    if rel_path in dev_env_files and parsed.dev_container is not None:
         return json_id(parsed.dev_container)
     if is_dockerfile(name):
         try:
@@ -373,13 +381,15 @@ class _Reader:
             else:
                 raise SnapshotErr(f"{path}: a special file; a container directory can't have any")
 
-    def snapshot(self, parsed: ParsedFiles, project_file: str) -> Snapshot:
+    def snapshot(
+        self, parsed: ParsedFiles, project_file: str, dev_env_files: Collection[str] = (),
+    ) -> Snapshot:
         files = {
             rel: FileEntry(
                 sha256=hashlib.sha256(data).hexdigest(),
                 size=len(data),
                 executable=self.executable[rel],
-                canonical=canonical_hash(rel, data, parsed, project_file),
+                canonical=canonical_hash(rel, data, parsed, project_file, dev_env_files),
             )
             for rel, data in sorted(self.contents.items())
         }
@@ -414,7 +424,7 @@ def snapshot_project(
                 f"{directory}: a container directory can't be the project files directory itself"
             )
         reader.read_dir(real, rel)
-    return reader.snapshot(parsed, project_file_name)
+    return reader.snapshot(parsed, project_file_name, dev_env_paths(files_dir, container_dirs))
 
 
 def snapshot_dir(directory: Path, limits: SnapshotLimits) -> Snapshot:
@@ -422,6 +432,22 @@ def snapshot_dir(directory: Path, limits: SnapshotLimits) -> Snapshot:
     reader = _Reader(limits)
     reader.read_dir(Path(os.path.realpath(directory)), "")
     return reader.snapshot(ParsedFiles(), "")
+
+
+def dev_env_paths(files_dir: Path, container_dirs: Iterable[Path]) -> set[str]:
+    """The paths, relative to `files_dir`, of the `dev-env.yaml` files the generator
+    merges: the one in each container directory inside `files_dir`.
+
+    A file of that name anywhere else (deeper in a container directory, say,
+    for the build to copy) isn't settings, and is hashed by its bytes (VER-2).
+    """
+    files_dir = Path(os.path.realpath(files_dir))
+    paths: set[str] = set()
+    for directory in container_dirs:
+        real = Path(os.path.realpath(directory))
+        if real.is_relative_to(files_dir) and real != files_dir:
+            paths.add(f"{real.relative_to(files_dir).as_posix()}/{DEV_ENV_FILE}")
+    return paths
 
 
 def container_dirs(dev_container_path: Path | None, parent_dirs: Sequence[Path]) -> list[Path]:

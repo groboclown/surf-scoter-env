@@ -60,7 +60,6 @@ The Critical vectors, and the High vectors that are open or unverified:
 | [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
 | [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Mitigated |
 | [BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
-| [VER-2](verification-attack-vectors.md#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Open |
 | [VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts) | The review doesn't show everything it accepts | High | Open |
 | [VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed) | Exemptions accept what nobody reviewed | High | By design, partly Open |
 | [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |

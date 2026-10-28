@@ -184,6 +184,24 @@ class PrepareTest(DistTest):
             (plan.dev_container / "dev-env.yaml").read_text(encoding="utf-8"), self.dev_env_yaml,
         )
 
+    def test_exempt_other_dev_env_files(self) -> None:
+        """Under an exemption, a `dev-env.yaml` the merge doesn't read is a container file,
+        used as it is, like the rest (VER-2)."""
+        data = self.files / "env" / "files" / "dev-env.yaml"
+        data.parent.mkdir()
+        data.write_text("accepted\n", encoding="utf-8")
+        config = self.exempt(self.accept())
+        data.write_text("changed\n", encoding="utf-8")
+        plan, _ = self.prepare(config.raw())
+        assert plan is not None  # nosec: B101  # narrowing for the type checker
+        self.assertEqual((plan.dev_container / "files" / "dev-env.yaml").read_text(), "changed\n")
+        # The container's own is still the accepted one.
+        self.assertEqual(
+            (plan.dev_container / "dev-env.yaml").read_text(encoding="utf-8"), self.dev_env_yaml,
+        )
+        self.assertFalse(lookup.is_settings_file(config, "env/files/dev-env.yaml"))
+        self.assertTrue(lookup.is_settings_file(config, "env/dev-env.yaml"))
+
     def test_not_exempt(self) -> None:
         """Without an exemption, adopting changes nothing."""
         suc = self.project_suc(self.accept())

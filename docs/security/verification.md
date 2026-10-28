@@ -49,7 +49,7 @@ Some changes don't change what a file does, and asking for a new review for each
 
 * **The Dockerfile** (named `Dockerfile`, the one file the build reads, as `docker: runs: build` names it with `-f`): comment lines and blank lines are dropped, except inside heredocs; everything else, parser directives and trailing whitespace included, is kept as written, and CRLF line endings count as LF.  It fails closed: a Dockerfile with a control character (a lone carriage return, say), a Unicode line separator, a `<<` that isn't a heredoc it can follow, or a heredoc left open has no meaning hash, so it matches on its bytes only, and any change to it asks for a review.  Files named `Dockerfile.*` or `*.Dockerfile` are files like any other.
 * **`.json` files**: parsed, and written back in a canonical form.
-* **The project file, and any file named `dev-env.yaml`**: the generator's parsed data.
+* **The project file, and the `dev-env.yaml` files the dev container is merged from** (the one at the top of each container directory it builds from): the generator's parsed data.  A file of that name anywhere else is just a file, hashed by its bytes.
 
 Two snapshots whose files all have the same meaning match.  This is the part of verification that has to agree exactly with how Docker and the generator read the same files; see [VER-1 and VER-2](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled).
 

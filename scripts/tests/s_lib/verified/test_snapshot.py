@@ -90,10 +90,13 @@ class CanonicalTest(unittest.TestCase):
         parsed = snapshot.ParsedFiles(project={"a": 1}, dev_container={"b": 2})
 
         def hashed(rel: str, data: bytes) -> str | None:
-            return snapshot.canonical_hash(rel, data, parsed, "project.yaml")
+            return snapshot.canonical_hash(rel, data, parsed, "project.yaml", {"env/dev-env.yaml"})
 
         self.assertEqual(hashed("project.yaml", b"# x\na: 1\n"), store.json_id({"a": 1}))
         self.assertEqual(hashed("env/dev-env.yaml", b"anything"), store.json_id({"b": 2}))
+        # Only the `dev-env.yaml` the merge read: another of that name is just a file (VER-2).
+        self.assertIsNone(hashed("env/files/dev-env.yaml", b"anything"))
+        self.assertIsNone(hashed("other/dev-env.yaml", b"anything"))
         self.assertEqual(hashed("env/Dockerfile", b"FROM a\n"), hashed("env/Dockerfile", b"# c\nFROM a\n"))
         self.assertEqual(hashed("x.json", b'{"b": 1, "a": 2}'), hashed("x.json", b'{"a":2,"b":1}'))
         self.assertIsNone(hashed("x.json", b'{"a": 1, "a": 2}'))
@@ -142,6 +145,22 @@ class SnapshotTest(TempDirTest):
         self.assertEqual(manifest.files["project.yaml"].canonical, store.json_id({"p": 1}))
         self.assertIsNone(manifest.files["env/bin/run.sh"].canonical)
         self.assertEqual(snapshot.Manifest.from_json(manifest.to_json()), manifest)
+
+    def test_dev_env_by_path(self) -> None:
+        """Only the container directories' own `dev-env.yaml` get the merged hash (VER-2)."""
+        files = self.project()
+        self.write("proj/.surf-scoter.d/env/files/dev-env.yaml", "copied into the image\n")
+        self.write("proj/.surf-scoter.d/base/dev-env.yaml", "user: base\n")
+        self.write("proj/.surf-scoter.d/base/Dockerfile", "FROM scratch\n")
+        taken = self.take(files, [files / "base"])
+        merged = store.json_id({"d": 1})
+        self.assertEqual(taken.manifest.files["env/dev-env.yaml"].canonical, merged)
+        self.assertEqual(taken.manifest.files["base/dev-env.yaml"].canonical, merged)
+        self.assertIsNone(taken.manifest.files["env/files/dev-env.yaml"].canonical)
+        self.assertEqual(
+            snapshot.dev_env_paths(files, [files / "env", files / "base", self.tmp / "outside", files]),
+            {"env/dev-env.yaml", "base/dev-env.yaml"},
+        )
 
     def test_noise(self) -> None:
         """A comment changes the id, but not the meaning."""
