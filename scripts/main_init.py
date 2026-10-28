@@ -17,7 +17,6 @@ from surf_scoter_lib import (
     gen_parser,
     log,
 )
-from surf_scoter_lib.err import SurfScoterErr
 
 
 def run_init(config: UserConfig) -> int:

@@ -1,5 +1,6 @@
 #SPDX:MIT
 """Test the scoter front-end script."""
+import argparse
 import contextlib
 import io
 import os

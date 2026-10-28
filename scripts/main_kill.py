@@ -12,7 +12,7 @@ import os
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from subprocess import SubprocessError
+from subprocess import SubprocessError  # nosec B404  # We know the security implications
 
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
