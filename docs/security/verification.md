@@ -47,7 +47,7 @@ Before `scoter run` builds anything:
 
 Some changes don't change what a file does, and asking for a new review for each of them would teach people to accept reviews without reading them.  So, alongside each file's SHA-256, the snapshot keeps a hash of its meaning for some kinds of file:
 
-* **Dockerfiles** (named `Dockerfile`, `Dockerfile.*` or `*.Dockerfile`): comment lines and blank lines are dropped, except inside heredocs, and parser directives are kept.
+* **The Dockerfile** (named `Dockerfile`, the one file the build reads, as `docker: runs: build` names it with `-f`): comment lines and blank lines are dropped, except inside heredocs; everything else, parser directives and trailing whitespace included, is kept as written, and CRLF line endings count as LF.  It fails closed: a Dockerfile with a control character (a lone carriage return, say), a Unicode line separator, a `<<` that isn't a heredoc it can follow, or a heredoc left open has no meaning hash, so it matches on its bytes only, and any change to it asks for a review.  Files named `Dockerfile.*` or `*.Dockerfile` are files like any other.
 * **`.json` files**: parsed, and written back in a canonical form.
 * **The project file, and any file named `dev-env.yaml`**: the generator's parsed data.
 

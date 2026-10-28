@@ -7,6 +7,9 @@ You can optionally specify a `Dockerfile` for that environment that lays on top 
 
 # The `Dockerfile`
 
+The build reads the file named `Dockerfile` in the container directory, and only that one: a `Containerfile` beside it, or a `Dockerfile.dev`, is just another file in the build context.
+
+When you accept the project, a later change to the `Dockerfile` that only adds, removes or edits comments or blank lines doesn't ask for another review.  Any other change does, trailing whitespace included.  A `Dockerfile` with a control character (such as a lone carriage return), a Unicode line separator, or a heredoc Surf Scoter can't follow (such as `<<"END-1"`) asks for a review on any change, even to a comment.  Use plain `<<EOF`-style heredoc delimiters, and LF or CRLF line endings.
 
 ## Dos
 

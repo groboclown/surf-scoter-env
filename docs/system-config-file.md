@@ -29,7 +29,7 @@ docker:
     programs:
         exec: /usr/sbin/podman
     runs:
-        build: ${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}
+        build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
     path-lists:
         compose:
             - ./.scoter/compose
@@ -89,10 +89,10 @@ Separate from the [references](#references), a command can on-the-fly insert a v
 For example, the `docker: runs: build` line above contains:
 
 ```
-${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}
+${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
 ```
 
-Here, the reference placement will turn the `${exec}` into the location of the docker executable (from `docker: programs: exec`).  But the tool also needs to provide the tag for the constructed image, the location of the Dockerfile, and the directory in which it should run.  For that, the tool replaces `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}` (respectively) with the corresponding value.  If the tool doesn't provide one of those, then it goes into the called program without modification.
+Here, the reference placement will turn the `${exec}` into the location of the docker executable (from `docker: programs: exec`).  But the tool also needs to provide the tag for the constructed image, the location of the Dockerfile, and the directory in which it should run.  For that, the tool replaces `{x:tag}`, `{x:dockerfile}`, and `{x:dir}` (respectively) with the corresponding value.  If the tool doesn't provide one of those, then it goes into the called program without modification.
 
 Why the `x:` prefix?  It seems like it won't collide with other CLI tools.
 
@@ -196,7 +196,7 @@ References to a program, such as `${exec}`, get the program found.  If a program
 
 ### Defining Executables
 
-The tool makes heavy use of running other commands.  In order to remain flexible enough to work with your particular environment, it sets up executables based on the tool name and the uses for it.  In the example above, when the tool builds a container image, it will use the `docker` section's `runs: build` key.  The execution will include external values `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}`, and the `${exec}` comes from the `docker` section's `programs: exec`.
+The tool makes heavy use of running other commands.  In order to remain flexible enough to work with your particular environment, it sets up executables based on the tool name and the uses for it.  In the example above, when the tool builds a container image, it will use the `docker` section's `runs: build` key.  The execution will include external values `{x:tag}`, `{x:dockerfile}`, and `{x:dir}`, and the `${exec}` comes from the `docker` section's `programs: exec`.
 
 When a `runs` pattern is a single string, the tool splits it into arguments at the spaces *before* it replaces the `${...}` references, so a referenced value with spaces in it (such as `C:\Program Files\...`) stays a single argument.  To put spaces into an argument yourself, quote it with `'...'` or `"..."`; inside `"..."`, write `\"` for a `"` and `\\` for a `\`.  A backslash anywhere else is an ordinary character.
 

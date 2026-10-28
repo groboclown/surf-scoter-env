@@ -41,7 +41,9 @@ docker:
         # How scoter-host starts the broker inside the dev container.
         # Note: adding a `-t` (terminal) will corrupt the binary wire protocol.
         broker: ${exec} exec -i {x:container} {x:broker}
-        build: ${exec} build -t {x:tag} {x:dir}
+        # The Dockerfile named, so Podman can't build a `Containerfile` beside it
+        # in its place, which the review's checks don't read (VER-1).
+        build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
         compose-up: ${exec} compose --env-file {x:env-file} -f {x:compose-file} up -d
         compose-service-stats: >
             ${exec} compose --env-file {x:env-file}
@@ -737,6 +739,8 @@ verification:
             # How the tools reach the container.
             - ssh:runs:proxy-command
             - docker:runs:broker
+            # Which file the build reads: the one the review checked.
+            - docker:runs:build
             # The checks the review makes (`host-commands` replaced or removed
             # are reported with the overrides, from the generator's notices).
             - verification:project-files:*

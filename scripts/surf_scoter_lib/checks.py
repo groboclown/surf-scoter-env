@@ -557,8 +557,11 @@ _STAGE = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
 def _logical_lines(text: str) -> list[str]:
     lines: list[str] = []
     current = ""
-    for line in snapshot.canonical_dockerfile(text).splitlines():
-        if line.startswith("# "):
+    canonical = snapshot.canonical_dockerfile(text)
+    # Without a canonical form, Docker's own line breaks; comment lines are
+    # then skipped below, like the directives.
+    for line in (canonical if canonical is not None else text).split("\n"):
+        if line.lstrip(" \t").startswith("#"):
             continue
         if line.endswith("\\"):
             current += line[:-1] + " "
@@ -594,8 +597,20 @@ def from_images(text: str, local_tags: Iterable[str]) -> list[str]:
 
 
 def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Finding]:
-    """`FROM` lines without a digest: a tag can point at new content any time."""
+    """`FROM` lines without a digest: a tag can point at new content any time.
+
+    And a Dockerfile with no canonical form: one whose comments can't be
+    told from what Docker builds, so any change to it asks for a review.
+    """
     findings: list[Finding] = []
+    if snapshot.canonical_dockerfile(text) is None:
+        findings.append(Finding(
+            Severity.WARN, rel,
+            "Has a control character (such as a lone carriage return), or a heredoc "
+            "Surf Scoter can't follow, so its comments can't be told from what Docker "
+            "builds: read it as the review shows it, control characters included.  Any "
+            "change to it, even to a comment, asks for a review.",
+        ))
     for image in from_images(text, local_tags):
         if "@sha256:" in image:
             continue

@@ -14,10 +14,11 @@ it_project "${IT_ROOT}/02-re-review/project" git
 built="${IT_SANDBOX}/built"
 cat > "${IT_SANDBOX}/tools/container-tool" <<STUB
 #!/bin/sh
-# build -t TAG DIR: keep DIR's files, and fail the build.
+# build ... DIR: keep DIR's files (its last argument), and fail the build.
 if [ "\$1" = build ]; then
+    for dir; do :; done
     rm -rf '${built}'
-    cp -R "\$4" '${built}'
+    cp -R "\$dir" '${built}'
     exit 1
 fi
 exit 0

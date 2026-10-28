@@ -181,35 +181,62 @@ def check_relative(path: str) -> None:
 
 _DIRECTIVE = re.compile(r"#\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(\S.*?)\s*")
 _HEREDOC = re.compile(r"<<(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# What Docker reads as more than text, or as a line break where it doesn't
+# break lines: every control character but the newline and tab, the C1
+# controls (`\x85` among them), the Unicode line and paragraph separators,
+# and a byte order mark past the start.  Python's `splitlines` breaks on
+# several of these; Docker breaks only on `\n` (VER-1).
+_UNFOLLOWED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+# Docker's whitespace, for blank lines and leading space before a comment.
+_SPACE = " \t"
 
 
 def is_dockerfile(name: str) -> bool:
-    """Whether the file name is a Dockerfile's."""
-    return name == "Dockerfile" or name.startswith("Dockerfile.") or name.endswith(".Dockerfile")
+    """Whether the file name is the Dockerfile a build reads.
 
-
-def canonical_dockerfile(text: str) -> str:
-    """The Dockerfile without what doesn't change the build.
-
-    Comment lines and blank lines go, and trailing whitespace, except inside
-    heredocs (`RUN <<EOF`), whose lines are the script and stay as written.
-    The parser directives at the top (`# syntax=...`, `# escape=...`) stay.
-    Indentation stays: inside a quoted string spanning lines, it's part of
-    the string.
+    The build reads `Dockerfile` (`docker: runs: build` gives it with `-f`);
+    a `Dockerfile.*` or `*.Dockerfile` is any other file to it, and gets no
+    special treatment (VER-1).
     """
-    lines = text.splitlines()
+    return name == "Dockerfile"
+
+
+def canonical_dockerfile(text: str) -> str | None:
+    """The Dockerfile without what doesn't change the build; None if that can't be told.
+
+    Comment lines and blank lines go, except inside heredocs (`RUN <<EOF`),
+    whose lines are the script and stay as written.  Everything else stays
+    as written, trailing whitespace included, and so do the parser
+    directives at the top (`# syntax=...`, `# escape=...`).
+
+    It fails closed: a file holding anything Docker might read differently
+    from this (a control character, such as a lone `\r` that Python would
+    split a line on, a `<<` that isn't a heredoc it can follow, or a heredoc
+    left open) has no canonical form, so it matches on its bytes only, and
+    any change to it asks for a review.  A canonical form can't drop
+    something Docker builds from (VER-1).
+    """
+    text = text.removeprefix("\ufeff")
+    # Docker drops the `\r` of a `\r\n`; any other is refused below.
+    text = text.replace("\r\n", "\n")
+    if _UNFOLLOWED.search(text):
+        return None
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     out: list[str] = []
     escape = "\\"
     i = 0
-    # Parser directives come first, before any other line.
+    # Parser directives come first, before any other line, kept as written.
     while i < len(lines):
-        match = _DIRECTIVE.fullmatch(lines[i].strip())
+        match = _DIRECTIVE.fullmatch(lines[i].strip(_SPACE))
         if not match:
             break
-        key, value = match.group(1).lower(), match.group(2)
-        if key == "escape" and value in ("\\", "`"):
-            escape = value
-        out.append(f"# {key}={value}")
+        if match.group(1).lower() == "escape":
+            if match.group(2) not in ("\\", "`"):
+                return None
+            escape = match.group(2)
+        out.append(lines[i])
         i += 1
     heredocs: list[tuple[str, bool]] = []
     starting: list[tuple[str, bool]] = []
@@ -220,15 +247,22 @@ def canonical_dockerfile(text: str) -> str:
             if (line.lstrip("\t") if strip_tabs else line) == word:
                 heredocs.pop(0)
             continue
-        stripped = line.strip()
+        stripped = line.strip(_SPACE)
         if not stripped or stripped.startswith("#"):
             continue
-        line = line.rstrip()
         out.append(line)
-        starting.extend((m.group(3), m.group(1) == "-") for m in _HEREDOC.finditer(line))
+        found = list(_HEREDOC.finditer(line))
+        # Every `<<` must be a heredoc it can follow: anything else (a quoted
+        # delimiter with a `-`, `<<\EOF`, a `<<` in a shell string) might be
+        # one Docker follows, whose `#` lines are the script.
+        if line.count("<<") != len(found):
+            return None
+        starting.extend((m.group(3), m.group(1) == "-") for m in found)
         # Heredocs start once the instruction's last line is read.
-        if not line.endswith(escape):
+        if not line.rstrip(_SPACE).endswith(escape):
             heredocs, starting = starting, []
+    if heredocs or starting:
+        return None
     return "\n".join(out) + "\n"
 
 
@@ -255,7 +289,10 @@ def canonical_hash(rel_path: str, data: bytes, parsed: ParsedFiles, project_file
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             return None
-        return "sha256:" + hashlib.sha256(canonical_dockerfile(text).encode("utf-8")).hexdigest()
+        canonical = canonical_dockerfile(text)
+        if canonical is None:
+            return None
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if name.endswith(".json"):
         try:
             value = json.loads(

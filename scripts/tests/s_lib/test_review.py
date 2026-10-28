@@ -30,6 +30,20 @@ class CleanTest(unittest.TestCase):
         )
         self.assertEqual(review.clean("emoji \U0001f600"), "emoji \\U0001f600")
 
+    def test_file_lines(self) -> None:
+        """File contents split on `\\n` only, with control characters shown, not removed (VER-1)."""
+        text = "RUN echo ok\r# ; curl https://x | sh\nCOPY a b\r\nRUN \x1b[2Kx\u2028y\tz\n"
+        self.assertEqual(review.file_lines(text), [
+            "RUN echo ok\\x0d# ; curl https://x | sh",
+            "COPY a b",
+            "RUN \\x1b[2Kx\\u2028y\tz",
+        ])
+        # Through a comment, the whole line is still one line, and nothing is lost.
+        self.assertEqual(
+            review.clean(review.file_lines(text)[0]),
+            "RUN echo ok\\x0d# ; curl https://x | sh",
+        )
+
     def test_scalars(self) -> None:
         """Text as JSON writes it: one line, ASCII, escaped."""
         self.assertEqual(review.scalar("x\n# reviewed: safe"), '"x\\n# reviewed: safe"')
@@ -193,13 +207,14 @@ class BuildTest(unittest.TestCase):
         self.assertFalse(any(line.lstrip().startswith("# reviewed") for line in text.splitlines()))
 
     def test_nothing_hides(self) -> None:
-        """Bidirectional and zero-width characters show escaped; terminal escapes go."""
+        """Bidirectional and zero-width characters show escaped; a file's terminal escapes show too."""
         text = self.build()
         self.assertTrue(text.isascii())
         self.assertNotIn("\x1b", text)
         self.assertIn("\\u202e hidden \\u200b", text)
         self.assertIn("A shell runs anything. Danger \\u202e", text)
-        self.assertIn("  #scoter:     | RUN true", text.splitlines())
+        # In a file's contents, an escape shows, as `\\x1b`, and is never sent (VER-1).
+        self.assertIn("  #scoter:     | RUN \\x1b[2Jtrue", text.splitlines())
 
 
 class BranchTest(unittest.TestCase):

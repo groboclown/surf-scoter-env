@@ -129,7 +129,7 @@ The general layout:
         "docker": {
             "paths": {},
             "programs": {"exec": "/usr/sbin/podman"},
-            "runs": {"build": ["/usr/sbin/podman", "-t", "{x:tag}", "-f", "{x:dockerfile}", "{x:dirname}"]},
+            "runs": {"build": ["/usr/sbin/podman", "build", "-t", "{x:tag}", "-f", "{x:dockerfile}", "{x:dir}"]},
             "path-lists": {
                 "compose": ["/home/user/my-project/.scoter/compose", "/etc/surf-scoter.d/compose"]
             },
@@ -361,7 +361,7 @@ The general layout:
                     "docker": {
                         "paths": {},
                         "programs": {"exec": "/usr/sbin/podman"},
-                        "runs": {"build": "${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}"},
+                        "runs": {"build": "${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}"},
                         "path-lists": {},
                         "values": {},
                         // Only when the file has some; a null check removes a lower

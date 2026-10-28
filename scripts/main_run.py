@@ -468,6 +468,7 @@ def _build_containers(
             template={
                 "tag": tag,
                 "dir": str(path),
+                "dockerfile": str(Path(path) / "Dockerfile"),
             },
         )
         # TODO write the stderr + stdout to a file in the resources directory
