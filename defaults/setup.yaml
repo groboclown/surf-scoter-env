@@ -61,10 +61,12 @@ docker:
         # The dev container's persistent store, a named volume kept between
         # runs (`project-state: values: persistent-store-volume`).  The compose
         # file declares it `external`, so `compose-down --volumes` leaves it;
-        # `scoter run` creates it, and `--clean-persistent-store` removes it.
-        # `create-volume` must succeed when the volume already exists.
-        # `list-volumes` gives the names matching `{x:prefix}`, one a line,
-        # for `scoter cleanup --persistent-stores`.
+        # `scoter run` creates it, unless `inspect-volume` finds it (Podman's
+        # `volume create` fails for a volume that's there; Docker's doesn't),
+        # and `--clean-persistent-store` removes it.  `list-volumes` gives the
+        # names matching `{x:prefix}`, one a line, for `scoter cleanup
+        # --persistent-stores`.
+        inspect-volume: ${exec} volume inspect {x:name}
         create-volume: ${exec} volume create {x:name}
         remove-volume: ${exec} volume rm {x:name}
         list-volumes: ${exec} volume ls --quiet --filter name=^{x:prefix}
@@ -154,8 +156,23 @@ git-vcs:
         # already-reviewed hashes.  See FILE-2 in
         # docs/security/files-attack-vectors.md.
         local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:project-clone-dir}
-        fetch-changes-into: ${exec} fetch {x:project-clone-dir} {x:branch}
-        fetch-changes: ${exec} fetch --all
+        # SECURITY: nothing here runs Git with the clone as its repository or
+        # working directory: Git would read the clone's configuration and run
+        # its hooks, which the container controls (FILE-1).  That includes
+        # pushing into it, which runs its hooks on your host.
+        #
+        # Getting your newer commits to the container: `refresh-bundle` runs
+        # in your repository (at `${scoter:vcs-root}`) and writes its branches
+        # and tags to a bundle file in the read-only setup directory.  After a
+        # fresh clone, `set-clone-origin` points the clone's `origin` at the
+        # bundle's path in the container (`{x:origin}`), editing the new
+        # clone's configuration file only; Git in the container then fetches
+        # from it (the distribution's dev container does as it starts).
+        refresh-bundle: ${exec} bundle create {x:bundle} --branches --tags
+        set-clone-origin: ${exec} config --file {x:project-clone-dir}/.git/config remote.origin.url {x:origin}
+        # Bringing the container's commits back: run in your repository, it
+        # only reads the clone's objects (`git upload-pack` runs no hooks).
+        fetch-changes-into: ${exec} fetch --no-recurse-submodules {x:project-clone-dir} {x:branch}
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
 
         # Requires the user to review the changes and does not commit them.
@@ -196,10 +213,8 @@ file-vcs:
     programs:
         cp: cp
         diff: diff
-        noop: echo
     runs:
         local-clone: ${cp} -R ${scoter:project-dir} ${project-state:project-clone-dir}
-        fetch-changes: ${noop}
         show-fetch-changes: ${diff} -R ${project-state:project-clone-dir} ${scoter:project-dir}
         merge-changes: ${cp} -R ${project-state:project-clone-dir} ${scoter:project-dir}
     values:
@@ -695,6 +710,11 @@ verification:
             # `--no-local` keeps the clone from sharing your repository's
             # objects (FILE-2); finding the root and branch reads files, not Git.
             - git-vcs:runs:local-clone
+            # The clone gets your commits from a bundle, never from Git run in
+            # it (FILE-1).
+            - git-vcs:runs:refresh-bundle
+            - git-vcs:runs:set-clone-origin
+            - git-vcs:runs:fetch-changes-into
             - git-vcs:runs:find-root
             - git-vcs:runs:current-branch
             # Adding a directory here is what weakens it: a project location

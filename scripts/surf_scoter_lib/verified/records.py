@@ -421,7 +421,10 @@ def setup_values(
     if vcs_section:
         vcs_runs = {
             key: config.raw("resolved", vcs_section, "runs", key)
-            for key in ("local-clone", "fetch-changes-into", "show-fetch-changes", "merge-changes")
+            for key in (
+                "local-clone", "refresh-bundle", "set-clone-origin",
+                "fetch-changes-into", "show-fetch-changes", "merge-changes",
+            )
         }
     return {
         "project-files-dir": config.raw("resolved", "scoter", "values", "project-files-dir"),

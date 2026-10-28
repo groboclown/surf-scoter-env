@@ -11,7 +11,7 @@ environment uses.
 import re
 
 from .err import ConfigErr
-from .user_config import OnError, UserConfig
+from .user_config import Capture, Echo, OnError, UserConfig
 
 # A container volume name.
 VOLUME_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}")
@@ -30,7 +30,17 @@ def volume_name(config: UserConfig) -> str:
 
 
 def create(config: UserConfig, volume: str) -> None:
-    """Create the volume `volume`; it's fine if it's already there."""
+    """Create the volume `volume`, unless it's already there.
+
+    Podman's `volume create` fails for a volume that's there, and Docker's
+    doesn't, so it's looked for first.
+    """
+    found = config.run_command(
+        "docker", "inspect-volume", template={"name": volume},
+        on_error=OnError.RETURN, capture=Capture.STDOUT | Capture.STDERR, echo=Echo.QUIET,
+    )
+    if found.returncode == 0:
+        return
     config.run_command("docker", "create-volume", template={"name": volume})
 
 

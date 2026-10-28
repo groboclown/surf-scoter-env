@@ -49,6 +49,14 @@ done < /etc/scoter/persistent-store.txt
 # Git refuses a repository another user owns, as the clone may be.
 git config --global --replace-all safe.directory "${SCOTER_PROJECT_CLONE}"
 
+# The host bundles its branches into the setup directory for the clone to
+# fetch: it never runs Git in the clone itself (FILE-1).  This only updates
+# the clone's remote-tracking branches, never its working tree.
+if [ -d "${SCOTER_PROJECT_CLONE}/.git" ] && [ -f /opt/surf-scoter-setup/project.bundle ] ; then
+    git -C "${SCOTER_PROJECT_CLONE}" fetch --quiet origin \
+        || echo "Couldn't fetch your project's newer commits into ${SCOTER_PROJECT_CLONE}" >&2
+fi
+
 # The SSH server's configuration, host key and authorized keys, fresh from
 # the image and the read-only setup directory on every start.
 sshd_dir=/run/scoter-sshd

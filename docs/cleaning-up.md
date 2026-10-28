@@ -59,7 +59,7 @@ The project clone and the persistent store are kept, so your work isn't lost.  B
 
 ## The Project Clone
 
-Each project has one clone, reused by each run, and mounted into the dev container at its `mounts: project-clone`.  At the start of a run, your project's latest commits are fetched into the clone (unless you give `--no-project-fetch`); your changes in the container stay there until you fetch them back (see [Don't run git or your IDE on the project clone from your host](../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host)).
+Each project has one clone, reused by each run, and mounted into the dev container at its `mounts: project-clone`.  At the start of a run, your project's latest commits are bundled for the clone (unless you give `--no-project-fetch`), and the dev container fetches them as it starts, into its `origin/*` branches; your changes in the container stay there until you fetch them back (see [Don't run git or your IDE on the project clone from your host](../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host)).
 
 * `scoter run --clean-project-clone` (or `--clean-project`) starts the clone over, from a fresh clone of your project.  Do this if anything in it looks suspicious.  It keeps the persistent store.
 * `scoter kill --clean-project-clone` removes it once the environment is stopped.

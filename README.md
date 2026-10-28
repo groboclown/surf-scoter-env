@@ -34,15 +34,19 @@ While this helps keep a strong security setup, you need to bring those changes b
 For strongest safety, treat the project clone as untrusted from the host side:
 
 - Use your IDE through its remote connection to the container, not by opening the project clone's folder on the host.
-- Bring changes back by fetching from the project clone into your own repository, then review them before merging or cherry-picking (or use `scoter kill --fetch BRANCH`, which does the same):
+- Bring changes back by fetching from the project clone into your own repository, then review them before merging or cherry-picking (or use `scoter kill --fetch BRANCH` for one branch):
 
   ```sh
   cd ~/src/my-project
-  git fetch ~/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone my-branch
-  git log -p HEAD..FETCH_HEAD
+  # Once: the clone as a remote of your repository.
+  git remote add scoter ~/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone
+  git config remote.scoter.fetch '+refs/heads/*:refs/remotes/scoter/*'
+  # Each time: every branch the container made, as scoter/BRANCH.
+  git fetch --no-recurse-submodules scoter
+  git log -p HEAD..scoter/my-branch
   ```
 
-  Fetching reads the clone's objects without running its hooks or configured commands.
+  Fetching reads the clone's objects without running its hooks or configured commands.  Never *push* into the clone: that runs its hooks on your computer.  `scoter run` gives the clone your newer commits as a bundle file, which the container fetches.
 - Review what you bring back as untrusted code, especially build scripts, before you build or run it on your host.
 - Never run programs from the project clone on your host.
 - If anything looks suspicious, start over from a fresh clone and an empty persistent store with `scoter run --clean-project-clone --clean-persistent-store`.

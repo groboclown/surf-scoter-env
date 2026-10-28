@@ -25,7 +25,7 @@ The container works on a separate copy.  With `vcs: git`, `scoter run` makes it 
 
 The clone is the `project-clone` directory itself, mounted whole.  Nothing the container can write lies on the path from your home directory to it, so the container can't redirect where `scoter` clones, fetches or deletes ([FILE-10](files-attack-vectors.md#file-10-the-clones-path-through-container-symlinks)).  `scoter run` also refuses a `project-clone` that's a symlink, or isn't a directory.
 
-When the clone already exists, `scoter run` refreshes it with the VCS `fetch-changes` command, unless given `--no-project-fetch`.  `--clean-project-clone` (or `--clean-project`) removes it and starts from a fresh clone.
+`scoter run` never runs Git in the clone, which would read its configuration and run its hooks, which the container controls ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).  Instead, each run bundles your repository's branches and tags into `project.bundle` in the read-only setup directory (`refresh-bundle`), unless given `--no-project-fetch`.  A fresh clone's `origin` points at that bundle's path in the container (`set-clone-origin`), and Git in the container fetches it: the distribution's dev container does as it starts, updating the `origin/*` branches but never the working tree.  `--clean-project-clone` (or `--clean-project`) removes it and starts from a fresh clone.
 
 With no `vcs`, `scoter` creates an empty clone directory.  The `file` VCS setting copies the project with `cp -R`, which *does* carry untracked and ignored files into the container.
 
@@ -52,15 +52,21 @@ What goes in it is up to the dev container.  The distribution's `dev-env` contai
 
 ## Bringing changes back
 
-Everything in the project clone was writable by the container, including its `.git` directory, so Surf Scoter's recommended pattern never runs anything inside the clone on the host.  The pattern, also described in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host), runs Git *in your own repository* and only reads objects from the clone (`scoter kill --fetch BRANCH` does the same):
+Everything in the project clone was writable by the container, including its `.git` directory, so Surf Scoter's recommended pattern never runs anything inside the clone on the host.  The pattern, also described in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host), runs Git *in your own repository* and only reads objects from the clone (`scoter kill --fetch BRANCH` does the same for one branch).  The clone can be a permanent remote of your repository, which brings back every branch:
 
 ```sh
 cd ~/src/my-project
-git fetch ~/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone my-branch
-git log -p HEAD..FETCH_HEAD
+# Once: the clone as a remote of your repository.
+git remote add scoter ~/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone
+git config remote.scoter.fetch '+refs/heads/*:refs/remotes/scoter/*'
+# Each time: every branch the container made, as scoter/BRANCH.
+git fetch --no-recurse-submodules scoter
+git log -p HEAD..scoter/my-branch
 ```
 
-Git runs in your repository, with your configuration and your hooks.  The clone's side is served by `git upload-pack`, which Git designs to be safe in an untrusted repository: it doesn't run the clone's hooks or the programs its configuration names.  Fetching carries only file contents and the executable bit, not ownership, group or other permission bits.
+Git runs in your repository, with your configuration and your hooks.  The clone's side is served by `git upload-pack`, which Git designs to be safe in an untrusted repository: it doesn't run the clone's hooks or the programs its configuration names.  `--no-recurse-submodules` keeps a `.gitmodules` in the fetched commits from sending your Git to other repositories.  Fetching carries only file contents and the executable bit, not ownership, group or other permission bits.
+
+Only ever fetch from the clone.  **Never push into it**: a push runs the clone's hooks on your host ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).
 
 Review what arrives as untrusted code before merging, paying particular attention to:
 
@@ -82,9 +88,10 @@ A project's `vcs` value picks a `NAME-vcs` section of the [system configuration]
 * **Copy, never share.**  No hard links, symlinks or bind mounts between the project and the clone.  The container owns the clone's files, so anything shared can be changed in your project too.  Copy-on-write clones (reflinks) are fine, since a write breaks the sharing.  This is what `--no-local` does for Git ([FILE-2](files-attack-vectors.md#file-2-object-files-shared-with-the-project-repository)).
 * **Leave the project's local settings behind.**  Hooks, local configuration and enabled extensions belong to your copy of the repository, not to the container's.
 
-### Refreshing the clone (`fetch-changes`)
+### Refreshing the clone (`refresh-bundle`, `set-clone-origin`)
 
-* **Never run the VCS tool inside the clone.**  A tool run with the clone as its working directory or repository reads the clone's configuration, hooks and extensions, which the container controls.  Push into the clone from the project side instead.  The current `git-vcs` implementation doesn't do this yet ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).
+* **Never run the VCS tool inside the clone, or push into it.**  A tool run with the clone as its working directory or repository reads the clone's configuration, hooks and extensions, which the container controls; so does the receiving side of a push ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).
+* **Hand the clone data, and let the VCS in the container fetch it.**  `refresh-bundle` runs in your repository and writes `{x:bundle}`, which `scoter` renames into the setup directory; `set-clone-origin` runs once, on a fresh clone, from the setup directory, and may only edit the clone's configuration as a file (`git config --file`), pointing it at `{x:origin}`, the bundle's container path.  Both are optional: a VCS without them leaves the clone as it was made.
 * **Clone into `{x:project-clone-dir}` itself.**  It's the directory that's mounted; `scoter` has checked it isn't a symlink.  Don't build paths below it, which the container could redirect.
 
 ### Showing and bringing back changes (`fetch-changes-into`, `show-fetch-changes`, `merge-changes`)

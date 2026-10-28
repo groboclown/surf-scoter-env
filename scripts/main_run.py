@@ -42,6 +42,8 @@ BUILD_DIR = "build"
 
 # The mode of the files in the settings directory the dev container mounts.
 MODE_SETTINGS_FILE = 0o666
+# The project's bundle: only read, by the container's user, whatever id it has.
+MODE_BUNDLE_FILE = 0o644
 # How often to check whether the dev container started.
 CONTAINER_POLL_SECONDS = 1.0
 # `inspect-container`'s exit code while the container isn't there yet.
@@ -100,11 +102,20 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
         # Remember to mark the work directories as ignored.
 
-        # -- the project's clone
         # Its parent first: by default in `state-dir`, so only yours.
         _make_state_dir(config)
+
+        # -- settings directory (before the clone: it holds the clone's bundle)
+        setup_dir = config.active_location("dev-container-settings-dir")
+        if setup_dir is None:
+            setup_dir = config.require_path("project-state", "setup-dir")
+            config.set_active_location("dev-container-settings-dir", setup_dir)
+        setup_dir.mkdir(parents=True, exist_ok=True)
+        _ignore_directory(config, vcs_section, setup_dir)
+
+        # -- the project's clone
         clone_dir = _setup_project_clone(
-            config, vcs_section, args.clean_project_clone, args.project_fetch
+            config, vcs_section, args.clean_project_clone, args.project_fetch, setup_dir,
         )
         _ignore_directory(config, vcs_section, clone_dir)
 
@@ -113,14 +124,6 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         if args.clean_persistent_store:
             persistent_store.remove(config, volume)
         persistent_store.create(config, volume)
-
-        # -- settings directory
-        setup_dir = config.active_location("dev-container-settings-dir")
-        if setup_dir is None:
-            setup_dir = config.require_path("project-state", "setup-dir")
-            config.set_active_location("dev-container-settings-dir", setup_dir)
-        setup_dir.mkdir(parents=True, exist_ok=True)
-        _ignore_directory(config, vcs_section, setup_dir)
 
         # Write the authorized keys file.
         key_file = config.require_path("ssh", "key-file")
@@ -530,32 +533,30 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
 
 
 def _setup_project_clone(
-    config: UserConfig, vcs_section: str | None, clean: bool, fetch: bool,
+    config: UserConfig, vcs_section: str | None, clean: bool, fetch: bool, setup_dir: Path,
 ) -> Path:
-    """Make or refresh the project's clone; its directory.
+    """Make the project's clone, and give it your newer commits; its directory.
 
     The clone is the directory itself, mounted whole in the container, so
     nothing the container can write is on the way to it (FILE-10).  It's
     checked not to be a symlink, or anything but a directory, all the same.
+
+    Nothing here runs the VCS with the clone as its repository or working
+    directory, which would read the clone's configuration and run its hooks
+    (FILE-1).  Your newer commits go to the container as a bundle in the
+    setup directory, which the clone's `origin` points at, and Git in the
+    container fetches them.
     """
     clone_dir = config.active_location("project-clone-dir")
     if clone_dir is None:
         clone_dir = config.require_path("project-state", "project-clone-dir")
         config.set_active_location("project-clone-dir", clone_dir)
     _check_real_dir(clone_dir)
-    if clone_dir.exists():
-        if clean:
-            print(f"Cleaning out the project's clone ({clone_dir})")
-            fileutil.rm(clone_dir)
-        elif fetch and vcs_section:
-            print(f"Fetching your project into {clone_dir} ...")
-            config.run_command(
-                vcs_section,
-                "fetch-changes",
-                cwd=clone_dir,
-            )
-        else:
-            print("Not copying project into its clone.")
+    if clone_dir.exists() and clean:
+        print(f"Cleaning out the project's clone ({clone_dir})")
+        fileutil.rm(clone_dir)
+    if vcs_section and (fetch or not clone_dir.exists()):
+        _refresh_bundle(config, vcs_section, setup_dir)
     if not clone_dir.exists():
         if vcs_section:
             print(f"Cloning your project into {clone_dir} ...")
@@ -567,11 +568,66 @@ def _setup_project_clone(
                     "project-clone-dir": str(clone_dir),
                 }
             )
+            _check_real_dir(clone_dir)
+            _point_clone_at_bundle(config, vcs_section, clone_dir, setup_dir)
         else:
             print("Not copying project into its clone (no version control system defined).")
             clone_dir.mkdir(parents=True)
+    elif not fetch:
+        print("Not giving the project's clone your newer commits (--no-project-fetch).")
     _check_real_dir(clone_dir)
     return clone_dir
+
+
+def _refresh_bundle(config: UserConfig, vcs_section: str, setup_dir: Path) -> None:
+    """Write the VCS's bundle of your branches into the setup directory, if it makes one.
+
+    It runs in your repository (`vcs-root`), never in the clone.  The file
+    is written beside the old one and renamed over it, readable by the
+    container's user under any id mapping.
+    """
+    if not config.has_run(vcs_section, "refresh-bundle"):
+        return
+    bundle = setup_dir / defaults.PROJECT_BUNDLE_FILE_NAME
+    temp = setup_dir / (defaults.PROJECT_BUNDLE_FILE_NAME + ".tmp")
+    fileutil.rm(temp)
+    res = config.run_command(
+        vcs_section, "refresh-bundle", on_error=OnError.RETURN, capture=Capture.NONE,
+        cwd=config.active_location("vcs-root") or config.active_location("project-dir"),
+        template={"bundle": str(temp)},
+    )
+    if res.returncode != 0 or not temp.is_file():
+        print(
+            "Couldn't bundle your project's branches (an empty repository has none); "
+            "the project's clone won't get your newer commits this run.",
+            file=sys.stderr,
+        )
+        fileutil.rm(temp)
+        return
+    os.chmod(temp, MODE_BUNDLE_FILE)
+    os.replace(temp, bundle)
+
+
+def _point_clone_at_bundle(
+    config: UserConfig, vcs_section: str, clone_dir: Path, setup_dir: Path,
+) -> None:
+    """Point a fresh clone's `origin` at the bundle, as the container sees it.
+
+    The clone was just made, so nothing in it is the container's yet.  The
+    command edits its configuration file only, run from the setup directory.
+    """
+    if not config.has_run(vcs_section, "set-clone-origin"):
+        return
+    mount = config.dev_container_mounts().get("setup")
+    if mount is None or not _is_container_path(mount):
+        raise ConfigErr(f"dev-env.yaml's `mounts: setup` isn't a plain container path: {mount!r}")
+    config.run_command(
+        vcs_section, "set-clone-origin", cwd=setup_dir,
+        template={
+            "project-clone-dir": str(clone_dir),
+            "origin": f"{mount}/{defaults.PROJECT_BUNDLE_FILE_NAME}",
+        },
+    )
 
 
 def _check_real_dir(path: Path) -> None:
@@ -835,9 +891,9 @@ def main(argv: Sequence[str]) -> int:
         dest="project_fetch",
         default=True,
         help=(
-            "If the project's clone exists, don't fetch updates into it from the "
-            "project directory, so it can become out-of-date.  A clone that doesn't "
-            "exist is still made."
+            "Don't bundle your project's newer commits for its existing clone to "
+            "fetch, so it can become out-of-date.  A clone that doesn't exist is "
+            "still made."
         ),
     )
     parser.add_argument(

@@ -59,7 +59,6 @@ The Critical vectors, and the High vectors that are open or unverified:
 | --- | --- | --- | --- |
 | [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
 | [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Mitigated |
-| [FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone) | `scoter run` runs Git inside the project clone | Critical | Open |
 | [BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
 | [VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled) | The Dockerfile meaning match can be fooled | High | Open |
 | [VER-2](verification-attack-vectors.md#ver-2-any-file-named-dev-envyaml-matches-on-meaning) | Any file named `dev-env.yaml` matches on meaning | High | Open |
@@ -78,7 +77,7 @@ The Critical vectors, and the High vectors that are open or unverified:
 A few patterns show up across the areas, and are worth watching for in any new code:
 
 * **Project values written into host files.**  Anything the project supplies that `scoter` writes into a host file or command line needs strict validation and escaping (DEV-1, DEV-2).
-* **The host acting inside the project clone.**  Anything that runs on the host with the clone as its working directory, opens a path through it, or shares files with it, gives the container a way out.  The container can replace any directory in the clone with a symlink between sessions, so the host must never build a path below it (FILE-1, FILE-2, FILE-4, FILE-10).
+* **The host acting inside the project clone.**  Anything that runs on the host with the clone as its working directory, opens a path through it, or shares files with it, gives the container a way out.  The container can replace any directory in the clone with a symlink between sessions, so the host must never build a path below it.  Pushing into the clone runs its hooks too (FILE-1, FILE-2, FILE-4, FILE-10).
 * **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all come from the project.  [Project verification](verification.md) puts a review in front of them (NET-2, BRIDGE-2, DEV-3), so the review's own gaps are now where these risks live (VER-3, VER-4).
 * **Matching on meaning must agree with the consumer.**  Wherever a change is let through because it "means the same", the canonical form must drop exactly what the real consumer (Docker, the shell, the generator) ignores, and nothing more (VER-1, VER-2).
 * **The review must show everything it accepts.**  A value that reaches the host but isn't on the review page is accepted unseen (VER-3, DEV-2, FILE-10).

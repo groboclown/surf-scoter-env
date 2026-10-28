@@ -189,8 +189,8 @@ class RecordsTest(TempDirTest):
         values = records.setup_values(UserConfig(suc), "git-vcs", {"/c": "sha256:c"})
         self.assertEqual(values["store"], "/v")
         self.assertEqual(values["vcs-runs"], {
-            "local-clone": ["git", "clone"], "fetch-changes-into": None,
-            "show-fetch-changes": None, "merge-changes": None,
+            "local-clone": ["git", "clone"], "refresh-bundle": None, "set-clone-origin": None,
+            "fetch-changes-into": None, "show-fetch-changes": None, "merge-changes": None,
         })
         self.assertEqual(values["host-command-checks"], {"h:s": {"action": "refuse"}})
         self.assertEqual(

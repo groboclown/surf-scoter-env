@@ -26,7 +26,7 @@ The weak points of [file access](files.md): how code in the development containe
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [FILE-1](#file-1-scoter-run-runs-git-inside-the-project-clone) | `scoter run` runs Git inside the project clone | Critical | Open |
+| [FILE-1](#file-1-scoter-run-runs-git-inside-the-project-clone) | `scoter run` runs Git inside the project clone | Critical | Closed |
 | [FILE-2](#file-2-object-files-shared-with-the-project-repository) | Object files shared with the project repository | High | Mitigated |
 | [FILE-3](#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |
 | [FILE-4](#file-4-host-tools-acting-on-the-project-clone) | Host tools acting on the project clone | High | By design |
@@ -45,14 +45,18 @@ Related vectors elsewhere: crafted mount points ([DEV-2](dev-container-attack-ve
 
 ### FILE-1: `scoter run` runs Git inside the project clone
 
-**Severity:** Critical.  **Status:** Open.
-**Where:** `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py); `git-vcs: runs: fetch-changes` in [`setup.yaml`](../../defaults/setup.yaml).
+**Severity:** Critical.  **Status:** Closed.
+**Where:** `_setup_project_clone`, `_refresh_bundle` and `_point_clone_at_bundle` in [`main_run.py`](../../scripts/main_run.py); `git-vcs: runs: refresh-bundle` and `set-clone-origin` in [`setup.yaml`](../../defaults/setup.yaml); the fetch in the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh).
 
-When the project clone already exists, `scoter run` (unless given `--no-project-fetch`) runs `git fetch --all` on the host, with the clone as its working directory.  Git reads the clone's `.git/config` and hooks, which an earlier container session could have rewritten.  A remote's `uploadpack` or `sshCommand` setting, or a `reference-transaction` hook, runs a program on the host.  Project verification doesn't help: the clone isn't part of what's reviewed.
+When the project clone already existed, `scoter run` refreshed it by running `git fetch --all` on the host, with the clone as its working directory.  Git read the clone's `.git/config` and hooks, which an earlier container session could have rewritten.  A remote's `uploadpack` or `sshCommand` setting, or a `reference-transaction` hook, ran a program on the host.  Project verification didn't help: the clone isn't part of what's reviewed.
 
-**Red team:** from the container, set `remote.origin.uploadpack` in the clone's `.git/config`, or plant `.git/hooks/reference-transaction`, then wait for the next `scoter run`.
+**Pushing into the clone isn't a fix.**  `git push` to a local path starts `git receive-pack` *in the clone*, on the host, which reads the clone's configuration and runs its hooks (`pre-receive`, `update`, `post-receive`, `post-update`, `reference-transaction`, `proc-receive`, `push-to-checkout`), wherever the clone's `core.hooksPath` says.  The pushing side can't turn that off: for the local transport, Git removes `GIT_CONFIG_PARAMETERS` before starting receive-pack, so `git -c core.hooksPath=... push` doesn't reach it (confirmed with Git 2.56: a planted `reference-transaction` hook ran).  A `--receive-pack` wrapper that sets `core.hooksPath` stops the hooks, but not the rest of the configuration: `receive.denyCurrentBranch=updateInstead` checks out files through the clone's smudge filters and `core.fsmonitor`, and `receive.autogc` runs `git gc` there.
 
-**When changing this code:** never run a VCS command with the clone as its working directory or its repository.  Refresh the clone from the project side instead, for example by pushing from the project into it.
+**What replaced it.**  The host never runs Git in the clone.  Each run, `refresh-bundle` runs `git bundle create --branches --tags` in your repository (`vcs-root`), and writes `project.bundle` into the read-only setup directory.  After a fresh clone, `set-clone-origin` points its `origin` at the bundle's path in the container, editing only the new clone's configuration file with `git config --file`, before the container has ever seen it.  Git *in the container* fetches `origin`; the distribution's dev container does so as it starts, which updates the remote-tracking branches, as `git fetch --all` did.  The clone's hooks and configuration now only ever run inside the container.
+
+**Red team:** from the container, plant hooks, `core.hooksPath`, `core.fsmonitor` and smudge filters in the clone's `.git`, then run `scoter run`, with and without `--clean-project-clone`, and check that nothing runs on the host.  Look for any other command the tools run with the clone as its repository or working directory, in every VCS section.
+
+**When changing this code:** never run a VCS command with the clone as its working directory or repository, including pushing into it.  Give the clone data (a bundle, a read-only mount) and let the VCS in the container fetch it.  Bring changes back only by reading the clone from your repository (`fetch-changes-into`).
 
 ### FILE-2: Object files shared with the project repository
 
@@ -138,7 +142,7 @@ The project clone is a `git clone`, so it gets no untracked files, ignored files
 **Severity:** Medium.  **Status:** By design.
 **Where:** the project clone, and the persistent store.
 
-Isolation limits where data can go, not what the container can read.  Committed secrets, the full Git history, anything the `file` VCS copied, and anything an earlier session left in the persistent store are available to the code running there.
+Isolation limits where data can go, not what the container can read.  Committed secrets, the full Git history, every local branch and tag (the clone's bundle holds them all, though a fresh clone only checks out one), anything the `file` VCS copied, and anything an earlier session left in the persistent store are available to the code running there.
 
 **Red team:** search the clone, its history and the persistent store for credentials.
 

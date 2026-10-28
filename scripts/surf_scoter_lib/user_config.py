@@ -163,6 +163,10 @@ class UserConfig:
         locs = self.__req_dict("active-config-locations")
         locs[name] = str(path)
 
+    def has_run(self, section: str, run: str) -> bool:
+        """Whether the section has the `runs` command (a VCS needn't have them all)."""
+        return jdata.find(self._config, "resolved", section, "runs", run) is not None
+
     def require_run(
         self, section: str, run: str, template: dict[str, str] | None = None
     ) -> list[str]:
