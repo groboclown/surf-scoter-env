@@ -6,6 +6,7 @@
 //! stream, decides what to do with it, and runs it.
 
 pub(crate) mod analyze;
+pub(crate) mod clone_path;
 pub(crate) mod container;
 pub(crate) mod exec;
 pub(crate) mod project_clone;
@@ -344,7 +345,7 @@ fn handle_process<R: Read + Send + 'static, S: FrameSink>(
                     "scoter-host: process {proc}: running {} {:?} in {}",
                     request.program,
                     request.args,
-                    dir.display(),
+                    dir.path.display(),
                 ),
                 None => eprintln!(
                     "scoter-host: process {proc}: running {} {:?}",

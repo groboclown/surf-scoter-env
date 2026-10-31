@@ -67,7 +67,6 @@ The Critical vectors, and the High vectors that are open or unverified:
 | [DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker) | Host ids under rootful Docker | High | Open |
 | [DEV-5](dev-container-attack-vectors.md#dev-5-the-ide-session-as-a-channel-to-the-host) | The IDE session as a channel to the host | High | Unverified |
 | [NET-3](network-attack-vectors.md#net-3-dns-from-the-dev-container) | DNS from the dev container | High | Unverified |
-| [BRIDGE-3](host-bridge-attack-vectors.md#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Open |
 
 
 ## Recurring themes

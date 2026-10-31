@@ -33,7 +33,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 | --- | --- | --- | --- |
 | [BRIDGE-1](#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
 | [BRIDGE-2](#bridge-2-the-project-chooses-the-commands) | The project chooses the commands | High | Mitigated |
-| [BRIDGE-3](#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Open |
+| [BRIDGE-3](#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Mitigated |
 | [BRIDGE-4](#bridge-4-host-output-returns-to-the-container) | Host output returns to the container | High | By design |
 | [BRIDGE-5](#bridge-5-allowed-environment-variables-steer-the-program) | Allowed environment variables steer the program | High | By design |
 | [BRIDGE-6](#bridge-6-path-mapping-and-resolution) | Path mapping and resolution | High | Mitigated |
@@ -80,14 +80,28 @@ What's left:
 
 ### BRIDGE-3: Path checks race the host program
 
-**Severity:** High.  **Status:** Open.
-**Where:** `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); process start in [`exec.rs`](../../host/src/host/exec.rs).
+**Severity:** High.  **Status:** Mitigated: closed for `path` arguments and the working directory itself; a program run in a directory of the clone still reads what's there by path.
+**Where:** `resolve` and `match_path` in [`analyze.rs`](../../host/src/host/analyze.rs); [`clone_path.rs`](../../host/src/host/clone_path.rs); `copy_in`, `copy_out` and `enter_clone_dir` in [`exec.rs`](../../host/src/host/exec.rs).
 
-A path argument is resolved and checked when the request arrives, then passed to the host program as a path.  The container can change the clone in between, for example by replacing a checked directory with a symlink, and the host program then follows it outside the clone.
+A path argument used to be resolved and checked when the request arrived, then passed to the host program as a path.  The container could change the clone at any time after the check, including while the program ran, for example by replacing a checked directory with a symlink, and the host program then followed it outside the clone.  So could the working directory.
 
-**Red team:** with an allowed command that takes a path in the clone, change the path's parent directories while requests are in flight, and check where the host program actually reads or writes.
+**What closed it:**
 
-**When changing this code:** consider passing open file descriptors, opening with `O_NOFOLLOW` along the path, or copying inputs to the request's temporary directory.  Until then, `within: temp` is the safer choice for files a host command writes.
+* **Paths are never handed over.**  A `path` argument in the clone goes through the request's private temporary directory, under its own name: a file the program reads (`access: read`) is copied in before it starts; one it writes (`access: write`) is put back when it exits; `read-write` does both.  The program never gets a path into the clone, so nothing the container does to the clone while it runs can redirect it.
+* **No symlink is ever followed.**  Each copy reaches the file from the clone's root one name at a time (`openat` with `O_NOFOLLOW`), and refuses a symlink anywhere, even one that stays in the clone.  The clone's root is a host directory the container can't reach (FILE-10), so it's opened by path.  Names are taken as written, with `.` and `..` worked out by name.
+* **Writing back can't be redirected.**  A file is put back as a new file (`O_CREAT | O_EXCL | O_NOFOLLOW`) in the directory opened the same way, renamed over the old name; a rename replaces a symlink at that name rather than following it.  A write-back that fails ends the command with 125, and says why.
+* **The working directory is entered by handle.**  It's opened the same way, and the child `fchdir`s into the open directory before it runs the program.
+* **Only files.**  A directory can't be a `path` argument: it can't be copied through.
+
+**What's left:**
+
+* A program run in a directory of the clone (a `cwd` rule) reads the files there by their paths, so it follows whatever symlinks the container puts there, then or later.  That's [BRIDGE-1](#bridge-1-allowed-commands-that-read-container-controlled-input): a `cwd` rule is for programs that treat the files there as data.
+* On Windows, which has no `openat`, each name is checked not to be a symlink or junction before the copy, which can race; the program itself still only sees the copies ([BRIDGE-12](#bridge-12-windows-hosts)).
+* The program sees only the file, not its neighbours, and its output appears when it exits.  Tools that need a directory, or the files beside one, can't be given one; `within: temp` and a command that needs no clone files are the choices.
+
+**Red team:** with an allowed command taking a `read` and a `write` path, swap the path's directories for symlinks, before and during the run, and check that nothing outside the clone is read or written.  With a `cwd` rule, try to make the program start anywhere else.  On Windows, race the copy.
+
+**When changing this code:** never give a host program a path into the clone, and never open one there by path: go through `clone_path`.  A new kind of argument that needs a directory needs its own design.
 
 ### BRIDGE-4: Host output returns to the container
 
@@ -114,15 +128,15 @@ Commands start with an empty environment, and only variables the configuration a
 ### BRIDGE-6: Path mapping and resolution
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`project_clone.rs`](../../host/src/host/project_clone.rs).
+**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`clone_path.rs`](../../host/src/host/clone_path.rs); [`project_clone.rs`](../../host/src/host/project_clone.rs).
 
-Container paths must be inside the project clone's mount (the effective `mounts: project-clone`).  They're mapped to the host's clone directory and resolved following symlinks, and the result must still be inside the clone and match the entry's `within` rule.  Missing paths are allowed only when their directory exists and they aren't dangling symlinks.
+Container paths must be inside the project clone's mount (the effective `mounts: project-clone`).  They're mapped to names below the host's clone directory, with `.` and `..` worked out by name (`..` can't leave the clone), and must match the entry's `within` rule.  No name on the way may be a symlink, and the last must be a regular file; a `write` path may be missing, when its directory exists.  The host program never gets the path itself: it gets a copy ([BRIDGE-3](#bridge-3-path-checks-race-the-host-program)).
 
 **Red team:** try relative paths, `..`, repeated separators, symlink chains, dangling symlinks, hard links to files outside the clone, very long paths and non-UTF-8 names.
 
 The container's persistent store is a container volume, not a host directory, so it has no host path to map to: a path there is refused like any other outside the clone.  The mount points can't be inside one another, so no part of the clone's mount is really another mount ([DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file)).  `within: project-clone`, `allowed` patterns and `cwd: allowed-project-clone-dirs` are relative to the clone's root.
 
-**When changing this code:** every path a host process receives must come from this resolution.  Add tests for any new `within` mode.
+**When changing this code:** every file of the clone a host process uses must be reached through `clone_path`, never by path.  Add tests for any new `within` mode.
 
 ### BRIDGE-7: Argument matching
 

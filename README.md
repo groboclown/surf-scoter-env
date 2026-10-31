@@ -162,7 +162,7 @@ Some things to keep in mind:
 
 Some actions need privileges the container deliberately doesn't have, such as cloud credentials or access to the Docker daemon.  For these, the container can ask the host to run a command for it.  The host only runs the exact command forms you list in its configuration file, and refuses everything else.
 
-Because these commands run on your host with your privileges, every file they're given is restricted to the project clone (or a throwaway temporary directory).  A path argument is mapped from the container to the host and resolved, following symlinks, and it must still be inside the project clone.  The command's working directory follows the same rules.  Host commands can't reach the container's persistent store at all: it's a container volume, not a host directory.
+Because these commands run on your host with your privileges, every file they're given is restricted to the project clone (or a throwaway temporary directory).  A path argument must be a file in the project clone, reached without following any symlink.  The command never gets the clone's path: it gets a private copy of the file, under the same name, and a file it writes is put back into the clone when it exits (each path argument says which, with `access`), so nothing the container does to the clone meanwhile can point the command at another file.  The command's working directory follows the same rules, and the command starts in the directory that was checked.  Host commands can't reach the container's persistent store at all: it's a container volume, not a host directory.
 
 Some suggestions for what to allow running on the host:
 

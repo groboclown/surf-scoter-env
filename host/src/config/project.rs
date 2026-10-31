@@ -39,7 +39,7 @@
 //! # What clients may run: one entry per allowed form of a command.
 //! commands:
 //!   - command: aws
-//!     args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd}}]
+//!     args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd, access: read}}]
 //!   - command: aws
 //!     # optional; the executable to run on the host (default: `command`, found on the PATH)
 //!     program: aws
@@ -90,11 +90,11 @@
 //!     `prefix` doesn't count; only the part the client chose is checked.
 //!   * `allow-empty`: allow an empty value (or nothing after the prefix).
 //!
-//! `path` matches a file path, which the host process receives as the
-//! resolved host path.  `within` says where it may be:
-//!   * `{path: {within: cwd}}`: at or below the client's working directory.
-//!   * `{path: {within: project-clone, allowed: [build/**, '*.txt']}}`: in the
-//!     project clone, matching one of `allowed` (patterns like
+//! `path` matches a file path.  `within` says where it may be:
+//!   * `{path: {within: cwd, access: read}}`: at or below the client's
+//!     working directory.
+//!   * `{path: {within: project-clone, access: write, allowed: [build/**, '*.txt']}}`:
+//!     in the project clone, matching one of `allowed` (patterns like
 //!     `allowed-project-clone-dirs`, but they may name files too).
 //!   * `{path: {within: temp}}`: a throwaway file in a temporary directory,
 //!     deleted when the process exits.  The client's value only picks the
@@ -102,12 +102,21 @@
 //!     generated.  Kept names may not contain separators or characters
 //!     Windows refuses, nor be `.`, `..` or a Windows device name like `NUL`.
 //!
-//! Client paths are relative to the client's working directory, or absolute
-//! container paths; either way they must be inside the project clone mount.  They
-//! are resolved on the host following symlinks, and the result must still be
-//! in the project clone (and match the `within` rule).  A path that doesn't exist
-//! yet (such as an output file) is allowed when its directory exists.
-//! `allow-leading-dash` is also a `path` option.
+//! A path in the project clone is never given to the host process: the
+//! container could redirect it while the process runs (BRIDGE-3).  `access`
+//! (required for `cwd` and `project-clone`) says what the process does with
+//! the file, which goes through a private temporary directory, under its
+//! own name:
+//!   * `read`: the file is copied there first; it must exist.
+//!   * `write`: the process writes it there, and it's put back afterwards;
+//!     it may not exist yet, as long as its directory does.
+//!   * `read-write`: both; it must exist.
+//!
+//! Only regular files: a directory argument is refused.  Client paths are
+//! relative to the client's working directory, or absolute container paths;
+//! either way they must be inside the project clone mount.  They're taken as
+//! written (`.` and `..` worked out), and no name on the way may be a
+//! symlink.  `allow-leading-dash` is also a `path` option.
 //!
 //! Keys are kebab-case.  Unknown keys are rejected, so typos don't silently
 //! fall back to defaults.
@@ -265,6 +274,9 @@ pub struct MatchOptions {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct PathOptions {
     pub within: Within,
+    /// For `within: cwd` and `project-clone`: what the process does with the file.
+    #[serde(default)]
+    pub access: Option<Access>,
     /// For `within: project-clone`: the path must match one of these.
     #[serde(default)]
     pub allowed: Vec<ClonePattern>,
@@ -273,6 +285,28 @@ pub struct PathOptions {
     pub keep_name: bool,
     #[serde(default)]
     pub allow_leading_dash: bool,
+}
+
+/// What the host process does with a `path` argument in the project clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    /// Copied in before the process starts.
+    Read,
+    /// Put back after the process exits.
+    Write,
+    /// Both.
+    ReadWrite,
+}
+
+impl Access {
+    pub fn reads(self) -> bool {
+        matches!(self, Access::Read | Access::ReadWrite)
+    }
+
+    pub fn writes(self) -> bool {
+        matches!(self, Access::Write | Access::ReadWrite)
+    }
 }
 
 /// Where a `path` argument may point.
@@ -303,7 +337,7 @@ impl<'de> Deserialize<'de> for Token {
             type Value = Token;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string (quote numbers and booleans), or a placeholder such as {any: {}} or {path: {within: cwd}}")
+                f.write_str("a string (quote numbers and booleans), or a placeholder such as {any: {}} or {path: {within: cwd, access: read}}")
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Token, E> {
@@ -744,7 +778,15 @@ impl PathOptions {
         if self.keep_name && self.within != Within::Temp {
             return Err("`keep-name` only applies to paths within temp".to_string());
         }
-        Ok(())
+        match (self.within, self.access) {
+            (Within::Temp, Some(_)) => {
+                Err("`access` doesn't apply to paths within temp".to_string())
+            }
+            (Within::Cwd | Within::ProjectClone, None) => Err(
+                "a path in the project clone needs `access`: read, write or read-write".to_string(),
+            ),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -804,6 +846,7 @@ mod tests {
     fn path_opts(within: Within) -> PathOptions {
         PathOptions {
             within,
+            access: (within != Within::Temp).then_some(Access::Read),
             allowed: vec![],
             keep_name: false,
             allow_leading_dash: false,
@@ -1041,7 +1084,7 @@ mod tests {
     #[test]
     fn parse_path_modes() {
         assert_eq!(
-            args("[{path: {within: cwd}}]"),
+            args("[{path: {within: cwd, access: read}}]"),
             vec![Token::Path(path_opts(Within::Cwd))]
         );
         assert_eq!(
@@ -1053,7 +1096,7 @@ mod tests {
         );
         assert_eq!(
             args(
-                "[{path: {within: project-clone, allowed: [build/**, '*.txt'], allow-leading-dash: true}}]"
+                "[{path: {within: project-clone, access: read, allowed: [build/**, '*.txt'], allow-leading-dash: true}}]"
             ),
             vec![Token::Path(PathOptions {
                 allowed: vec![pattern("build/**"), pattern("*.txt")],
@@ -1069,11 +1112,14 @@ mod tests {
         assert!(args_error("[{path: {}}]").contains("within"));
         assert!(!args_error("[{path: {within: home}}]").is_empty());
         // Options that only apply to `any`.
-        assert!(args_error("[{path: {within: cwd, prefix: /x}}]").contains("prefix"));
-        assert!(args_error("[{path: {within: cwd, allow-empty: true}}]").contains("allow-empty"));
+        assert!(args_error("[{path: {within: cwd, access: read, prefix: /x}}]").contains("prefix"));
+        assert!(
+            args_error("[{path: {within: cwd, access: read, allow-empty: true}}]")
+                .contains("allow-empty")
+        );
         // Bad patterns.
         assert!(
-            args_error("[{path: {within: project-clone, allowed: [/abs]}}]")
+            args_error("[{path: {within: project-clone, access: read, allowed: [/abs]}}]")
                 .contains("must be relative to the project clone")
         );
     }
@@ -1081,11 +1127,11 @@ mod tests {
     #[test]
     fn validate_path_options() {
         assert_eq!(
-            args_error("[x, {path: {within: project-clone}}]"),
+            args_error("[x, {path: {within: project-clone, access: read}}]"),
             "commands[0].args[1]: a path within the project clone needs `allowed` patterns",
         );
         assert_eq!(
-            args_error("[{path: {within: cwd, allowed: ['**']}}]"),
+            args_error("[{path: {within: cwd, access: read, allowed: ['**']}}]"),
             "commands[0].args[0]: `allowed` only applies to paths within the project clone",
         );
         assert_eq!(
@@ -1093,9 +1139,31 @@ mod tests {
             "commands[0].args[0]: `allowed` only applies to paths within the project clone",
         );
         assert_eq!(
-            args_error("[{path: {within: cwd, keep-name: true}}]"),
+            args_error("[{path: {within: cwd, access: read, keep-name: true}}]"),
             "commands[0].args[0]: `keep-name` only applies to paths within temp",
         );
+        assert_eq!(
+            args_error("[{path: {within: cwd}}]"),
+            "commands[0].args[0]: a path in the project clone needs `access`: read, write or read-write",
+        );
+        assert_eq!(
+            args_error("[{path: {within: temp, access: write}}]"),
+            "commands[0].args[0]: `access` doesn't apply to paths within temp",
+        );
+        assert!(!args_error("[{path: {within: cwd, access: execute}}]").is_empty());
+        for (access, expected) in [
+            ("read", Access::Read),
+            ("write", Access::Write),
+            ("read-write", Access::ReadWrite),
+        ] {
+            assert_eq!(
+                args(&format!("[{{path: {{within: cwd, access: {access}}}}}]")),
+                vec![Token::Path(PathOptions {
+                    access: Some(expected),
+                    ..path_opts(Within::Cwd)
+                })]
+            );
+        }
     }
 
     // ---- command entries ----
@@ -1106,7 +1174,7 @@ mod tests {
             "container:\n  dev-container: dev-env\n",
             "commands:\n",
             "  - command: aws\n",
-            "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd}}]\n",
+            "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd, access: read}}]\n",
             "  - command: aws\n",
             "    program: aws2\n",
             "    args: [codebuild, start-build, --project-name, {any: {}}]\n",

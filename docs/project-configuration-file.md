@@ -42,7 +42,7 @@ env:
 # What clients may run: one entry per allowed form of a command.
 commands:
   - command: aws
-    args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd}}]
+    args: [s3, cp, {any: {prefix: "s3://some-name/"}}, {path: {within: cwd, access: write}}]
   - command: aws-build
     # optional; the name of the program to run on the host (default: `command`)
     program: aws
@@ -111,13 +111,21 @@ Without `cwd`, the process runs in a new temporary directory.  With `cwd`, it ru
 * `allow-leading-dash`: allow values starting with '-' (normally refused, so a placeholder can't be used to slip in an option).  Text given in `prefix` doesn't count; only the part the client chose is checked.
 * `allow-empty`: allow an empty value (or nothing after the prefix).
 
-`path` matches a file path, which the host process receives as the resolved host path.  `within` says where it may be:
+`path` matches a file path.  `within` says where it may be:
 
-* `{path: {within: cwd}}`: at or below the client's working directory.
-* `{path: {within: project-clone, allowed: [build/**, '*.txt']}}`: in the project clone, matching one of `allowed` (patterns like `allowed-project-clone-dirs`, but they may name files too).
+* `{path: {within: cwd, access: read}}`: at or below the client's working directory.
+* `{path: {within: project-clone, access: write, allowed: [build/**, '*.txt']}}`: in the project clone, matching one of `allowed` (patterns like `allowed-project-clone-dirs`, but they may name files too).
 * `{path: {within: temp}}`: a throwaway file in a temporary directory, deleted when the process exits.  The client's value only picks the file name, and only with `keep-name: true`; otherwise the name is generated.  Kept names may not contain separators or characters Windows refuses, nor be `.`, `..` or a Windows device name like `NUL`.
 
-Client paths are relative to the client's working directory, or absolute container paths; either way they must be inside the project clone's mount.  They are resolved on the host following symlinks, and the result must still be in the project clone (and match the `within` rule).  Paths in the persistent store, or anywhere else in the container, are refused: there's no host directory to map them to.  A path that doesn't exist yet (such as an output file) is allowed when its directory exists.  `allow-leading-dash` is also a `path` option.
+A file in the project clone is never given to the host program by its path in the clone: the container could change what that path leads to while the program runs.  Instead it goes through a private temporary directory, under its own name (so its extension is kept), and `access` (required for `cwd` and `project-clone`) says which way:
+
+* `read`: the file is copied there before the program starts.  It must exist.
+* `write`: the program writes it there, and it's put back into the project clone when the program exits.  It may not exist yet, as long as its directory does.
+* `read-write`: both.  It must exist.
+
+So the program sees only the file, not the files next to it, and a file it writes appears in the project clone when it exits, not as it writes.  If the file can't be put back (its directory is gone, say), the command exits with 125, and says why on its standard error.  Only files: a directory can't be a `path` argument.
+
+Client paths are relative to the client's working directory, or absolute container paths; either way they must be inside the project clone's mount.  They're taken as written, with `.` and `..` worked out, and no name on the way may be a symlink, not even one that stays in the project clone.  Paths in the persistent store, or anywhere else in the container, are refused: there's no host directory to map them to.  `allow-leading-dash` is also a `path` option.
 
 ## Host command environment
 

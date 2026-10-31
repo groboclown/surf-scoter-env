@@ -4,8 +4,8 @@
 //! they need the host's privileges.  Since those actions run on the host,
 //! every file they're given is restricted to the project clone (or a throwaway
 //! temporary directory): paths are mapped from the container's project clone
-//! mount to the host's project clone directory and resolved, following symlinks,
-//! before they're checked.  Commands the container or the user's host can run
+//! mount to names below the host's project clone directory, taken as written
+//! (`.` and `..` worked out), and no name on the way may be a symlink.  Commands the container or the user's host can run
 //! on their own don't belong in the configuration.
 //!
 //! The request is allowed by the first configured entry for the command whose
@@ -13,24 +13,25 @@
 //! allows the client's working directory (see `config` for the format).
 //! Anything else is refused.
 //!
-//! For an entry with a `cwd` rule, the process runs in the resolved host
+//! For an entry with a `cwd` rule, the process runs in the project clone's
 //! directory matching the client's working directory.  Otherwise it runs in a
-//! temporary directory.  `path` arguments are passed as resolved host paths
-//! (or temporary files).  The process's environment comes from the matching
+//! temporary directory.  `path` arguments in the project clone become copies
+//! in a private temporary directory, which `exec` makes and puts back,
+//! reaching the clone's files the same way again (`clone_path`, BRIDGE-3); the
+//! checks here only decide.  The process's environment comes from the matching
 //! entry's `env_plan`: only the container variables it allows come through,
 //! and a container variable matching one of its `error` patterns refuses the
 //! request (see `config::environment`).
 
 use std::cell::OnceCell;
-use std::fs;
-use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use surf_scoter_env_launcher::comm::client_host::Invocation;
 
-use scoter_host::config::project::{Commands, MatchOptions, PathOptions, Token, Within};
+use scoter_host::config::project::{Access, Commands, MatchOptions, PathOptions, Token, Within};
 
-use super::exec::{Arg, ExecRequest};
+use super::clone_path::{self, Kind};
+use super::exec::{Arg, CloneDir, ExecRequest};
 use super::project_clone::ProjectClone;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,7 +74,10 @@ pub(crate) fn analyze(
                         .iter()
                         .any(|pattern| pattern.matches(&dir.names())) =>
                 {
-                    Some(dir.path.clone())
+                    Some(CloneDir {
+                        path: dir.path.clone(),
+                        names: dir.below_workspace.clone(),
+                    })
                 }
                 _ => continue,
             },
@@ -90,6 +94,7 @@ pub(crate) fn analyze(
         let program = rule.program.clone().unwrap_or_else(|| name.to_string());
         return Decision::Allow(ExecRequest {
             program,
+            clone_root: workspace.host.clone(),
             args,
             cwd,
             envs,
@@ -122,12 +127,14 @@ impl Request<'_> {
     }
 }
 
-/// A resolved path inside the host's project clone directory.
+/// A path inside the host's project clone directory.
 #[derive(Debug, PartialEq, Eq)]
 struct HostPath {
+    /// Where it is on the host, for messages and tests.
     path: PathBuf,
     /// The names below the project clone directory.
     below_workspace: Vec<String>,
+    kind: Kind,
 }
 
 impl HostPath {
@@ -138,16 +145,21 @@ impl HostPath {
 
 /// Resolve a container directory on the host; see `resolve`.  It must exist as a directory.
 fn resolve_dir(container_dir: &str, workspace: &ProjectClone) -> Option<HostPath> {
-    resolve(container_dir, workspace, false).filter(|dir| dir.path.is_dir())
+    resolve(container_dir, workspace, false).filter(|dir| dir.kind == Kind::Dir)
 }
 
-/// Map an absolute container path to the host, following symlinks.  `None`
-/// when it isn't under the project clone mount, doesn't exist on the host, or
-/// resolves to somewhere outside the host's project clone directory.
+/// Map an absolute container path to names below the host's project clone
+/// directory.  `None` when it isn't under the project clone mount, `..`
+/// would leave the clone, any name on the way is a symlink or isn't a
+/// directory, or what's at the end is neither a file nor a directory.
+///
+/// The names are taken as written, with `.` and `..` worked out: no symlink
+/// is ever followed, so `..` can't mean anything else.  This only decides;
+/// `exec` reaches the file the same way again when it uses it, as the
+/// container may have changed the clone meanwhile (BRIDGE-3).
 ///
 /// With `may_be_missing`, a path that doesn't exist yet (such as an output
-/// file) is allowed when its directory exists, as long as it isn't a dangling
-/// symlink.
+/// file) is allowed when its directory exists.
 fn resolve(
     container_path: &str,
     workspace: &ProjectClone,
@@ -158,51 +170,27 @@ fn resolve(
         // A sibling such as `/workspace2`.
         return None;
     }
-    let names: Vec<&str> = rest.split('/').filter(|name| !name.is_empty()).collect();
-    let mut host = workspace.host.clone();
-    for name in &names {
-        host.push(name);
-    }
-    // Symlinks and `..` are resolved here; the result is checked below.
-    // TODO race (time-of-check to time-of-use): the container can still change
-    //      the workspace between this check and `exec` using `path` (as the
-    //      working directory or an argument).  Replacing a directory along
-    //      `path` with a symlink in that window would point the process
-    //      wherever the symlink points.  Closing it needs the checked
-    //      directory held open (e.g. openat / fchdir).
-    let path = match fs::canonicalize(&host) {
-        Ok(path) => path,
-        Err(e) if may_be_missing && e.kind() == ErrorKind::NotFound => {
-            // Only the last name may be missing, and it must be a plain name.
-            let name = names.last()?;
-            let mut parts = Path::new(name).components();
-            if !matches!(
-                (parts.next(), parts.next()),
-                (Some(Component::Normal(_)), None)
-            ) {
-                return None;
+    let mut names: Vec<String> = Vec::new();
+    for name in rest.split('/') {
+        match name {
+            "" | "." => {}
+            ".." => {
+                // Above the project clone: refused.
+                names.pop()?;
             }
-            let parent = fs::canonicalize(host.parent()?).ok()?;
-            if !parent.is_dir() {
-                return None;
-            }
-            let path = parent.join(name);
-            // A dangling symlink would send the process wherever it points.
-            if fs::symlink_metadata(&path).is_ok() {
-                return None;
-            }
-            path
+            name => names.push(name.to_string()),
         }
-        Err(_) => return None,
-    };
-    let below = path.strip_prefix(&workspace.host).ok()?;
-    let below_workspace = below
-        .components()
-        .map(|c| c.as_os_str().to_str().map(str::to_string))
-        .collect::<Option<Vec<_>>>()?;
+    }
+    let kind = clone_path::kind(&workspace.host, &names).ok()?;
+    match kind {
+        Kind::File | Kind::Dir => {}
+        Kind::Missing if may_be_missing => {}
+        Kind::Missing | Kind::Other => return None,
+    }
     Some(HostPath {
-        path,
-        below_workspace,
+        path: clone_path::display_path(&workspace.host, &names),
+        below_workspace: names,
+        kind,
     })
 }
 
@@ -268,17 +256,29 @@ fn match_path(options: &PathOptions, value: &str, request: &Request) -> Option<A
     } else {
         return None;
     };
-    let resolved = resolve(&container_path, request.workspace, true)?;
+    let access = options.access?;
+    let resolved = resolve(&container_path, request.workspace, access == Access::Write)?;
+    // Only files: a directory can't be copied through, and one given by
+    // path could be redirected while the process runs (BRIDGE-3).
+    if resolved.kind == Kind::Dir {
+        return None;
+    }
     let allowed = match options.within {
-        // At or below: `starts_with` compares whole names.
-        Within::Cwd => resolved.path.starts_with(&request.client_dir()?.path),
+        // At or below, name by name.
+        Within::Cwd => resolved
+            .below_workspace
+            .starts_with(&request.client_dir()?.below_workspace),
         Within::ProjectClone => options
             .allowed
             .iter()
             .any(|pattern| pattern.matches(&resolved.names())),
         Within::Temp => false,
     };
-    allowed.then_some(Arg::HostPath(resolved.path))
+    allowed.then_some(Arg::ClonePath {
+        path: resolved.path,
+        names: resolved.below_workspace,
+        access,
+    })
 }
 
 /// The file name in the client's `value`, when it's safe to create on any host OS.
@@ -322,13 +322,14 @@ mod tests {
     use scoter_host::config::environment::EnvPlan;
     use scoter_host::config::project;
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::Path;
 
     /// The rules from the configuration example, plus a few for edge cases.
     fn commands() -> Commands {
         parse_commands(concat!(
             "  - command: aws\n",
-            "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd}}]\n",
+            "    args: [s3, cp, {any: {prefix: \"s3://some-name/\"}}, {path: {within: cwd, access: write}}]\n",
             "  - command: aws\n",
             "    args: [codebuild, start-build, --project-name, {any: {}}]\n",
             "  - {command: tool, args: []}\n",
@@ -442,10 +443,6 @@ mod tests {
         Arg::Plain(s.to_string())
     }
 
-    fn host_path(path: PathBuf) -> Arg {
-        Arg::HostPath(path)
-    }
-
     // ---- the example rules ----
 
     #[test]
@@ -462,11 +459,12 @@ mod tests {
             ]),
             Decision::Allow(ExecRequest {
                 program: "aws".to_string(),
+                clone_root: ws.workspace.host.clone(),
                 args: vec![
                     plain("s3"),
                     plain("cp"),
                     plain("s3://some-name/dir/file.txt"),
-                    host_path(ws.host("file.txt"))
+                    ws.host_arg("file.txt").unwrap(),
                 ],
                 cwd: None,
                 envs: BTreeMap::new(),
@@ -479,12 +477,13 @@ mod tests {
         };
         assert_eq!(
             target(&["aws", "s3", "cp", "s3://some-name/k", "out"]),
-            host_path(ws.host("out"))
+            ws.host_arg("out").unwrap()
         );
-        assert_eq!(
-            target(&["aws", "s3", "cp", "s3://some-name/k", "services"]),
-            host_path(ws.host("services"))
-        );
+        // Not a directory: only files go through the copies (BRIDGE-3).
+        assert!(matches!(
+            decide(&["aws", "s3", "cp", "s3://some-name/k", "services"]),
+            Decision::Deny(_)
+        ));
         // Any key, including odd ones; S3 keys are opaque.
         target(&["aws", "s3", "cp", "s3://some-name/../x", "out"]);
         target(&["aws", "s3", "cp", "s3://some-name/-k", "out"]);
@@ -674,12 +673,13 @@ mod tests {
     fn first_matching_entry_wins() {
         let commands = parse_commands(concat!(
             "  - {command: cp, program: first, args: [{any: {}}]}\n",
-            "  - {command: cp, program: second, args: [{path: {within: cwd}}]}\n",
+            "  - {command: cp, program: second, args: [{path: {within: cwd, access: read}}]}\n",
         ));
         assert_eq!(
             analyze(&invocation(&["cp", "x"]), &commands, &workspace()),
             Decision::Allow(ExecRequest {
                 program: "first".to_string(),
+                clone_root: workspace().host,
                 args: vec![plain("x")],
                 cwd: None,
                 envs: BTreeMap::new(),
@@ -752,7 +752,7 @@ mod tests {
         /// The directory an allowed request runs in.
         fn cwd_of(&self, commands: &Commands, cwd: &str) -> Option<PathBuf> {
             match self.decide(commands, cwd) {
-                Decision::Allow(req) => req.cwd,
+                Decision::Allow(req) => req.cwd.map(|dir| dir.path),
                 other => panic!("{cwd}: expected allow, got {other:?}"),
             }
         }
@@ -783,8 +783,12 @@ mod tests {
             ws.decide(&commands, "/workspace/services/api"),
             Decision::Allow(ExecRequest {
                 program: "docker".to_string(),
+                clone_root: ws.workspace.host.clone(),
                 args: vec![plain("compose"), plain("up")],
-                cwd: Some(ws.host("services/api")),
+                cwd: Some(CloneDir {
+                    path: ws.host("services/api"),
+                    names: vec!["services".to_string(), "api".to_string()],
+                }),
                 envs: BTreeMap::new(),
             })
         );
@@ -936,16 +940,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cwd_symlink_matches_target() {
+    fn cwd_symlink_within_is_refused() {
         let ws = TestProjectClone::new();
         let commands = compose_commands();
-        // services/link -> infra/a: the name matches `services/*`, but the
-        // target is what's checked (and it matches `infra/**`).
+        // services/link -> infra/a: inside the project clone, and matching
+        // both patterns, but no symlink is followed (BRIDGE-3).
         std::os::unix::fs::symlink(ws.host("infra/a"), ws.host("services/link")).unwrap();
-        assert_eq!(
-            ws.cwd_of(&commands, "/workspace/services/link"),
-            Some(ws.host("infra/a"))
-        );
+        ws.assert_denied_in(&commands, "/workspace/services/link");
         // infra/up -> the workspace root, which no pattern allows.
         std::os::unix::fs::symlink(&ws.workspace.host, ws.host("infra/up")).unwrap();
         ws.assert_denied_in(&commands, "/workspace/infra/up");
@@ -964,9 +965,10 @@ mod tests {
     /// Entries with one path argument, for each mode.
     fn path_commands() -> Commands {
         parse_commands(concat!(
-            "  - {command: tool, args: [cwd, {path: {within: cwd}}]}\n",
-            "  - {command: tool, args: [cwd-dash, {path: {within: cwd, allow-leading-dash: true}}]}\n",
-            "  - {command: tool, args: [ws, {path: {within: project-clone, allowed: ['infra/**', 'services/*/*.json', notes.txt]}}]}\n",
+            "  - {command: tool, args: [cwd, {path: {within: cwd, access: write}}]}\n",
+            "  - {command: tool, args: [read, {path: {within: cwd, access: read}}]}\n",
+            "  - {command: tool, args: [cwd-dash, {path: {within: cwd, access: write, allow-leading-dash: true}}]}\n",
+            "  - {command: tool, args: [ws, {path: {within: project-clone, access: write, allowed: ['infra/**', 'services/*/*.json', notes.txt]}}]}\n",
             "  - {command: tool, args: [temp, {path: {within: temp}}]}\n",
             "  - {command: tool, args: [temp-name, {path: {within: temp, keep-name: true}}]}\n",
         ))
@@ -978,47 +980,75 @@ mod tests {
             let mut inv = invocation(&["tool", mode, value]);
             inv.cwd = cwd.to_string();
             match analyze(&inv, &path_commands(), &self.workspace) {
-                Decision::Allow(req) => Some(req.args[1].clone()),
+                Decision::Allow(req) => {
+                    assert_eq!(req.clone_root, self.workspace.host);
+                    Some(req.args[1].clone())
+                }
                 Decision::Deny(_) => None,
             }
         }
 
+        /// The file `sub` of the project clone, as a `write` argument.
         fn host_arg(&self, sub: &str) -> Option<Arg> {
-            Some(Arg::HostPath(self.host(sub)))
+            self.arg(sub, Access::Write)
+        }
+
+        fn arg(&self, sub: &str, access: Access) -> Option<Arg> {
+            Some(Arg::ClonePath {
+                path: self.host(sub),
+                names: sub.split('/').map(str::to_string).collect(),
+                access,
+            })
         }
     }
 
     #[test]
     fn path_within_cwd() {
         let ws = TestProjectClone::new();
+        fs::write(ws.host("services/api/config.json"), b"{}").unwrap();
         let cwd = "/workspace/services";
-        // At or below the client's directory, existing or not.
-        assert_eq!(ws.path_arg(cwd, "cwd", "."), ws.host_arg("services"));
-        assert_eq!(ws.path_arg(cwd, "cwd", "api"), ws.host_arg("services/api"));
+        // Files at or below the client's directory, existing or not.
         assert_eq!(
-            ws.path_arg(cwd, "cwd", "./api/"),
-            ws.host_arg("services/api")
+            ws.path_arg(cwd, "cwd", "api/config.json"),
+            ws.host_arg("services/api/config.json")
+        );
+        assert_eq!(
+            ws.path_arg(cwd, "cwd", "./api//config.json"),
+            ws.host_arg("services/api/config.json")
         );
         assert_eq!(
             ws.path_arg(cwd, "cwd", "api/new.txt"),
             ws.host_arg("services/api/new.txt")
         );
         assert_eq!(
-            ws.path_arg(cwd, "cwd", "/workspace/services/web"),
-            ws.host_arg("services/web")
+            ws.path_arg(cwd, "cwd", "/workspace/services/web/new.txt"),
+            ws.host_arg("services/web/new.txt")
         );
         assert_eq!(
-            ws.path_arg(cwd, "cwd", "api/../web"),
-            ws.host_arg("services/web")
+            ws.path_arg(cwd, "cwd", "web/../api/config.json"),
+            ws.host_arg("services/api/config.json")
         );
+        // Directories aren't files: they can't be copied through (BRIDGE-3).
+        assert_eq!(ws.path_arg(cwd, "cwd", "."), None);
+        assert_eq!(ws.path_arg(cwd, "cwd", "api"), None);
         // Above or beside it.
         assert_eq!(ws.path_arg(cwd, "cwd", ".."), None);
         assert_eq!(ws.path_arg(cwd, "cwd", "../notes.txt"), None);
-        assert_eq!(ws.path_arg(cwd, "cwd", "/workspace/infra"), None);
-        assert_eq!(ws.path_arg(cwd, "cwd", "/workspace/services-old"), None);
-        // Outside the workspace altogether.
+        assert_eq!(ws.path_arg(cwd, "cwd", "/workspace/infra/x"), None);
+        assert_eq!(ws.path_arg(cwd, "cwd", "/workspace/services-old/x"), None);
+        // Outside the project clone altogether.
         assert_eq!(ws.path_arg(cwd, "cwd", "/etc/passwd"), None);
-        assert_eq!(ws.path_arg(cwd, "cwd", "../../.."), None);
+        assert_eq!(ws.path_arg(cwd, "cwd", "../../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn path_read_must_exist() {
+        let ws = TestProjectClone::new();
+        assert_eq!(
+            ws.path_arg("/workspace", "read", "notes.txt"),
+            ws.arg("notes.txt", Access::Read)
+        );
+        assert_eq!(ws.path_arg("/workspace", "read", "new.txt"), None);
     }
 
     #[test]
@@ -1030,7 +1060,7 @@ mod tests {
             None
         );
         assert_eq!(ws.path_arg("relative", "cwd", "notes.txt"), None);
-        // The workspace root itself is fine.
+        // The project clone's root itself is fine.
         assert_eq!(
             ws.path_arg("/workspace", "cwd", "notes.txt"),
             ws.host_arg("notes.txt")
@@ -1041,7 +1071,6 @@ mod tests {
     fn path_within_workspace() {
         let ws = TestProjectClone::new();
         let cwd = "/workspace/services";
-        assert_eq!(ws.path_arg(cwd, "ws", "../infra"), ws.host_arg("infra"));
         assert_eq!(
             ws.path_arg(cwd, "ws", "/workspace/infra/a/b/out.log"),
             ws.host_arg("infra/a/b/out.log")
@@ -1054,12 +1083,12 @@ mod tests {
             ws.path_arg(cwd, "ws", "../notes.txt"),
             ws.host_arg("notes.txt")
         );
+        // A directory, even one a pattern matches.
+        assert_eq!(ws.path_arg(cwd, "ws", "../infra"), None);
         // Not matching any pattern.
-        assert_eq!(ws.path_arg(cwd, "ws", "api"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "api/config.yaml"), None);
-        assert_eq!(ws.path_arg(cwd, "ws", "/workspace"), None);
         assert_eq!(ws.path_arg(cwd, "ws", "/etc/hosts"), None);
-        // Works wherever the client is, as long as the path is in the workspace.
+        // Works wherever the client is, as long as the path is in the project clone.
         assert_eq!(
             ws.path_arg("/home/dev", "ws", "/workspace/notes.txt"),
             ws.host_arg("notes.txt")
@@ -1072,7 +1101,6 @@ mod tests {
         assert_eq!(ws.path_arg("/workspace", "cwd", "missing/out.txt"), None);
         assert_eq!(ws.path_arg("/workspace", "cwd", "notes.txt/out.txt"), None);
         assert_eq!(ws.path_arg("/workspace", "ws", "infra/missing/x"), None);
-        // `..` after a missing name can't be resolved either.
         assert_eq!(ws.path_arg("/workspace", "cwd", "missing/.."), None);
     }
 
@@ -1104,7 +1132,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn path_symlinks_are_resolved() {
+    fn path_symlinks_are_refused() {
         use std::os::unix::fs::symlink;
         let ws = TestProjectClone::new();
         let outside = TempDir::new().unwrap();
@@ -1117,16 +1145,15 @@ mod tests {
         .unwrap();
         symlink(ws.host("infra"), ws.host("services/api/to-infra")).unwrap();
         let cwd = "/workspace/services/api";
-        // Links that leave the workspace, including new files under them.
-        assert_eq!(ws.path_arg(cwd, "cwd", "escape"), None);
+        // Links out, including new files under them.
+        assert_eq!(ws.path_arg(cwd, "cwd", "escape/secret"), None);
         assert_eq!(ws.path_arg(cwd, "cwd", "escape/new.txt"), None);
         assert_eq!(ws.path_arg(cwd, "cwd", "secret-link"), None);
-        assert_eq!(ws.path_arg(cwd, "ws", "to-infra/../../../etc"), None);
-        // A link to elsewhere in the workspace is judged by its target.
-        assert_eq!(ws.path_arg(cwd, "cwd", "to-infra"), None);
-        assert_eq!(ws.path_arg(cwd, "ws", "to-infra"), ws.host_arg("infra"));
+        // Links within the project clone too: no symlink is followed.
+        assert_eq!(ws.path_arg(cwd, "ws", "to-infra/a/new.log"), None);
+        // `..` is worked out by name, never through a link.
         assert_eq!(
-            ws.path_arg(cwd, "ws", "to-infra/a/new.log"),
+            ws.path_arg(cwd, "ws", "to-infra/../../../infra/a/new.log"),
             ws.host_arg("infra/a/new.log")
         );
     }
@@ -1136,7 +1163,6 @@ mod tests {
     fn path_dangling_symlink_refused() {
         let ws = TestProjectClone::new();
         let outside = TempDir::new().unwrap();
-        // Writing to `out.txt` would create the file outside the workspace.
         std::os::unix::fs::symlink(outside.path().join("created"), ws.host("services/out.txt"))
             .unwrap();
         assert_eq!(ws.path_arg("/workspace/services", "cwd", "out.txt"), None);
