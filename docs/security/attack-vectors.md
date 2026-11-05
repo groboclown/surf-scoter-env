@@ -60,8 +60,6 @@ The Critical vectors, and the High vectors that are open or unverified:
 | [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
 | [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Mitigated |
 | [BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
-| [VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts) | The review doesn't show everything it accepts | High | Open |
-| [VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed) | Exemptions accept what nobody reviewed | High | By design, partly Open |
 | [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |
 | [DEV-3](dev-container-attack-vectors.md#dev-3-image-builds-run-outside-the-isolation) | Image builds run outside the isolation | High | Open |
 | [DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker) | Host ids under rootful Docker | High | Open |
@@ -75,9 +73,9 @@ A few patterns show up across the areas, and are worth watching for in any new c
 
 * **Project values written into host files.**  Anything the project supplies that `scoter` writes into a host file or command line needs strict validation and escaping (DEV-1, DEV-2).
 * **The host acting inside the project clone.**  Anything that runs on the host with the clone as its working directory, opens a path through it, or shares files with it, gives the container a way out.  The container can replace any directory in the clone with a symlink between sessions, so the host must never build a path below it.  Pushing into the clone runs its hooks too (FILE-1, FILE-2, FILE-4, FILE-10).
-* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all come from the project.  [Project verification](verification.md) puts a review in front of them (NET-2, BRIDGE-2, DEV-3), so the review's own gaps are now where these risks live (VER-3, VER-4).
-* **Matching on meaning must agree with the consumer, and fail closed.**  Wherever a change is let through because it "means the same", the canonical form must drop exactly what the real consumer (Docker, the shell, the generator) ignores, and nothing more (VER-1, VER-2).
-* **The review must show everything it accepts.**  A value that reaches the host but isn't on the review page is accepted unseen (VER-3, DEV-2, FILE-10).
+* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all start as the project's suggestion.  [Project verification](verification.md) makes them the developer's own configuration: a pull's review copies them out of the project, and a run uses only that copy (NET-2, BRIDGE-2, DEV-3).  The review's own gaps are where these risks live now (VER-3, VER-26, VER-27), along with the unlocked state, which runs unreviewed edits (VER-33).
+* **Found, then copied.**  The project's files are read once, defensively, into a copy, and nothing parses or runs them in place.  Any new lookup, setting or default that reaches the live project brings back what the pull removed (VER-23, VER-24).
+* **The review must show everything it approves.**  A value that reaches the host but isn't in the review is approved unseen (VER-3, DEV-2, FILE-10).
 * **State that outlives a session.**  Anything the container can leave in the project clone (its `.git`) or its persistent store is input to the next session, and the clone is input to the host (DEV-16, FILE-1).
 * **Differences between runtimes.**  Rootful and rootless runtimes, Docker and Podman, and VM-based runtimes on macOS and Windows behave differently, so tests on one don't cover the others (NET-3, NET-8, DEV-4, BRIDGE-12).
 

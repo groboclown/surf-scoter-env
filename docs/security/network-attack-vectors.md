@@ -16,7 +16,7 @@ Code in the dev container wants to:
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules | The project file's `egress`, as accepted | [`gateway_squid.py`](../../scripts/gateway_squid.py) turns them into the gateway's host list; [`squid.conf`](../../containers/network-gateway/squid.conf) enforces it |
+| Egress rules | The project file's `egress`, as pulled into your configuration | [`gateway_squid.py`](../../scripts/gateway_squid.py) turns them into the gateway's host list; [`squid.conf`](../../containers/network-gateway/squid.conf) enforces it |
 | `CONNECT` requests, hostnames | Code in the dev container | [`squid.conf`](../../containers/network-gateway/squid.conf) |
 | DNS answers for allowed domains | Whoever runs those domains' DNS | [`blocked-destinations.txt`](../../containers/network-gateway/blocked-destinations.txt), [`egress.nft`](../../containers/firewall-router/egress.nft) |
 | DNS queries from the dev container | Code in the dev container | The container runtime's resolver |
@@ -60,18 +60,17 @@ Once a domain is on the list, anything in the container can send it anything.  T
 **Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
 **Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../host/src/config/egress.rs), [`public_suffix.rs`](../../host/src/config/public_suffix.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py); [`gateway_squid.py`](../../scripts/gateway_squid.py); `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).
 
-The project suggests the rules, but the gateway gets only the rules you accepted with `scoter verify`, from the verified store.  Until you accept them, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), and wildcards over a public suffix.  `gateway_squid.py` escapes each host into Squid's pattern, and stops the launch on a rule the gateway can't enforce.
+The project suggests the rules, but the gateway gets only your configuration's rules, which you approved with `scoter pull`, from the verified store.  Without a configuration, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), and wildcards over a public suffix.  `gateway_squid.py` escapes each host into Squid's pattern, and stops the launch on a rule the gateway can't enforce.
 
 What's left:
 
 * **The checks are thin.**  The review flags plain `http` and hosts on the `verification: egress-hosts` lists; any other host is shown, but only as a rule.  [NET-1](#net-1-allowed-domains-are-open-channels) is the real risk of each one.
 * **The public suffix list is off by default.**  `verification: path-lists: public-suffix-lists` is empty, so only the built-in `egress-refused-wildcards` list stops a wildcard such as `*.some-hosting-provider.example`.
-* **Accepting without looking.**  `scoter verify --with-exemption` accepts new rules unseen ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed)).
-* **Checks added later don't apply** to projects already accepted ([VER-6](verification-attack-vectors.md#ver-6-setup-changes-that-dont-ask-for-a-new-review)).
+* **Approving without looking.**  A reviewer of your own can approve rules nobody looked at ([VER-27](verification-attack-vectors.md#ver-27-approval-cant-prove-a-person-reviewed)); an unlocked configuration runs edited rules unreviewed ([VER-33](verification-attack-vectors.md#ver-33-the-unlocked-state)).
 
-**Red team:** ship a project whose rules contain very broad entries, such as `*.com`, a bare IP address, a wildcard over a hosting provider's user domains, or entries Squid might parse unexpectedly, and see what the review shows and the gateway allows.  Get a rule change accepted through `--with-exemption`.
+**Red team:** ship a project whose rules contain very broad entries, such as `*.com`, a bare IP address, a wildcard over a hosting provider's user domains, or entries Squid might parse unexpectedly, and see what the review shows and the gateway allows.  Edit a rule while unlocked, and see what the run's warning shows.
 
-**When changing this code:** validation belongs in the generator, before the rules reach the review, and again before they reach the gateway.  Keep the gateway's configuration made only from the accepted rules.
+**When changing this code:** validation belongs in the generator, before the rules reach the review, and again before they reach the gateway.  Keep the gateway's configuration made only from the configuration's rules.
 
 ### NET-3: DNS from the dev container
 

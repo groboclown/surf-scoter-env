@@ -1,9 +1,9 @@
 #SPDX:MIT
 """Turning the egress rules into a network gateway's configuration.
 
-The rules come from the universal configuration file: the accepted ones
-(`egress.rules`), or, until a review makes an acceptance, the project file's
-own (`current-project-setup`).
+The rules come from the universal configuration file: the configuration
+in use's (`egress.rules`), or, for the checks on a copy being reviewed, its
+project file's own (`current-project-setup`).
 
 Each gateway enforces what it can.  A rule it can't enforce is refused, with
 the reason; it's never dropped, or loosened into something broader.  Each
@@ -69,7 +69,7 @@ class RuleErr(ValueError):
 
 
 def rules_from(config: UserConfig) -> list[Rule]:
-    """The accepted egress rules in the universal configuration file; none without any."""
+    """The configuration's egress rules in the universal configuration file; none without any."""
     try:
         entries = config.egress_rules()
     except ConfigErr as err:
@@ -78,7 +78,7 @@ def rules_from(config: UserConfig) -> list[Rule]:
 
 
 def rules_of(entries: list[jdata.DictJsonData]) -> list[Rule]:
-    """Egress rules from their entries (the accepted shape, or the project file's)."""
+    """Egress rules from their entries (the universal file's `egress` shape, or the project file's)."""
     return [_rule(entry, i) for i, entry in enumerate(entries)]
 
 

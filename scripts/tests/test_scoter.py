@@ -12,6 +12,7 @@ from pathlib import Path
 import scoter
 
 from ..surf_scoter_lib import fileutil
+from ..surf_scoter_lib.verified import store
 
 
 def _config(sub_command: object) -> scoter.DictJsonData:
@@ -246,34 +247,6 @@ class FindProjectDirTest(unittest.TestCase):
         self.assertEqual(self.find("repo", None), self.dir / "repo")
 
 
-class CheckProjectVcsTest(unittest.TestCase):
-    """Test the project's `vcs` against the repository it's in."""
-
-    def settings(self, vcs: str | None) -> scoter.DictJsonData:
-        """Settings with git and hg sections, and a project using `vcs`."""
-        ret = _vcs_settings(
-            git=_find_root("vcs_root_nearest.py", ".git"),
-            hg=_find_root("vcs_root_nearest.py", ".hg"),
-        )
-        ret["current-project-setup"] = {} if vcs is None else {"vcs": vcs}
-        return ret
-
-    def test_matching(self) -> None:
-        """The VCS that found the root, a VCS without `find-root`, or none, is fine."""
-        root = (Path("/repo"), "git")
-        scoter.check_project_vcs(self.settings("git"), root)
-        scoter.check_project_vcs(self.settings("file"), root)
-        scoter.check_project_vcs(self.settings("file"), None)
-        scoter.check_project_vcs(self.settings(None), root)
-
-    def test_mismatch(self) -> None:
-        """Another VCS's repository, or none, is an error."""
-        with self.assertRaisesRegex(scoter.ConfigErr, "it's in a hg repository"):
-            scoter.check_project_vcs(self.settings("git"), (Path("/repo"), "hg"))
-        with self.assertRaisesRegex(scoter.ConfigErr, "isn't in a git repository"):
-            scoter.check_project_vcs(self.settings("git"), None)
-
-
 class TempFileTest(unittest.TestCase):
     """Test the private temporary configuration files."""
 
@@ -288,38 +261,6 @@ class TempFileTest(unittest.TestCase):
             self.assertEqual(inp.read(), '{"a": 1}')
         scoter.remove_tmp(file)
         self.assertFalse(os.path.exists(directory))
-
-
-class FindAcceptanceTest(unittest.TestCase):
-    """Test asking the setup's `find-acceptance` for the acceptance."""
-
-    def settings(self, script: str) -> scoter.DictJsonData:
-        return {"resolved": {"scoter": {"runs": {"find-acceptance": [
-            sys.executable, "-c", script, "{x:universal}",
-        ]}}}}
-
-    def test_found(self) -> None:
-        """Given the configuration's file, which is gone afterwards; its JSON."""
-        script = (
-            "import json, os, sys; "
-            "print(json.dumps({'match': 'exact', 'accepted-settings': '/v/a.json', "
-            "'given': os.path.isfile(sys.argv[1]), 'file': sys.argv[1]}))"
-        )
-        found = scoter.find_acceptance(self.settings(script))
-        assert found is not None  # nosec: B101  # narrowing for the type checker
-        self.assertEqual(found["accepted-settings"], "/v/a.json")
-        self.assertTrue(found["given"])
-        self.assertFalse(os.path.exists(str(found["file"])))
-
-    def test_problems(self) -> None:
-        """No command is no lookup; a failing or confused one is an error."""
-        self.assertIsNone(scoter.find_acceptance({}))
-        with self.assertRaises(scoter.ConfigErr):
-            scoter.find_acceptance(self.settings("import sys; sys.exit(3)"))
-        with self.assertRaises(scoter.ConfigErr):
-            scoter.find_acceptance(self.settings("print('not json')"))
-        with self.assertRaises(scoter.ConfigErr):
-            scoter.find_acceptance(self.settings("print('[1]')"))
 
 
 class RunToEndTest(unittest.TestCase):
@@ -348,14 +289,47 @@ class SetupWithoutProjectNamesTest(unittest.TestCase):
         self.assertIn("/opt/scoter/setup.yaml", err.getvalue())
 
 
+class ReadSubCommandSummaryTest(unittest.TestCase):
+    """Test that 'read_sub_command_summary' handles files right."""
+
+    def test_not_script(self) -> None:
+        """A non-script file isn't parsed."""
+        not_script = SCRIPTS / "subcmd-no-project.txt"
+        res = scoter.read_sub_command_summary(not_script)
+        self.assertIsNone(res)
+
+    def test_not_file(self) -> None:
+        """A script-looking name that doesn't exist."""
+        not_exist = SCRIPTS / "main_this_is_not_a_valid_command.py"
+        self.assertFalse(not_exist.is_file())
+        res = scoter.read_sub_command_summary(not_exist)
+        self.assertIsNone(res)
+
+    def test_parse(self) -> None:
+        """A valid script parsing."""
+        exist = SCRIPTS / "main_list.py"
+        self.assertTrue(exist.is_file())
+        res = scoter.read_sub_command_summary(exist)
+        self.assertIsNotNone(res)
+
+        # The name matches.
+        self.assertEqual(res[0], "list")
+
+        # The description exists.  Deliberately does not
+        # include the text, as it can change and break the build.
+        self.assertIsInstance(res[1], str)
+        self.assertNotEqual(res[1], "")
+        self.assertFalse(res[1].startswith('"'))
+
+
 class HelpTest(unittest.TestCase):
     """Test that `help` doesn't need a project."""
 
     def test_help_skips_the_project(self) -> None:
         """`help` loads the setup alone; other commands look for the project.
 
-        `verify` and `revoke` load the project as it suggests, without the
-        user's accepted settings; `run` loads them too.
+        Every command but those in `subcmd-no-project.txt` finds the project,
+        without parsing its files: they read only copies of them.
         """
         self.maxDiff = None
         seen: list[scoter.ConfigScope] = []
@@ -383,14 +357,38 @@ class HelpTest(unittest.TestCase):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 scoter.main(["scoter", "help"])
-                scoter.main(["scoter", "verify"])
-                scoter.main(["scoter", "revoke"])
+                scoter.main(["scoter", "remove"])
                 scoter.main(["scoter", "run"])
-                scoter.main(["scoter", "list-accepted"])
+                scoter.main(["scoter", "list"])
+                scoter.main(["scoter", "pull"])
         finally:
             scoter.load_config = original  # type: ignore[assignment]
         scope = scoter.ConfigScope
         self.assertEqual(
             seen,
-            [scope.SETUP, scope.SUGGESTED, scope.SUGGESTED, scope.ACCEPTED, scope.SETUP],
+            [scope.SETUP, scope.FOUND, scope.FOUND, scope.SETUP, scope.FOUND],
         )
+
+
+class LinkedProjectTest(unittest.TestCase):
+    """Finding a project by its link in the store, when it has no files of its own."""
+
+    def test_environment_id_matches_the_store(self) -> None:
+        for name in ("proj", "My Project!", "x" * 50, "---"):
+            path = Path(tempfile.gettempdir()) / name
+            self.assertEqual(scoter.environment_id(path), store.environment_id(path))
+
+    def test_found_by_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(os.path.realpath(directory))
+            project = root / "repo" / "proj"
+            (project / "sub").mkdir(parents=True)
+            verified = root / "verified"
+            settings: scoter.DictJsonData = {"resolved": {"verification": {"paths": {"store": str(verified)}}}}
+            self.assertIsNone(scoter.find_linked_project(settings, project / "sub", root / "repo"))
+            link = verified / scoter.environment_id(project) / "link.json"
+            link.parent.mkdir(parents=True)
+            link.write_text("{}", encoding="utf-8")
+            self.assertEqual(scoter.find_linked_project(settings, project / "sub", root / "repo"), project)
+            # Never above the repository.
+            self.assertIsNone(scoter.find_linked_project(settings, project / "sub", project / "sub"))

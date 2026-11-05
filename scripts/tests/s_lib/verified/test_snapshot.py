@@ -215,6 +215,102 @@ class SnapshotTest(TempDirTest):
         with self.assertRaisesRegex(snapshot.SnapshotErr, "larger than the 2000 bytes"):
             self.take(files)
 
+    @unittest.skipUnless(POSIX, "file modes")
+    def test_mode_bits_refused(self) -> None:
+        """A setuid, setgid or sticky file is refused."""
+        files = self.project()
+        for bit in (0o4000, 0o2000, 0o1000):
+            with self.subTest(bit=oct(bit)):
+                self.write("proj/.surf-scoter.d/env/bin/run.sh", "#!/bin/sh\n", 0o755 | bit)
+                if not os.stat(files / "env" / "bin" / "run.sh").st_mode & bit:
+                    self.skipTest("the file system drops the bit")
+                with self.assertRaisesRegex(snapshot.SnapshotErr, "setuid, setgid or sticky"):
+                    self.take(files)
+        self.write("proj/.surf-scoter.d/env/bin/run.sh", "#!/bin/sh\n", 0o755)
+        self.take(files)
+
+    @unittest.skipUnless(POSIX, "file names with control characters")
+    def test_names_refused(self) -> None:
+        """A name with a control or non-ASCII character is refused, and shown escaped (VER-10)."""
+        for name in ("a\x1b[31m", "tab\there", "caf\u00e9", "rlo\u202e", "del\x7f"):
+            with self.subTest(name=ascii(name)):
+                files = self.project()
+                (files / "env" / name).mkdir()
+                self.write(f"proj/.surf-scoter.d/env/{name}/x", "x")
+                with self.assertRaisesRegex(snapshot.SnapshotErr, "control or non-ASCII") as caught:
+                    self.take(files)
+                self.assertTrue(str(caught.exception).isascii())
+                self.assertNotIn(name, str(caught.exception))
+                (files / "env" / name / "x").unlink()
+                (files / "env" / name).rmdir()
+        snapshot.check_name("env/ok name-1.txt")
+
+    def test_source(self) -> None:
+        """Seeding reads the whole files directory, within the limits, before any parse (VER-23)."""
+        files = self.project()
+        source = snapshot.snapshot_source(files, "project.yaml", self.LIMITS)
+        self.assertEqual(
+            sorted(source.manifest.files),
+            ["env/Dockerfile", "env/bin/run.sh", "env/dev-env.yaml", "project.yaml", "unused/Dockerfile"],
+        )
+        self.assertTrue(all(e.canonical is None for e in source.manifest.files.values()))
+        # Outside the container directories still counts against the limits.
+        self.write("proj/.surf-scoter.d/unused/big", "x" * 1001)
+        with self.assertRaisesRegex(snapshot.SnapshotErr, "larger than the 1000 bytes"):
+            snapshot.snapshot_source(files, "project.yaml", self.LIMITS)
+        (files / "unused" / "big").unlink()
+        (files / "project.yaml").unlink()
+        with self.assertRaisesRegex(snapshot.SnapshotErr, "can't be read"):
+            snapshot.snapshot_source(files, "project.yaml", self.LIMITS)
+
+    @unittest.skipUnless(POSIX, "symlinks and hard links")
+    def test_source_refused(self) -> None:
+        """Links anywhere in the source are refused, except a hard-linked project file, which warns."""
+        files = self.project()
+        os.link(files / "project.yaml", self.tmp / "elsewhere")
+        self.assertEqual(len(snapshot.snapshot_source(files, "project.yaml", self.LIMITS).warnings), 1)
+        os.symlink(self.tmp / "secret", files / "unused" / "creds")
+        with self.assertRaisesRegex(snapshot.SnapshotErr, "a symlink"):
+            snapshot.snapshot_source(files, "project.yaml", self.LIMITS)
+
+    def test_select_build(self) -> None:
+        """The selection made on the staged copy matches a snapshot of the build's files."""
+        files = self.project()
+        source = snapshot.snapshot_source(files, "project.yaml", self.LIMITS)
+        verified = self.new_store()
+        with verified.locked():
+            stored = source.store(verified)
+        staged = self.tmp / "staged"
+        staged.mkdir(mode=0o700)
+        snapshot.restore(verified, stored, staged, self.LIMITS)
+        outside = self.tmp / "dist" / "containers" / "base"
+        outside.mkdir(parents=True)
+        parsed = snapshot.ParsedFiles(project={"p": 1}, dev_container={"d": 1})
+        selected = snapshot.select_build(source, staged, "project.yaml", [staged / "env", outside], parsed)
+        self.assertEqual(selected.manifest, self.take(files, [outside]).manifest)
+        self.assertEqual(set(selected.contents), set(selected.manifest.files))
+        with self.assertRaisesRegex(snapshot.SnapshotErr, "project files directory itself"):
+            snapshot.select_build(source, staged, "project.yaml", [staged], parsed)
+
+    def test_bytes(self) -> None:
+        """Files from a VCS get the same checks as files on disk."""
+        taken = snapshot.snapshot_bytes(
+            [("project.yaml", b"a: 1\n", False), ("env/run.sh", b"#!/bin/sh\n", True)], self.LIMITS,
+        )
+        self.assertEqual(sorted(taken.manifest.files), ["env/run.sh", "project.yaml"])
+        self.assertTrue(taken.manifest.files["env/run.sh"].executable)
+        refused = {
+            "not a relative path": [("../x", b"", False)],
+            "control or non-ASCII": [("env/\x1b]0;x\x07", b"", False)],
+            "listed twice": [("a", b"", False), ("a", b"", False)],
+            "which is a file": [("env", b"", False), ("env/Dockerfile", b"", False)],
+            "1000 bytes": [("big", b"x" * 1001, False)],
+            "2000 bytes": [("a", b"x" * 900, False), ("b", b"x" * 900, False), ("c", b"x" * 900, False)],
+        }
+        for message, entries in refused.items():
+            with self.subTest(message=message), self.assertRaisesRegex(snapshot.SnapshotErr, message):
+                snapshot.snapshot_bytes(entries, self.LIMITS)
+
     @unittest.skipUnless(POSIX, "owner and mode checks")
     def test_restore(self) -> None:
         """A stored snapshot restores into an empty private directory."""

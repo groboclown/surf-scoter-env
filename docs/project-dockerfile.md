@@ -1,6 +1,6 @@
 # The Developer Environment `Dockerfile`
 
-Your [project configuration file](project-configuration-file.md) defines the development environment container (defaults to the [ini](user-ini-file.md) file stack setting).  This container runs in a small container network to isolate it from the rest of your system.
+Your [project configuration file](project-configuration-file.md) defines the development environment container.  This container runs in a small container network to isolate it from the rest of your system.
 
 You can optionally specify a `Dockerfile` for that environment that lays on top of the base [`dev-env`](../containers/dev-env) container.  Please take care when doing so, to better make your journey safe.
 
@@ -9,7 +9,7 @@ You can optionally specify a `Dockerfile` for that environment that lays on top 
 
 The build reads the file named `Dockerfile` in the container directory, and only that one: a `Containerfile` beside it, or a `Dockerfile.dev`, is just another file in the build context.
 
-When you accept the project, a later change to the `Dockerfile` that only adds, removes or edits comments or blank lines doesn't ask for another review.  Any other change does, trailing whitespace included.  A `Dockerfile` with a control character (such as a lone carriage return), a Unicode line separator, or a heredoc Surf Scoter can't follow (such as `<<"END-1"`) asks for a review on any change, even to a comment.  Use plain `<<EOF`-style heredoc delimiters, and LF or CRLF line endings.
+Any change to the `Dockerfile` after you pull it, even to a comment, shows up: the next run says the project's files changed, and the next `scoter pull` shows the change for review.  The review shows the file's lines split as Docker splits them, with control characters (such as a lone carriage return) and Unicode line separators shown escaped, so nothing hides in a line.  Use LF or CRLF line endings.
 
 ## Dos
 
@@ -106,7 +106,7 @@ sshd-port: 2222
 Each entry is one of:
 
 * `dir` and `tag` - a local container directory, with its own `Dockerfile`, built with that tag before this image.  Use several for a multi-stage `Dockerfile` with several local parents.  Its `dev-env.yaml` is optional: without one, the parent adds no values and has no parents to build; say, a project's CI build image, with this `dev-env.yaml` adding the SSH setup on top.
-* `name` and `tag` - a local parent like `dir`, found by name: the first of the system configuration's `dev-containers-search` directories holding `NAME/Dockerfile` (its `NAME/dev-env.yaml` is optional, as for `dir`).  Use it to build on a container your installation, or your own setup, provides, without a path that only works on one computer.  `NAME` is a single directory name.
+* `name` and `tag` - a local parent like `dir`, found by name: `.surf-scoter.d` itself, or else the first of the system configuration's `dev-containers-search` directories holding `NAME/Dockerfile` (its `NAME/dev-env.yaml` is optional, as for `dir`).  Use it to build on a container your installation, or your own setup, provides, without a path that only works on one computer.  `NAME` is a single directory name.
 * `file` - a published parent's `dev-env.yaml`.  It isn't built, and neither are any parents it lists, as its image already holds them.  (Reading it from a URL may come later.)
 
 Paths are relative to the directory holding this `dev-env.yaml`.  Once symlinks are resolved, each `dir`, `name` and `file` parent must be inside the project's `.surf-scoter.d` or one of the system configuration's `dev-containers-search` directories (see [the system configuration](system-config-file.md)), so a project can't build from, or read, anything else on your computer.

@@ -1,0 +1,7 @@
+# A sample project for the pull: one plain command, and one egress rule.
+container:
+  dev-container-path: ./env
+egress:
+  - {host: registry.npmjs.org, protocol: tls}
+commands:
+  - {command: ls, args: [{any: {}}]}

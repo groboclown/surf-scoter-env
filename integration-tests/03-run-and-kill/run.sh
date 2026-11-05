@@ -1,7 +1,7 @@
 #!/bin/sh
 #SPDX:MIT
-# A full run: set up the user, accept the project, start it with
-# `scoter run`, check the gateway lets out only the accepted host, then
+# A full run: set up the user, pull the project, start it with
+# `scoter run`, check the gateway lets out only the allowed host, then
 # stop the run the hard way (as a crash would) and clean up with `scoter kill`.
 # Then FILE-1: with hooks and configuration planted in the project's clone,
 # a second run must give the container the project's new commits (through
@@ -86,8 +86,8 @@ it_say "user setup"
 scoter user-setup --non-interactive > "${IT_SANDBOX}/user-setup.log" 2>&1 \
     || { cat "${IT_SANDBOX}/user-setup.log" >&2; it_fail "user setup failed"; }
 
-it_say "accepting the project"
-it_accept
+it_say "pulling the project"
+it_approve pull
 
 it_say "starting the run (building the images; this can take a while)"
 start_run "${IT_SANDBOX}/run.log"
@@ -106,11 +106,11 @@ it_expect "${HOME}/.ssh/config" "# Surf Scoter environment"
     && it_fail "a second run of the project started"
 it_expect "${IT_SANDBOX}/second.log" "${host} is already running for this project"
 
-it_say "the gateway lets out the accepted host, and nothing else"
+it_say "the gateway lets out the allowed host, and nothing else"
 "${tool}" exec "${host}" curl -sS -o /dev/null --max-time 30 https://registry.npmjs.org/ \
-    || it_fail "the accepted host (registry.npmjs.org) wasn't reachable"
+    || it_fail "the allowed host (registry.npmjs.org) wasn't reachable"
 if "${tool}" exec "${host}" curl -sS -o /dev/null --max-time 30 https://example.com/ 2> /dev/null; then
-    it_fail "a host that wasn't accepted (example.com) was reachable"
+    it_fail "a host that wasn't allowed (example.com) was reachable"
 fi
 
 it_say "an ssh session finds the host command's bridge first"

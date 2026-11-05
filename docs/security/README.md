@@ -24,3 +24,4 @@ Investigations into what the systems do and where potential weak points exist.
     * [The Host Bridge](host-bridge-attack-vectors.md)
     * [Project verification](verification-attack-vectors.md)
 * [Red Team Events](red-team.md)
+* Proposal: [user-owned project files](../contributors/user-owned-project-files.md), and what it would change here

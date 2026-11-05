@@ -67,13 +67,8 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         }
     };
     // The universal file decides what runs here: it must be the user's
-    // alone, and its accepted settings must still be the store's, unexpired.
-    let problems = config::accepted::check_for_run(
-        &cli.universal,
-        config.accepted.as_ref(),
-        &config.system,
-        config::accepted::now(),
-    );
+    // alone, and its host file's programs must still be the ones approved.
+    let problems = config::host_file::check_for_run(&cli.universal, config.host_file.as_ref());
     if !problems.is_empty() {
         for e in &problems {
             eprintln!("scoter-host: {e}");

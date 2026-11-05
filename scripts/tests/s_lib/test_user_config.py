@@ -105,3 +105,29 @@ class RequireValueTest(unittest.TestCase):
         config.set_dev_container_sshd_port("20001")
         self.assertEqual(config.dev_container_sshd_port(), "20001")
         self.assertEqual(user_config.UserConfig({"dev-container": {"sshd-port": "22"}}).dev_container_sshd_port(), "22")
+
+
+class RequireRunTest(unittest.TestCase):
+    """A section's `runs` command, with its `{x:...}` values."""
+
+    CONFIG = user_config.UserConfig({"resolved": {"vcs": {"runs": {
+        "whole": ["prog", "{x:root}", "--", "{x:path}"],
+        "inside": ["prog", "--file={x:path}"],
+    }}}})
+
+    def test_inside_arguments(self) -> None:
+        """By default, a value is put wherever its placeholder is."""
+        self.assertEqual(
+            self.CONFIG.require_run("vcs", "inside", {"path": "a b"}), ["prog", "--file=a b"],
+        )
+
+    def test_whole_arguments(self) -> None:
+        """With `whole_args`, a value is only ever a whole argument, and never read again."""
+        self.assertEqual(
+            self.CONFIG.require_run("vcs", "whole", {"root": "{x:path}", "path": "-x"}, whole_args=True),
+            ["prog", "{x:path}", "--", "-x"],
+        )
+        with self.assertRaisesRegex(user_config.ConfigErr, "must be a whole argument"):
+            self.CONFIG.require_run("vcs", "inside", {"path": "p"}, whole_args=True)
+        with self.assertRaisesRegex(user_config.ConfigErr, "must be a whole argument"):
+            self.CONFIG.require_run("vcs", "whole", {"root": "r"}, whole_args=True)

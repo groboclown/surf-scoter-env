@@ -89,6 +89,10 @@ use super::{ConfigError, child_key, index_key};
 pub const SCOTER_SECTION: &str = "scoter";
 // The `scoter` section's `paths` the tool sets.
 pub const PROJECT_CONFIG: &str = "project-config";
+/// The directory the project file and the project's container directories are
+/// read from (`--config-dir`): a copy of the project's files, or, without
+/// one, the project files directory itself.
+pub const CONFIG_DIR: &str = "config-dir";
 pub const PROJECT_DIR: &str = "project-dir";
 pub const DEV_CONTAINER_PATH: &str = "dev-container-path";
 /// The project's clone, mounted in the dev container at its `mounts:
@@ -127,8 +131,9 @@ pub const PROJECT_ID: &str = "project-id";
 /// set without a branch.
 pub const PROJECT_BRANCH: &str = "project-branch";
 /// The `scoter` `paths` only the tool sets.
-const TOOL_ONLY_KEYS: [&str; 12] = [
+const TOOL_ONLY_KEYS: [&str; 13] = [
     PROJECT_CONFIG,
+    CONFIG_DIR,
     PROJECT_DIR,
     PROJECT_ID,
     PROJECT_BRANCH,
@@ -430,6 +435,9 @@ pub struct SetupOptions<'a> {
     pub project_dir: Option<&'a Path>,
     /// The project file in effect: `scoter:project-config`.
     pub project_config: Option<&'a Path>,
+    /// Where the project's files are read from: `scoter:config-dir`.  Without
+    /// it, the project files directory in `project_dir`.
+    pub config_dir: Option<&'a Path>,
     /// The root of the repository holding the project: `scoter:vcs-root`.
     pub vcs_root: Option<&'a Path>,
     /// The project's branch, as the VCS gave it: `scoter:project-branch`,
@@ -779,23 +787,46 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             ));
         }
     }
+    // A project's containers are read only from its configuration, which the
+    // generator searches first; a search directory in the project would be a
+    // second way in for the same files, one no review covers.
+    for dir in config.path_list(SCOTER_SECTION, super::DEV_CONTAINERS_SEARCH) {
+        if let Some(name) = in_project(&dir, options) {
+            location_errors.push(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "`{SCOTER_SECTION}:{}` lists {}, which is in the project (`{name}`); the project's own containers are always searched first, so list only directories outside the project",
+                    super::DEV_CONTAINERS_SEARCH,
+                    dir.display()
+                ),
+            ));
+        }
+    }
     errors.extend(location_errors);
-    // The project file is in the project directory's files directory, as the
-    // setup names them.  (A universal file made earlier gives it as it was.)
+    // The project file is in the config directory: the one given, or else the
+    // project directory's files directory, as the setup names them.  (A
+    // universal file made earlier gives both as they were.)
     if let (true, None, Some(project_dir)) = (
         options.find_project_config,
         options.project_config,
         options.project_dir,
     ) {
-        match project_file_path(&config, project_dir) {
-            Ok(path) => {
+        match config_dir_path(&config, project_dir, options.config_dir)
+            .and_then(|dir| Ok((project_file_name(&config)?, dir)))
+        {
+            Ok((file, dir)) => {
+                let path = dir.join(file);
                 if options.record_project {
                     history.project_config.insert(0, path_text(&path));
                 }
+                config.set_location(CONFIG_DIR, path_text(&dir));
                 config.set_location(PROJECT_CONFIG, path_text(&path));
             }
             Err(e) => errors.push(e),
         }
+    } else if let Some(dir) = options.config_dir {
+        config.set_location(CONFIG_DIR, path_text(dir));
     }
 
     errors.extend(kind_changes(&files));
@@ -828,42 +859,59 @@ pub const PROJECT_FILES_DIR: &str = "project-files-dir";
 /// project files directory.
 pub const PROJECT_FILE_NAME: &str = "project-file-name";
 
-/// The project file for `project_dir`: `PROJECT_FILES_DIR/PROJECT_FILE_NAME`
-/// in it, as the setup names them, each a single name.
-fn project_file_path(config: &SystemConfig, project_dir: &Path) -> Result<PathBuf, ConfigError> {
-    let name = |key: &str, what: &str| -> Result<String, ConfigError> {
-        let setting = format!("the system configuration's `{SCOTER_SECTION}` `values: {key}`");
-        let name = match config.value(SCOTER_SECTION, key) {
-            Some(ScalarValue::String(name)) => name,
-            Some(_) => {
-                return Err(ConfigError::new(
-                    None,
-                    "",
-                    format!("{setting} must be text"),
-                ));
-            }
-            None => {
-                return Err(ConfigError::new(
-                    None,
-                    "",
-                    format!(
-                        "the system configuration sets no `{SCOTER_SECTION}` `values: {key}`, {what}"
-                    ),
-                ));
-            }
-        };
-        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+/// The directory the project's files are read from: `given`, or else
+/// `PROJECT_FILES_DIR` in `project_dir`, as the setup names it.
+fn config_dir_path(
+    config: &SystemConfig,
+    project_dir: &Path,
+    given: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    match given {
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => Ok(project_dir.join(single_name(
+            config,
+            PROJECT_FILES_DIR,
+            "the directory holding the project file",
+        )?)),
+    }
+}
+
+/// The project file's name in the config directory, as the setup names it.
+fn project_file_name(config: &SystemConfig) -> Result<String, ConfigError> {
+    single_name(config, PROJECT_FILE_NAME, "the project file's name")
+}
+
+/// The `scoter` `values` `key`, which must be a single file name.  `what`
+/// says what it names, for when it isn't set.
+fn single_name(config: &SystemConfig, key: &str, what: &str) -> Result<String, ConfigError> {
+    let setting = format!("the system configuration's `{SCOTER_SECTION}` `values: {key}`");
+    let name = match config.value(SCOTER_SECTION, key) {
+        Some(ScalarValue::String(name)) => name,
+        Some(_) => {
             return Err(ConfigError::new(
                 None,
                 "",
-                format!("{setting} ('{name}') must be a single name, without '/' or '\\'"),
+                format!("{setting} must be text"),
             ));
         }
-        Ok(name)
+        None => {
+            return Err(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "the system configuration sets no `{SCOTER_SECTION}` `values: {key}`, {what}"
+                ),
+            ));
+        }
     };
-    let files_dir = name(PROJECT_FILES_DIR, "the directory holding the project file")?;
-    let file = name(PROJECT_FILE_NAME, "the project file's name")?;
-    Ok(project_dir.join(files_dir).join(file))
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err(ConfigError::new(
+            None,
+            "",
+            format!("{setting} ('{name}') must be a single name, without '/' or '\\'"),
+        ));
+    }
+    Ok(name)
 }
 
 /// Why the tools can't read a setup file they found by themselves in `dir`,

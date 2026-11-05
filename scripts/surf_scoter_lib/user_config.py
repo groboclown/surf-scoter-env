@@ -5,6 +5,7 @@ import json
 import os
 import subprocess  # nosec: B404  # We know the potential issues with subprocess.
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import fileutil, jdata
@@ -14,6 +15,8 @@ from .err import ConfigErr
 VCS_SECTION_SUFFIX = "-vcs"
 # The SUC's record of the project file, as written.
 CURRENT_PROJECT_SETUP = "current-project-setup"
+# Where the `found` scope records the project, unparsed (`scoter.py`).
+FOUND_PROJECT = "found-project"
 
 
 class PathKind(enum.Enum):
@@ -53,6 +56,29 @@ class Echo(enum.Enum):
 # ---------------------------------------------------------------------
 # Configuration Understanding
 
+@dataclass(frozen=True)
+class FoundProject:
+    """Where `scoter` found the project, and the repository holding it."""
+
+    project_dir: Path
+    vcs_root: Path | None
+    # The VCS whose root was found.
+    vcs: str | None
+    project_branch: str | None
+    # How: by its files (`files`), by its link in the store (`link`), or
+    # it's only where the search started (`start`), for `init`.
+    found_by: str = "files"
+
+    def generator_args(self) -> list[str]:
+        """The generator's arguments for this project, with its files read from elsewhere."""
+        args = ["--project-dir", str(self.project_dir)]
+        if self.vcs_root is not None:
+            args.extend(("--vcs-root", str(self.vcs_root)))
+        if self.project_branch:
+            args.extend(("--project-branch", self.project_branch))
+        return args
+
+
 class UserConfig:
     """Manages the information in the Scoter Universal Configuration (SUC) file."""
 
@@ -83,7 +109,7 @@ class UserConfig:
         """
         ret = name + VCS_SECTION_SUFFIX
         # ensure it exists
-        if self.__opt_dict("resolved", ret) is None:
+        if self.__find(jdata.find_dict, "resolved", ret) is None:
             raise ConfigErr(f"VCS provider '{name}' not supported with the current configuration")
         return ret
 
@@ -163,17 +189,43 @@ class UserConfig:
         locs = self.__req_dict("active-config-locations")
         locs[name] = str(path)
 
+    def set_record(self, key: str, value: jdata.JsonData) -> None:
+        """Set a top-level record the tools add to the file, such as the configuration a run uses.
+
+        Never one the generator writes: those are its own.
+        """
+        if key in ("active-config-locations", "resolved", "setup", "host-command-checks",
+                   "host-brokered", "host-file", CURRENT_PROJECT_SETUP, "dev-container"):
+            raise ValueError(f"`{key}` is the generator's")
+        self._config[key] = value
+
     def has_run(self, section: str, run: str) -> bool:
         """Whether the section has the `runs` command (a VCS needn't have them all)."""
         return jdata.find(self._config, "resolved", section, "runs", run) is not None
 
     def require_run(
-        self, section: str, run: str, template: dict[str, str] | None = None
+        self, section: str, run: str, template: dict[str, str] | None = None,
+        *, whole_args: bool = False,
     ) -> list[str]:
-        """Return the required run command."""
+        """Return the required run command, with each `{x:KEY}` replaced by `template[KEY]`.
+
+        With `whole_args`, a value is only ever a whole argument: an
+        argument that's exactly `{x:KEY}` is replaced, and any other holding
+        `{x:` is a `ConfigErr`, so an untrusted value can't be read as part
+        of an option or a path.
+        """
         args: list[str] = []
         for path in self.__req_list_keys("resolved", section, "runs", run):
             arg = self.__req_str(*path)
+            if whole_args:
+                key = arg[3:-1] if arg.startswith("{x:") and arg.endswith("}") else None
+                if key is not None and key in (template or {}):
+                    args.append((template or {})[key])
+                    continue
+                if "{x:" in arg:
+                    raise ConfigErr(f"`{section}: runs: {run}`: {arg!a} must be a whole argument")
+                args.append(arg)
+                continue
             for key,val in (template or {}).items():
                 arg = arg.replace("{x:" + key + "}", val)
             args.append(arg)
@@ -352,27 +404,12 @@ class UserConfig:
         """The dev container's `dev-env.yaml`, merged with its parents; None without a project."""
         return self.__find(jdata.find_dict, "dev-container")
 
-    def use_accepted_files(
-        self,
-        project_setup: jdata.DictJsonData,
-        dev_container: jdata.DictJsonData | None,
-    ) -> None:
-        """Replace `current-project-setup`, and `dev-container` when given, with the accepted copy's.
-
-        Under an exemption (see `verified.staging.adopt_accepted`), the run
-        uses the project file and `dev-env.yaml` files as accepted, not as
-        they are now.
-        """
-        self._config[CURRENT_PROJECT_SETUP] = project_setup
-        if dev_container is not None:
-            self._config["dev-container"] = dev_container
-
     def has_dev_container(self) -> bool:
         """Whether the file has the dev container's `dev-env.yaml` (it does with a project)."""
         return self.dev_container() is not None
 
     def egress_rules(self) -> list[jdata.DictJsonData]:
-        """The accepted egress rules (`egress.rules`); none without accepted settings."""
+        """The egress rules the gateway enforces (`egress.rules`): the configuration's; none without one."""
         return [self.__req_dict(*key) for key in self.__find(jdata.find_list_keys, "egress", "rules")]
 
     def project_egress(self) -> list[jdata.DictJsonData]:
@@ -412,30 +449,47 @@ class UserConfig:
         """Whether the setup has the section."""
         return self.__find(jdata.find_dict, "resolved", section) is not None
 
-    def accepted_settings_file(self) -> Path | None:
-        """The accepted settings file the generator loaded; None without accepted settings."""
-        file = self.__find(jdata.find_str, "accepted-settings", "file")
+    def found_project(self) -> FoundProject | None:
+        """The project `scoter` found, unparsed (`found-project`); None without one.
+
+        Only the `found` scope's sub-commands (`subcmd-project-found.txt`) get it.
+        """
+        found = self.__find(jdata.find_dict, FOUND_PROJECT)
+        if found is None:
+            return None
+
+        def path(key: str) -> Path | None:
+            value = self.__find(jdata.find_str, FOUND_PROJECT, key)
+            return None if value is None else Path(value)
+
+        project_dir = path("project-dir")
+        if project_dir is None:
+            raise ConfigErr(f"bad universal configuration file: {FOUND_PROJECT} has no project-dir")
+        return FoundProject(
+            project_dir=project_dir,
+            vcs_root=path("vcs-root"),
+            vcs=self.__find(jdata.find_str, FOUND_PROJECT, "vcs"),
+            project_branch=self.__find(jdata.find_str, FOUND_PROJECT, "project-branch"),
+            found_by=self.__find(jdata.find_str, FOUND_PROJECT, "found-by") or "files",
+        )
+
+    def host_file_path(self) -> Path | None:
+        """The host file the generator loaded (`--host-file`); None without one."""
+        file = self.__find(jdata.find_str, "host-file", "file")
         return None if file is None else Path(file)
 
-    def accepted_container_name(self) -> str | None:
-        """The user's own container the accepted settings use; None for the project's."""
-        choice = self.__find(jdata.find, "accepted-settings", "contents", "dev-container", "use")
-        if isinstance(choice, dict):
-            return jdata.req_str(choice, "name")
-        return None
+    def host_file_programs(self) -> dict[str, jdata.DictJsonData] | None:
+        """The host file's `programs`, by the name the commands use; None without a host file.
 
-    def accepted_images(self) -> dict[str, str]:
-        """Each image the accepted settings build from instead of the one the project names."""
-        images = self.__find(jdata.find_dict, "accepted-settings", "contents", "dev-container", "images")
-        return {key: jdata.req_str(images, key) for key in images} if images else {}
-
-    def review_result(self) -> str | None:
-        """The review file's `result` (`accept` or `reject`); None without a review."""
-        return self.__find(jdata.find_str, "review", "result")
-
-    def review_accepted(self) -> jdata.DictJsonData | None:
-        """The accepted settings the review file gives; None when rejected, or without one."""
-        return self.__find(jdata.find_dict, "review", "accepted")
+        The generator checked them against the configuration's commands and
+        this computer when it loaded the file.
+        """
+        if self.__find(jdata.find_dict, "host-file") is None:
+            return None
+        return {
+            str(path[-1]): self.__req_dict(*path)
+            for path in self.__find(jdata.find_dict_keys, "host-file", "contents", "programs")
+        }
 
     def raw(self, *path: jdata.JsonPathPart) -> jdata.JsonData:
         """The file's data at the path, as it is; None when it's missing or null.
@@ -482,9 +536,6 @@ class UserConfig:
 
     def __req_dict(self, *path: jdata.JsonPathPart) -> jdata.DictJsonData:
         return UserConfig.__wrap(lambda: jdata.req_dict(self._config, *path))
-
-    def __opt_dict(self, *path: jdata.JsonPathPart) -> jdata.DictJsonData | None:
-        return UserConfig.__wrap(lambda: jdata.opt_dict(self._config, *path))
 
     def __find[T](
         self, lookup: Callable[..., T], *path: jdata.JsonPathPart,

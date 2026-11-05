@@ -1,5 +1,8 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: user-setup"""
+"""Initialize your user settings to work with Surf Scoter.
+
+A Surf Scoter sub-command.
+"""
 import argparse
 import enum
 import os

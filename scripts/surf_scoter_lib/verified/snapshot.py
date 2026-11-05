@@ -17,7 +17,7 @@ import os
 import re
 import stat
 from collections.abc import Callable, Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import fileutil, jdata
@@ -176,6 +176,24 @@ def check_relative(path: str) -> None:
         raise SnapshotErr(f"`{path}` is not a relative path inside a snapshot")
 
 
+# Printable ASCII only: a name never reaches a terminal, a report or a
+# directory the developer opens carrying an escape sequence or a look-alike
+# character (VER-10).
+_UNSAFE_NAME = re.compile(r"[^\x20-\x7e]")
+
+
+def check_name(path: str) -> None:
+    """Refuse a path with a control or non-ASCII character in it.
+
+    The error shows the name escaped, never as it is.
+    """
+    if _UNSAFE_NAME.search(path):
+        raise SnapshotErr(
+            f"{path!a}: a file name with a control or non-ASCII character; "
+            f"rename it to printable ASCII"
+        )
+
+
 # ---------------------------------------------------------------------
 # Canonical forms
 
@@ -326,8 +344,29 @@ class _Reader:
         self.executable: dict[str, bool] = {}
         self.warnings: list[str] = []
 
+    def add(self, rel: str, data: bytes, executable: bool, where: str) -> None:
+        """Add a file's contents, checking its path and the limits; `where` names it in errors."""
+        # The name first, so an error never prints one as it is.
+        check_name(rel)
+        check_relative(rel)
+        if rel in self.contents:
+            raise SnapshotErr(f"{where}: listed twice")
+        limit = self.limits.max_file_size
+        if len(data) > limit:
+            raise SnapshotErr(f"{where}: larger than the {limit} bytes allowed")
+        self.total += len(data)
+        if self.total > self.limits.max_snapshot_size:
+            raise SnapshotErr(
+                f"{where}: the project's files are larger than the "
+                f"{self.limits.max_snapshot_size} bytes allowed"
+            )
+        self.contents[rel] = data
+        self.executable[rel] = executable
+
     def read(self, path: Path, rel: str, *, links_ok: bool) -> None:
         """Read the file."""
+        # The name first, so an error never prints one as it is.
+        check_name(rel)
         check_relative(rel)
         flags = os.O_RDONLY | fileutil.O_NOFOLLOW | fileutil.O_BINARY | fileutil.O_NONBLOCK
         try:
@@ -338,6 +377,8 @@ class _Reader:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 raise SnapshotErr(f"{path}: not a regular file")
+            if st.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+                raise SnapshotErr(f"{path}: has the setuid, setgid or sticky bit set")
             if st.st_nlink > 1:
                 if not links_ok:
                     raise SnapshotErr(
@@ -354,24 +395,25 @@ class _Reader:
                 raise SnapshotErr(f"{path}: larger than the {limit} bytes allowed")
         finally:
             os.close(fd)
-        self.total += len(data)
-        if self.total > self.limits.max_snapshot_size:
-            raise SnapshotErr(
-                f"{path}: the project's files are larger than the "
-                f"{self.limits.max_snapshot_size} bytes allowed"
-            )
-        self.contents[rel] = data
-        self.executable[rel] = bool(st.st_mode & stat.S_IXUSR)
+        self.add(rel, data, bool(st.st_mode & stat.S_IXUSR), str(path))
 
-    def read_dir(self, directory: Path, rel: str) -> None:
-        """Every file in `directory`, refusing links and special files."""
+    def read_dir(self, directory: Path, rel: str, skip: Collection[str] = ()) -> None:
+        """Every file in `directory`, refusing links and special files.
+
+        Names are checked before anything else, so an error never prints
+        one as it is.  `skip` names entries of `directory` itself to leave
+        out.
+        """
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
         except OSError as err:
             raise SnapshotErr(f"{directory}: can't be read ({err})") from err
         for entry in entries:
+            if entry.name in skip:
+                continue
             path = Path(entry.path)
             child = f"{rel}/{entry.name}" if rel else entry.name
+            check_name(child)
             if entry.is_symlink():
                 raise SnapshotErr(f"{path}: a symlink; a container directory can't have any")
             if entry.is_dir(follow_symlinks=False):
@@ -382,14 +424,18 @@ class _Reader:
                 raise SnapshotErr(f"{path}: a special file; a container directory can't have any")
 
     def snapshot(
-        self, parsed: ParsedFiles, project_file: str, dev_env_files: Collection[str] = (),
+        self, parsed: ParsedFiles | None, project_file: str = "", dev_env_files: Collection[str] = (),
     ) -> Snapshot:
+        """The snapshot of what was read; with no `parsed`, nothing gets a canonical hash."""
         files = {
             rel: FileEntry(
                 sha256=hashlib.sha256(data).hexdigest(),
                 size=len(data),
                 executable=self.executable[rel],
-                canonical=canonical_hash(rel, data, parsed, project_file, dev_env_files),
+                canonical=(
+                    None if parsed is None
+                    else canonical_hash(rel, data, parsed, project_file, dev_env_files)
+                ),
             )
             for rel, data in sorted(self.contents.items())
         }
@@ -414,6 +460,92 @@ def snapshot_project(
     files_dir = Path(os.path.realpath(files_dir))
     reader = _Reader(limits)
     reader.read(files_dir / project_file_name, project_file_name, links_ok=True)
+    for rel in container_rels(files_dir, container_dirs):
+        reader.read_dir(files_dir / rel, rel)
+    return reader.snapshot(parsed, project_file_name, dev_env_paths(files_dir, container_dirs))
+
+
+def snapshot_source(files_dir: Path, project_file_name: str, limits: SnapshotLimits) -> Snapshot:
+    """Every file in a source's files directory, before anything parses them.
+
+    Seeding takes this first, so a source over the limits, or holding
+    anything the reader refuses, stops before the generator reads a byte
+    of it (VER-23).  The project file may be hard-linked, with a warning;
+    a hard link anywhere else is refused.  Nothing has a canonical hash
+    yet: `select_build` adds them once the generator has parsed a copy.
+    """
+    files_dir = Path(os.path.realpath(files_dir))
+    reader = _Reader(limits)
+    reader.read(files_dir / project_file_name, project_file_name, links_ok=True)
+    reader.read_dir(files_dir, "", skip=(project_file_name,))
+    return reader.snapshot(None)
+
+
+def snapshot_bytes(entries: Iterable[tuple[str, bytes, bool]], limits: SnapshotLimits) -> Snapshot:
+    """`snapshot_source`, from `(path, contents, executable)` entries, as a VCS's
+    `show-file` gives them, rather than the file system.
+
+    The paths, names and limits are checked as for files on disk, and a path
+    that's also another's directory is refused, since it couldn't be restored.
+    """
+    reader = _Reader(limits)
+    for rel, data, executable in entries:
+        reader.add(rel, data, executable, ascii(rel))
+    for rel in reader.contents:
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]) in reader.contents:
+                raise SnapshotErr(f"{rel!a}: inside {'/'.join(parts[:i])!a}, which is a file")
+    return reader.snapshot(None)
+
+
+def select_build(
+    source: Snapshot,
+    files_dir: Path,
+    project_file_name: str,
+    container_dirs: Iterable[Path],
+    parsed: ParsedFiles,
+) -> Snapshot:
+    """The part of `source` the build uses: the project file and the container directories.
+
+    `files_dir` is where `source` was restored for the generator, and
+    `container_dirs` and `parsed` are what it found there, so the selection
+    comes from the same bytes it copies (VER-11).  As in `snapshot_project`,
+    container directories outside `files_dir` aren't the project's.  The
+    selected files get their canonical hashes.
+    """
+    files_dir = Path(os.path.realpath(files_dir))
+    container_dirs = list(container_dirs)
+    rels = container_rels(files_dir, container_dirs)
+    dev_env_files = dev_env_paths(files_dir, container_dirs)
+
+    def wanted(path: str) -> bool:
+        return path == project_file_name or any(path.startswith(rel + "/") for rel in rels)
+
+    if project_file_name not in source.manifest.files:
+        raise SnapshotErr(f"{project_file_name!a}: not in the snapshot")
+    files = {
+        path: replace(
+            entry,
+            canonical=canonical_hash(
+                path, source.contents[path], parsed, project_file_name, dev_env_files,
+            ),
+        )
+        for path, entry in source.manifest.files.items()
+        if wanted(path)
+    }
+    return Snapshot(
+        Manifest(files), {path: source.contents[path] for path in files}, list(source.warnings),
+    )
+
+
+def container_rels(files_dir: Path, container_dirs: Iterable[Path]) -> list[str]:
+    """The container directories inside `files_dir`, relative to it.
+
+    `files_dir` must be resolved already.  A container directory can't be
+    `files_dir` itself.
+    """
+    rels: list[str] = []
     for directory in container_dirs:
         real = Path(os.path.realpath(directory))
         if not real.is_relative_to(files_dir):
@@ -423,8 +555,8 @@ def snapshot_project(
             raise SnapshotErr(
                 f"{directory}: a container directory can't be the project files directory itself"
             )
-        reader.read_dir(real, rel)
-    return reader.snapshot(parsed, project_file_name, dev_env_paths(files_dir, container_dirs))
+        rels.append(rel)
+    return rels
 
 
 def snapshot_dir(directory: Path, limits: SnapshotLimits) -> Snapshot:
@@ -470,6 +602,14 @@ def restore(store: VerifiedStore, manifest: Manifest, dest: Path, limits: Snapsh
     `dest` itself keeps everyone else out.
     """
     write_files(manifest, dest, limits, lambda _, entry: store.get_blob(entry.sha256, entry.size))
+
+
+def from_store(store: VerifiedStore, manifest: Manifest) -> Snapshot:
+    """The snapshot `manifest` names, its contents read from their blobs in `store`, each checked."""
+    return Snapshot(
+        manifest,
+        {rel: store.get_blob(entry.sha256, entry.size) for rel, entry in manifest.files.items()},
+    )
 
 
 def write_files(

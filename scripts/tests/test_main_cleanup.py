@@ -18,9 +18,9 @@ import main_cleanup
 from surf_scoter_lib import cleanup, ssh_hosts
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.user_config import UserConfig
-from surf_scoter_lib.verified import records, store
+from surf_scoter_lib.verified import remove, store
 
-from .test_main_revoke import POSIX, StoreTest
+from .test_main_remove import POSIX, StoreTest
 
 PREFIX = "local-surf-scoter/"
 
@@ -74,11 +74,9 @@ class CleanupTest(StoreTest):
         (self.ssh / "config").write_text("", encoding="utf-8")
         self.ssh_mode = "ask"
 
-    def config(
-        self, project: Path | None = None, *, outside: bool = False, branch: str | None = None,
-    ) -> UserConfig:
+    def config(self, project: Path | None = None, *, outside: bool = False) -> UserConfig:
         """The store test's, with the run's state and images."""
-        suc = super().config(project, outside=outside, branch=branch).raw()
+        suc = super().config(project, outside=outside).raw()
         assert isinstance(suc, dict)  # nosec: B101  # narrowing for the type checker
         resolved = suc["resolved"]
         assert isinstance(resolved, dict)  # nosec: B101  # narrowing for the type checker
@@ -174,39 +172,55 @@ class CleanupTest(StoreTest):
         self.assertTrue((self.state / "exempt-new").exists())
 
     def test_gone_project(self) -> None:
-        """A project whose directory is gone: its acceptances are revoked; another's stay."""
-        kept = self.accept("FROM scratch\n", "main")
+        """A project whose directory is gone: its configurations are removed; another's stay."""
+        kept = self.configure("a: 1\n")
         other = self.new_project("other")
-        self.accept("FROM alpine\n", None, other)
+        self.configure("b: 1\n", project=other)
         shutil.rmtree(other)
         code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertEqual(code, 0, out)
-        self.assertIn(f"{other}  (1 acceptance)", out)
-        self.assertIn(f"Revoked 1 acceptance of {other}.", out)
+        self.assertIn(f"{other}  (1 configuration)", out)
+        self.assertIn(f"Removed 1 configuration of {other}.", out)
         verified_store = store.VerifiedStore.open(self.verified)
         self.assertEqual(verified_store.index(), {str(self.project): store.environment_id(self.project)})
         self.assertEqual(self.remaining(), [kept.id])
 
     def test_store_leftovers(self) -> None:
-        """What no record names goes: directories, blobs, temporary files; the rest stays."""
-        kept = self.accept("FROM scratch\n", "main")
+        """What nothing names goes: directories, what acceptances left, blobs, temporary files; the rest stays."""
+        kept = self.configure("a: 1\n")
         verified_store = store.VerifiedStore.open(self.verified)
         env_id = store.environment_id(self.project)
         with verified_store.locked():
-            verified_store.write_bytes(env_id, records.ACCEPTANCES_DIR, "orphan", "accepted.json", data=b"{}")
+            verified_store.write_bytes(env_id, "acceptances", "old", "accepted.json", data=b"{}")
+            verified_store.write_bytes(env_id, "environment.json", data=b"{}")
             verified_store.write_bytes("gone-0123456789ab", "environment.json", data=b"{}")
             verified_store.put_blob(b"nobody uses this")
         (self.verified / ".tmp-left").write_bytes(b"x")
         found = cleanup.find_store_leftovers(verified_store)
         self.assertEqual(found.environments, ["gone-0123456789ab"])
-        self.assertEqual(found.acceptances, [(env_id, "orphan")])
+        self.assertEqual(sorted(found.legacy), [(env_id, "acceptances"), (env_id, "environment.json")])
         self.assertEqual((found.unused_blobs, found.temp_files), (1, 1))
         code, out = self.run_cleanup(ask=lambda _: "y")
         self.assertEqual(code, 0, out)
-        self.assertIn("1 copied file no acceptance uses", out)
+        self.assertIn("1 copied file no configuration uses", out)
         self.assertFalse(cleanup.find_store_leftovers(verified_store))
-        self.assertEqual(self.remaining(self.project), [kept.id])
-        self.assertTrue(self.acceptance_dir(kept).is_dir())
+        self.assertEqual(self.remaining(), [kept.id])
+
+    def test_retired(self) -> None:
+        """A configuration removed while a run used it goes once nothing runs it (VER-40)."""
+        kept = self.configure("a: 1\n", "kept")
+        other = self.new_project("other")
+        theirs = self.configure("b: 1\n", project=other)
+        verified_store = store.VerifiedStore.open(self.verified)
+        env = remove.Environment(verified_store, str(other), store.environment_id(other))
+        remove.remove(env, [theirs.id], {theirs.id})
+        self.assertEqual(self.remaining(other), [theirs.id])
+        self.assertEqual(cleanup.remove_retired(verified_store, {theirs.id}), 0)
+        self.assertEqual(cleanup.remove_retired(verified_store, ()), 1)
+        self.assertEqual(self.remaining(other), [])
+        # With nothing left, that project is forgotten; this one isn't touched.
+        self.assertEqual(verified_store.index(), {str(self.project): store.environment_id(self.project)})
+        self.assertEqual(self.remaining(), [kept.id])
 
     def test_asked(self) -> None:
         """Anything but yes, and without a terminal, nothing goes."""

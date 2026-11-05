@@ -97,6 +97,47 @@ python:
             - ${script}
             - '{x:script}'
 
+# Pulling the project's files into your own configuration (`scoter pull`).
+pull:
+    paths:
+        # Where `scoter unlock` puts a configuration for you to edit, one
+        # directory for each environment (`ENV-ID/files/` and `ENV-ID/host.json`).
+        # SECURITY: never inside a project, its clone, a state directory or the
+        # store (VER-37): a run uses what's here, unreviewed.
+        unlocked-dir: ${scoter:user-dir}/unlocked
+        # The templates `scoter init` and `scoter unlock --from-template` start
+        # from.  SECURITY: never inside a project, its clone or its repository
+        # (VER-7); a template is reviewed by `scoter lock` before it's stored.
+        templates-dir: ${scoter:distribution-dir}/templates
+    values:
+        # After this many days unlocked, each run's warning lists the egress
+        # rules and host commands in use (VER-33); `scoter lock` and
+        # `scoter unlock` start it again.
+        unlock-reminder-days: 7
+        # After this many days unlocked, runs stop until `scoter lock`; 0
+        # turns it off.
+        unlock-days: 0
+        # The template `scoter init` uses when it isn't given one.
+        default-template: default
+    runs:
+        # The reviewer `scoter pull` runs between seeding and approval, given
+        # the universal configuration file (`{x:universal}`), the working
+        # directory's id (`{x:workdir}`) and a session file (`{x:session}`,
+        # `surf-scoter-pull-session-1`), which it replaces with its decision:
+        # `approve` with the analysis id it showed, or `deny`.  A reviewer
+        # builds on `scoter pull analyze` and `changed`.
+        # SECURITY: the reviewer is trusted setup.  It must show the project's
+        # text only as plain text: the report's `clean` forms, never HTML or
+        # Markdown, which could run the project's script (VER-26).  It only
+        # decides whether to approve: `approve` checks everything again.
+        reviewer:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/pull_reviewer.py
+            - '{x:universal}'
+            - '{x:workdir}'
+            - '{x:session}'
+
+
 # Where a project's run keeps its state: the project's clone (which the
 # container works in), its persistent store, and the run's settings and
 # resources.
@@ -193,6 +234,44 @@ git-vcs:
             - ${python:script}
             - ${scoter:distribution-bin-dir}/vcs_git_branch.py
             - '{x:root}'
+        # What the pull asks about the project's committed files (see
+        # docs/security/files.md, "Adding a VCS implementation").  Each runs in
+        # your repository (`{x:root}`), never the clone; `{x:path}` is a
+        # directory in it, relative to the root.
+        # SECURITY: the script runs only `rev-parse`, `ls-tree -z` and
+        # `cat-file`, which read the repository's objects.  Nothing reads the
+        # working tree through Git, which would run `core.fsmonitor` and the
+        # filters `.gitattributes` names (VER-30).
+        # `list-files`: the files under `{x:path}` at `{x:ref}`, and the commit.
+        list-files:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - list-files
+            - '{x:root}'
+            - '{x:ref}'
+            - '{x:path}'
+        # `show-file`: the file `{x:path}` at `{x:commit}`, a commit id
+        # `list-files` gave.
+        show-file:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - show-file
+            - '{x:root}'
+            - '{x:commit}'
+            - '{x:path}'
+        # `file-status`: whether each file in `{x:files}`, a copy of
+        # `{x:path}`'s files, is as committed at `{x:ref}`.
+        file-status:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - file-status
+            - '{x:root}'
+            - '{x:ref}'
+            - '{x:path}'
+            - '{x:files}'
     values:
         ignore-file: .gitignore
     value-lists:
@@ -247,8 +326,9 @@ dev-env:
         # The network gateway: the only way out of the dev container (see
         # docs/security/network.md).  It enforces the project's egress rules, as
         # far as it can, and refuses to start with a rule it can't enforce.
-        # Its name: your acceptance of a project's egress rules is for this
-        # gateway, and a different one asks for a new review.
+        # Its name: the checks on egress rules are for this gateway, and the
+        # setup's fingerprint changes with it, so a different one asks for a
+        # new pull.
         network-gateway-name: squid
         # Where the gateway container reads the configuration
         # `network-gateway-write-config` makes (the docker-compose file mounts it
@@ -266,8 +346,9 @@ dev-env:
             - '{x:output}'
 
 
-# What a review of a project's settings checks (`scoter verify`), and where
-# your acceptances are kept.
+# What the checks on a configuration look for (`scoter pull`, `scoter lock`,
+# `scoter review`, and every `scoter run`), and where your configurations are
+# kept.
 #
 # `host-commands`: the checks on the commands a project asks to run on your
 # computer (its host commands).  Every check is here, so none is missed by
@@ -488,13 +569,13 @@ verification:
             action: warn
             reason: >-
                 An allowed `docker` command can start a container that mounts your
-                home directory, and so change anything there, the accepted project
-                settings included.
+                home directory, and so change anything there, your configurations
+                and setup included.
             command-map:
                 docker: ${docker:exec}
 
     paths:
-        # Where your acceptances of projects' settings are kept.  They decide what
+        # Where your configurations of projects are kept.  They decide what
         # each project may do, so this must be an absolute path outside any
         # project, its clone, and its repository.
         store: ~/.config/surf-scoter.d/verified
@@ -517,12 +598,6 @@ verification:
         # (That file is under the MPL-2.0, and should be pulled for a fresh
         # copy, so it's not included here by default.)
         public-suffix-lists: []
-        # The `scoter: path-lists: dev-containers-search` directories whose
-        # containers are reviewed like a project's own: kept in the `store` with
-        # each acceptance, built from that copy, and a change to one asks for a
-        # new review.  Others are trusted as part of your installation.  Add
-        # `${scoter:distribution-dir}/containers` to review the distribution's too.
-        verified-containers: []
 
     # Checks on the files in a project's container directories: everything there
     # goes into the image, where the container can read it.  Each check has an
@@ -708,7 +783,6 @@ verification:
             # PYTHONPATH out (it can set it as you enter its directory).
             - python:runs:script
             - python:runs:sub-command
-            - scoter:runs:find-acceptance
             # `--no-local` keeps the clone from sharing your repository's
             # objects (FILE-2); finding the root and branch reads files, not Git.
             - git-vcs:runs:local-clone
@@ -719,10 +793,26 @@ verification:
             - git-vcs:runs:fetch-changes-into
             - git-vcs:runs:find-root
             - git-vcs:runs:current-branch
+            # The pull reads committed files through these, and only reads
+            # the repository's objects (VER-30).
+            - git-vcs:runs:list-files
+            - git-vcs:runs:show-file
+            - git-vcs:runs:file-status
+            # The pull's reviewer shows the project's files; only you choose it (VER-26).
+            - pull:runs:reviewer
+            # Where an unlocked configuration runs from (VER-37), and the
+            # reminders while it is (VER-33).
+            - pull:paths:unlocked-dir
+            - pull:paths:templates-dir
+            - pull:values:unlock-reminder-days
+            - pull:values:unlock-days
+            # How long a configuration goes without a review (VER-20).
+            - verification:values:review-notice-first-days
+            - verification:values:review-notice-every-days
             # Adding a directory here is what weakens it: a project location
             # lets a project build from files outside its project files directory.
             - scoter:path-lists:dev-containers-search
-            # Where acceptances and state are kept, and where the run's files go.
+            # Where configurations and state are kept, and where the run's files go.
             - verification:paths:store
             - scoter:paths:state-dir
             - project-state:paths:*
@@ -745,32 +835,34 @@ verification:
             # are reported with the overrides, from the generator's notices).
             - verification:project-files:*
             - verification:egress-hosts:*
-            # How long the container files can go without a review.
-            - verification:values:max-exempt-days
         # Deny-lists, where adding entries only strengthens: a change is reported
         # only when it leaves out one of the default's entries.
         guarded-removals:
             - git-vcs:value-lists:drop-env
             - verification:value-lists:egress-refused-wildcards
             - verification:path-lists:public-suffix-lists
-            - verification:path-lists:verified-containers
             - verification:value-lists:guarded
             - verification:value-lists:guarded-removals
 
     values:
-        # How long an acceptance of a project's settings lasts, in days.
-        expiry-days: 30
-        # The largest project file, and the most for all of a project's files,
-        # kept in the `store` with each acceptance, in bytes.
+        # The largest file, and the most for all of a configuration's files,
+        # read from a project or kept in the `store`, in bytes.
         max-file-size: 16777216
         max-snapshot-size: 268435456
-        # How long `scoter exempt` lasts when it isn't given `--for`, and the
-        # longest it can be given, in days.  An exemption never outlasts the
-        # acceptance it's started from.  While it holds, runs on its branch
-        # use the container files as they are, and keep the project file and
-        # the `dev-env.yaml` files as accepted.
-        exempt-days: 1
-        max-exempt-days: 7
+        # The review timers for the configuration in use, in days since you
+        # last reviewed it (`scoter pull` or `scoter review`); 0 turns one off
+        # (VER-20).  The notice: once `review-notice-first-days` pass, the next
+        # run says the configuration hasn't been reviewed, and again once in
+        # each `review-notice-every-days`.  The warning: every run warns.  The
+        # expiry: runs stop until you review.  The warning and the expiry are
+        # off: reviews forced on a configuration that hasn't changed teach
+        # people to approve unread (VER-41).
+        # SECURITY: turning the notice off, or lengthening it, is a weakening
+        # `scoter user-setup` reports.
+        review-notice-first-days: 30
+        review-notice-every-days: 7
+        review-warn-days: 0
+        review-expire-days: 0
 
 
 # The tools' own settings.  The configuration loader adds the locations it
@@ -782,8 +874,11 @@ scoter:
     #
     # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
     # these after they've loaded would be a lie.
-    #    project-config: set to the project configuration file: `project-file-name` in the
-    #        project directory's `project-files-dir`.
+    #    project-config: set to the project configuration file: `project-file-name` in
+    #        `config-dir`.
+    #    config-dir: set to the directory the project file and the project's containers are
+    #        read from: a copy of the project's files, or the project directory's
+    #        `project-files-dir`.
     #    project-dir: set to the project directory, which holds the `project-files-dir`.
     #        scoter finds it, searching up from where it runs (or --project-dir) to the root
     #        of the repository holding it.
@@ -803,27 +898,15 @@ scoter:
         running-envs-lock: ${state-dir}/running-env.json.lock
 
     path-lists:
-        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
+        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml,
+        # after the project's own containers (`${scoter:config-dir}`), which are
+        # always searched first without being listed here.
         # SECURITY: a dev container, and every parent it builds on, must be inside
-        # the project's `project-files-dir` or one of these directories.  Don't add
-        # directories a project controls, such as `${scoter:project-dir}` itself:
-        # they would let a project build from, and read, files outside its
-        # `project-files-dir`.
+        # `${scoter:config-dir}` or one of these directories.  A directory in the
+        # project, its repository or its clone is refused: it would let a project
+        # build from, and read, files nobody reviewed.
         dev-containers-search:
-            - ${scoter:project-dir}/${scoter:project-files-dir}
             - ${scoter:distribution-dir}/containers
-
-    runs:
-        # The distribution's own commands, which there's no reason to change.
-        #
-        # Finding your acceptance of a project's settings, in `verification:
-        # paths: store`.
-        # Given the universal configuration file (`{x:universal}`) with the
-        # project, prints JSON saying which acceptance matches, if any.
-        find-acceptance:
-            - ${python:script}
-            - ${scoter:distribution-bin-dir}/verified_find.py
-            - '{x:universal}'
 
     values:
         # The directory, inside the project directory, that holds the project file and the

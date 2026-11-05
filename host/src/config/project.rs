@@ -731,6 +731,11 @@ fn parse_commands(
 }
 
 impl CommandRule {
+    /// The program as the project file names it: `program`, or else `command`.
+    pub fn program_name(&self) -> &str {
+        self.program.as_deref().unwrap_or(&self.command)
+    }
+
     fn validate(&self, key: &str, problems: &mut Vec<(String, String)>) {
         // Clients are matched by the file name they were invoked as.
         let name = &self.command;

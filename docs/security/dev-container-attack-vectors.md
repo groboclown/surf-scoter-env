@@ -17,7 +17,7 @@ This analysis starts from one assumption: **anything inside the dev container ma
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
 | `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
-| `Dockerfile`, build context, parent directories and their tags | The project, as accepted | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`staging.py`](../../scripts/surf_scoter_lib/verified/staging.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
+| `Dockerfile`, build context, parent directories and their tags | The project, as pulled into your configuration | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which doesn't override them |
 | The project clone's files, including permission bits | Code in the container | The host file system, and whatever later reads it |
 | The persistent store | Code in the container | The dev container's start-up script, such as the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) |
@@ -66,7 +66,7 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 
 ### DEV-1: `user` is written into the SSH configuration
 
-**Severity:** Critical.  **Status:** Mitigated: the generator refuses a `user` that isn't a plain user name (a letter or `_`, then letters, digits, `.`, `_` and `-`, at most 32), and `write_host` checks it again where it's written.  The `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The review doesn't show `user` ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)).
+**Severity:** Critical.  **Status:** Mitigated: the generator refuses a `user` that isn't a plain user name (a letter or `_`, then letters, digits, `.`, `_` and `-`, at most 32), and `write_host` checks it again where it's written.  The `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The pull's review shows `user` with the dev container's other values ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)).
 **Where:** `user_name_problem` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `write_host` and `host_name` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py).
 
 `user` went into the developer's `~/.ssh/config`, in the container's `Host` line and its `User` line, without escaping.  The only check was that it's a non-empty string.  A value containing a newline adds arbitrary directives, such as a `Match all` block with a `ProxyCommand`, which runs on the host the next time the developer uses `ssh` for anything.  A value containing spaces adds extra `Host` patterns.  This happens before any container starts.
@@ -89,7 +89,7 @@ Now:
 * `scoter run` checks the mount points again where it writes them, single-quotes every `.env` value, and refuses any value with a control character, a `'`, or the escapes python-dotenv decodes inside single quotes;
 * the compose file uses the long form of `volumes`, so a value can't add mount options even if one got through.
 
-The review still doesn't show the mount points ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)), but a value that would inject anything is refused before there's anything to review.
+The pull's review shows the mount points ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)), and a value that would inject anything is refused before there's anything to review.
 
 **Red team:** try every character the generator lets through, in each mount point and in `broker-bin`, against both podman-compose and Docker Compose.  Look for any other value from `dev-env.yaml` or the project file that reaches the `.env` file, the compose file, or a command line.
 
@@ -98,11 +98,11 @@ The review still doesn't show the mount points ([VER-3](verification-attack-vect
 ### DEV-3: Image builds run outside the isolation
 
 **Severity:** High.  **Status:** Open for the network; the build's inputs are now mitigated.
-**Where:** `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`staging.py`](../../scripts/surf_scoter_lib/verified/staging.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
 
 None of the [required network properties](network.md#required-properties) hold during a build.  `RUN` steps have the builder's ordinary network access, including the LAN and cloud metadata endpoints, and can bake anything into the image.
 
-What gets built is narrower than it was.  The project's containers and their parents must be inside `.surf-scoter.d` or a `dev-containers-search` directory, and the ones inside `.surf-scoter.d` are built from the accepted copy, restored into a private staging directory, so the build context holds only the files that were reviewed, and a change to the live files after the check never reaches the build.  But a reviewed `Dockerfile` can still fetch anything at build time, and the review doesn't show `RUN` steps' effects; a change that matches the accepted one on meaning isn't reviewed at all ([VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled)).  During an [exemption](verification.md#exemptions), the live container files are built.
+What gets built is narrower than it was.  The project's containers and their parents must be inside your configuration or a `dev-containers-search` directory, and the configuration's are built from a staged copy, restored from the store into a private staging directory, so the build context holds only the files you approved, and the project's live files never reach the build.  But an approved `Dockerfile` can still fetch anything at build time, and the review doesn't show `RUN` steps' effects.  While a configuration is unlocked, your edited files are built, unreviewed ([VER-33](verification-attack-vectors.md#ver-33-the-unlocked-state)).
 
 **Red team:** a `Dockerfile` whose `RUN` steps reach the LAN, the metadata endpoint and the internet.  A `dir` parent pointing outside `.surf-scoter.d`.
 
@@ -228,7 +228,7 @@ Code in the container can fill the disk that backs the container's writable laye
 **Severity:** Medium.  **Status:** Open.
 **Where:** the `parents` `tag` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_build_containers` in [`main_run.py`](../../scripts/main_run.py).
 
-Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, and nothing checks it.  Tags are shared by every project on the computer.  A project can tag its own parent with a name another project builds `FROM`, such as the distribution's `local-surf-scoter/dev-env:distro` (the `scoter init` template's base), and that project's next build uses the first project's image without a review of its own.  The review lists parent tags, but doesn't flag one that isn't the project's.
+Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, and nothing checks it.  Tags are shared by every project on the computer.  A project can tag its own parent with a name another project builds `FROM`, such as the distribution's `local-surf-scoter/dev-env:distro` (the base of the distribution's templates), and that project's next build uses the first project's image without a review of its own.  The review lists parent tags, but doesn't flag one that isn't the project's.
 
 **Red team:** with two projects, have one build a `dir` parent tagged as the other's base image, then build the other.
 
@@ -239,7 +239,7 @@ Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, 
 **Severity:** Medium.  **Status:** Open; narrowed for the distribution's container.
 **Where:** the `persistent-store` mount in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); the dev container's start-up script, such as the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) and [`persistent-store.txt`](../../containers/dev-env/persistent-store.txt).
 
-Each dev container gets a persistent store: a container volume, mounted at its `mounts: persistent-store`, kept between runs so IDE settings, caches and shell history survive.  Whatever a session leaves there is there for the next one, through image rebuilds, `--clean-project-clone`, and revoking and accepting the project again, until the store is removed (`--clean-persistent-store`, or `scoter cleanup --persistent-stores`).  What that means depends on how the container uses the store, and that's the container's choice, which comes with the project:
+Each dev container gets a persistent store: a container volume, mounted at its `mounts: persistent-store`, kept between runs so IDE settings, caches and shell history survive.  Whatever a session leaves there is there for the next one, through image rebuilds, `--clean-project-clone`, and removing and pulling the project's configuration again, until the store is removed (`--clean-persistent-store`, or `scoter cleanup --persistent-stores`).  What that means depends on how the container uses the store, and that's the container's choice, which comes with the project:
 
 * **The distribution's `dev-env` container** keeps only the home directory entries `/etc/scoter/persistent-store.txt` lists (the IDE server, caches, `~/.local/share`, shell history), linked from the home directory.  Everything else in the home directory, including shell start-up files and `~/.ssh`, comes from the image on each start.  The SSH server's configuration template is root's, in `/etc/scoter`, and its rendered configuration, host key and `authorized_keys` are made on each start in `/run/scoter-sshd`, outside the home directory and the store, so neither an earlier session nor the project's repository can supply them.  A link an earlier session left in the store is skipped.  Still, what is kept can run: the IDE server ([DEV-5](#dev-5-the-ide-session-as-a-channel-to-the-host)), and anything in `~/.local/share` that a program loads.
 * **A project's own container** can keep anything in the store, its whole home directory, shell start-up files and programs on the `PATH` included, and so make a compromise last.  Its start-up script is part of the image, which the review covers ([DEV-3](#dev-3-image-builds-run-outside-the-isolation)), but how it uses the store isn't checked.
@@ -258,7 +258,7 @@ What's no longer a risk: the store isn't a host directory, so its contents, the 
 * [`scripts/surf_scoter_lib/ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py): the SSH configuration writer.
 * [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml): the `dev` service's user, capabilities, mounts and limits.
 * [`containers/dev-env/`](../../containers/dev-env/): the base image, start-up script (including what it keeps in the persistent store), `persistent-store.txt` and `sshd_config`.
-* [`scripts/surf_scoter_lib/verified/staging.py`](../../scripts/surf_scoter_lib/verified/staging.py): what the build is made from.
+* [`scripts/surf_scoter_lib/run_config.py`](../../scripts/surf_scoter_lib/run_config.py): what the build is made from.
 
 
 ## Open design questions

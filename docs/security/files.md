@@ -35,7 +35,7 @@ The dev container runs as the image's user (the unprivileged `ubuntu` in the bas
 
 ### The setup directory
 
-The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization or the list of bridge commands.  The gateway's allowed hosts and the bridge commands come from the settings you accepted, kept in your verified store (see [project verification](verification.md)), so a change the container makes to its own copy of the project file has no effect until you bring that change back into your project, and review it again.
+The setup directory carries what the container needs to start and nothing more.  Because it's read-only in the container, code there can't change its own SSH authorization or the list of bridge commands.  The gateway's allowed hosts and the bridge commands come from your configuration, kept in your verified store (see [project verification](verification.md)), so a change the container makes to its own copy of the project file has no effect until you bring that change back into your project, commit it, and pull it again.
 
 ### The persistent store
 
@@ -101,6 +101,18 @@ A project's `vcs` value picks a `NAME-vcs` section of the [system configuration]
 * **Refuse special files:** devices, sockets and named pipes.
 * **Carry only contents and the executable bit.**  Ownership, group, setuid and setgid bits, and other permissions from the clone mustn't reach the project.
 * **Never overwrite the project without review.**  Bring changes into a branch, or another place you can inspect, before they become active.
+
+### Reporting committed files (`list-files`, `show-file`, `file-status`)
+
+The pull asks these what the project's files are at a commit, and whether the files it copied are committed (see [user-owned project files](../contributors/user-owned-project-files.md#vcs-reports)).  What they print decides what the developer is told is committed.
+
+* **Run in your repository, never the clone** ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).  `{x:root}` is `${scoter:vcs-root}`.
+* **Never read the working tree through the VCS.**  Status and diff commands run hooks, file system monitors and content filters the repository's configuration or attributes name (Git's `core.fsmonitor`, and the clean filters `.gitattributes` names).  Read only committed objects, and work out a working file's committed-ness yourself: Git's handler hashes each copied file as a blob and compares it with `git ls-tree -z`.
+* **One commit for everything.**  `list-files` resolves the ref once and reports the commit; `show-file` takes that commit id, not a ref that could move between calls.
+* **Separate names with NUL** where the VCS offers it (`-z`): file names can contain newlines.  Pass paths as single arguments, as literal pathspecs.
+* **Report links and submodules as such,** never their targets' contents: the pull refuses them, as it refuses links on disk.
+* **Keep the output to the schema.**  `scoter` limits each command's output, checks the report, and refuses odd paths ([VER-30](../contributors/user-owned-project-files.md#ver-30-the-vcs-handlers-output)), but a handler that gets these right fails clearly rather than being refused.
+* **Drop the VCS's environment variables** (`value-lists: drop-env`), which a project can set as you enter its directory.
 
 ### General
 

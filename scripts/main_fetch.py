@@ -1,5 +1,8 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: fetch"""
+"""Pull changes from the dev environment.
+
+A Surf Scoter sub-command.
+"""
 import sys
 from collections.abc import Sequence
 
@@ -15,7 +18,7 @@ def run_fetch(config: UserConfig, *, branch: str | None) -> int:
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     config, argv, parser = gen_parser(argv, (
-        "Fetch changes committed by the dev container to the project's clone."
+        "Fetch into your project the changes committed by the dev environment."
     ))
     if not config:
         return BAD_EXECUTION_ARGS_CODE

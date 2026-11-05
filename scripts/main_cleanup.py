@@ -1,10 +1,16 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: cleanup
+"""Remove what runs, pulls and deleted projects left behind.
+
+A Surf Scoter sub-command.
+
+The routine sweep, safe to run at any time: it keeps your setup, your ssh
+key, and anything a running environment or a project still there uses.
+To undo `scoter user-setup` instead, see `scoter user-cleanup`.
 
 Finds what Surf Scoter left behind that nothing else removes, lists it,
 and removes it once you say so: environments whose `scoter run` is gone
 (stopped as `scoter kill` does), a run's state no record uses, the
-accepted settings of projects whose directory is gone, and the verified
+configurations of projects whose directory is gone, and the verified
 store's leftovers.  With `--project-state`, the project state directories
 (each project's clone, settings and resources) no running environment uses;
 with `--persistent-stores`, the persistent store volumes none uses; with
@@ -28,11 +34,13 @@ from surf_scoter_lib import (
     cleanup,
     gen_parser,
     review,
+    run_config,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
-from surf_scoter_lib.verified import revoke, store
+from surf_scoter_lib.verified import remove as config_remove
+from surf_scoter_lib.verified import store
 
 PROMPT = "Remove these? [y/N]: "
 SSH_PROMPT = "Remove these ssh config entries? [y/N]: "
@@ -67,7 +75,7 @@ class Found:
 
     stale: list[EnvironmentDesc] = field(default_factory=list)
     state: list[Path] = field(default_factory=list)
-    gone: list[revoke.Environment] = field(default_factory=list)
+    gone: list[config_remove.Environment] = field(default_factory=list)
     leftovers: cleanup.StoreLeftovers = field(default_factory=cleanup.StoreLeftovers)
     project_state: list[Path] = field(default_factory=list)
     persistent_stores: list[str] = field(default_factory=list)
@@ -95,7 +103,7 @@ def find(config: UserConfig, now: datetime.datetime, *, extras: Extras) -> Found
     """Everything there is to clean up; it's only read."""
     runs = cleanup.find_runs(config)
     found = Found(stale=runs.stale, state=cleanup.find_orphaned_state(config, now))
-    found.verified_store = revoke.open_store(config)
+    found.verified_store = config_remove.open_store(config)
     if found.verified_store is not None:
         found.gone = cleanup.find_gone_projects(found.verified_store)
         found.leftovers = cleanup.find_store_leftovers(found.verified_store)
@@ -136,10 +144,9 @@ def show(found: Found) -> None:
     ])
     gone: list[str] = []
     for env in found.gone:
-        record = env.record()
-        count = len(record.acceptances) if record else 0
-        gone.append(f"{env.project_dir}  ({count} acceptance{'s' if count != 1 else ''})")
-    section("Accepted settings of projects whose directory is gone", gone)
+        count = len(env.configs())
+        gone.append(f"{env.project_dir}  ({count} configuration{'s' if count != 1 else ''})")
+    section("Configurations of projects whose directory is gone", gone)
     section(
         f"The verified store's leftovers ({found.leftovers.size} bytes)" if found.leftovers else "",
         found.leftovers.describe(),
@@ -188,15 +195,21 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
         step(env.host, stop)
     step("the run's files", lambda: _say_removed(cleanup.remove_orphaned_state(config, found.state, now)))
     for gone in found.gone:
-        def revoke_gone(env: revoke.Environment = gone) -> None:
-            revoked = cleanup.remove_gone_project(env)
-            print(f"Revoked {len(revoked)} acceptance{'s' if len(revoked) != 1 else ''} of {env.project_dir}.")
-        step(gone.project_dir, revoke_gone)
+        def remove_gone(env: config_remove.Environment = gone) -> None:
+            removed = cleanup.remove_gone_project(env, run_config.running_config_ids(config))
+            print(f"Removed {len(removed)} configuration{'s' if len(removed) != 1 else ''} of {env.project_dir}.")
+        step(gone.project_dir, remove_gone)
     if found.verified_store is not None:
         verified_store = found.verified_store
 
+        def retired() -> None:
+            count = cleanup.remove_retired(verified_store, run_config.running_config_ids(config))
+            if count:
+                print(f"Removed {count} configuration{'s' if count != 1 else ''} removed or replaced while a run used it.")
+        step("the configurations no run uses any more", retired)
+
         def leftovers() -> None:
-            # Again after the revoking, which can leave none.
+            # Again after the removing, which can leave none.
             if cleanup.find_store_leftovers(verified_store):
                 removed = cleanup.remove_store_leftovers(verified_store)
                 for line in removed.describe():
@@ -290,10 +303,13 @@ def run_cleanup(
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     config, argv, parser = gen_parser(argv, (
-        "Find what Surf Scoter left behind that nothing else removes, list it, and remove it "
-        "once you say so: environments whose run is gone, a run's files no environment uses, "
-        "the accepted settings of projects whose directory is gone, and the verified store's "
-        "leftovers.  Expired acceptances stay: `scoter revoke` removes them."
+        "Remove what runs, pulls and deleted projects left behind.  It finds what nothing "
+        "else removes, lists it, and removes it once you say so: environments whose run is "
+        "gone, a run's files no environment uses, the configurations of projects whose "
+        "directory is gone, configurations removed or replaced while a run used them, and "
+        "the verified store's leftovers.  Safe to run at any time: your setup, your ssh key, "
+        "and anything a running environment or a project still there uses are kept.  "
+        "`scoter user-cleanup` is the one that undoes `scoter user-setup`."
     ))
     if not config:
         return BAD_EXECUTION_ARGS_CODE

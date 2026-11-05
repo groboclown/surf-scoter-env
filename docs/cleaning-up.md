@@ -1,8 +1,17 @@
 # Cleaning Up After Surf Scoter
 
-Surf Scoter keeps a few things on your computer between runs: your project's clone, its dev container's persistent store, the settings you've accepted, and the container images it built.  Most of it is meant to be kept, and reused by the next run.  This page says what each one is, where it lives, and how to clear it out when you want the space back, or a fresh start.
+Surf Scoter keeps a few things on your computer between runs: your project's clone, its dev container's persistent store, your configurations of each project, and the container images it built.  Most of it is meant to be kept, and reused by the next run.  This page says what each one is, where it lives, and how to clear it out when you want the space back, or a fresh start.
 
-`scoter cleanup` sweeps up what's safe to remove in one go (see [The Cleanup Command](#the-cleanup-command)); the sections after it cover each part, and the commands for clearing one thing at a time.
+`scoter cleanup` sweeps up what's safe to remove in one go (see [The Cleanup Command](#the-cleanup-command)); the sections after it cover each part, and the commands for clearing one thing at a time.  [Uninstalling](#uninstalling) covers removing Surf Scoter itself.
+
+There are two cleanup commands, and they don't overlap:
+
+| | `scoter cleanup` | `scoter user-cleanup` |
+| --- | --- | --- |
+| Undoes | What runs, pulls and deleted projects left behind | `scoter user-setup` |
+| When | Any time; it's routine | When you uninstall |
+| Keeps | Your setup, your ssh key, and anything a running environment or a project still there uses | Nothing it set up |
+| Status | Available | Not implemented yet: it does nothing, and fails |
 
 ## The Cleanup Command
 
@@ -19,16 +28,17 @@ scoter cleanup --project-state --persistent-stores --images
 Without a terminal to ask at, and without `--force`, it only lists.  What it removes:
 
 * **Environments whose run is gone**: a record of a running environment whose `scoter run` process isn't running any more (it crashed, or the computer restarted).  It stops their containers and forgets them, as `scoter kill` does, and keeps their project clones and persistent stores.  On Windows it can't tell whether a run's process is still there, so it leaves them to `scoter kill`.
-* **A run's files no environment uses**: a `state/environments/HOST` directory with no record, and the temporary directories a run that stopped part way left in `state`.
-* **The accepted settings of projects whose directory is gone**, as `scoter list-accepted` marks them: a project you deleted, or moved (an acceptance is for the directory it was made in).  A project on a drive that isn't mounted looks gone too: check the list before you say yes.
-* **The verified store's leftovers**: copies of files no acceptance uses, directories no project names, and temporary files, from a command that stopped part way.
+* **A run's files no environment uses**: a `state/environments/HOST` directory with no record, a run's staged configuration (`state/staged-*`) no running environment uses, a pull's working directory more than a day old (left by `--keep-working-dir`, or a crash), and the temporary directories a run that stopped part way left in `state`.
+* **The configurations of projects whose directory is gone**, as `scoter list` marks them: a project you deleted, or moved (a configuration is for the directory it was made in).  A project on a drive that isn't mounted looks gone too: check the list before you say yes.
+* **Configurations waiting for a run to stop**: one you removed, or replaced, while an environment was running it is kept until the environment stops; then it goes.
+* **The verified store's leftovers**: copies of files no configuration uses, directories no project names, what older versions of Surf Scoter kept for acceptances, and temporary files, from a command that stopped part way.
 * With **`--project-state`**, the project state directories (each project's clone, setup and resources directories) no running environment uses, in the default place (`state/projects`).  Anything in a clone that you haven't fetched back into your project is lost, so it only removes them when you ask.
 * With **`--persistent-stores`**, the dev containers' persistent store volumes (named starting `scoter-`) that no running environment uses.  The next run starts that project's container with an empty one.
 * With **`--images`**, the images Surf Scoter built (`local-surf-scoter/...`) that no running environment uses, and then the layers no image uses any more (`image prune`).  The next run builds what it needs again.
 
 * **SSH entries** for environments that aren't running, as `ssh: values: config-cleanup` says (see [SSH Entries](#ssh-entries)): with `auto`, with the rest; with `ask`, it asks about them on their own, even with `--force`; with `no`, it only says how many there are.
 
-It leaves alone: expired acceptances (the next review compares with them: `scoter revoke` removes them), running environments, and your container tool's build cache and the images it didn't build.
+It leaves alone: your configurations of projects that are still there (`scoter remove` removes them), your unlocked copies, running environments, and your container tool's build cache and the images it didn't build.
 
 ## What's Kept
 
@@ -40,7 +50,10 @@ The locations below are the defaults; your [setup file](system-config-file.md) c
 | A running environment's configuration | `~/.config/surf-scoter.d/state/environments/HOST/` | The run ends, `scoter kill`, or `scoter cleanup` |
 | The project's state: its clone (`project-clone`), setup and resources directories | `~/.config/surf-scoter.d/state/projects/PROJECT-ID/` | `scoter run --clean-project-clone`, `scoter kill --clean-project-clone`, or `scoter cleanup --project-state` |
 | The dev container's persistent store | A volume in your container tool, `scoter-PROJECT-ID-store` | `scoter run --clean-persistent-store`, `scoter kill --clean-persistent-store`, or `scoter cleanup --persistent-stores` |
-| Your accepted settings, with a copy of the project files you accepted | `~/.config/surf-scoter.d/verified/` | `scoter revoke`, or `scoter cleanup` once the project's directory is gone |
+| Your configurations, with a copy of their files | `~/.config/surf-scoter.d/verified/` | `scoter remove`, or `scoter cleanup` once the project's directory is gone |
+| An unlocked configuration, for you to edit | `~/.config/surf-scoter.d/unlocked/ENV-ID/` | `scoter lock`, or `scoter lock --revert` |
+| A run's staged copy of the configuration it runs | `~/.config/surf-scoter.d/state/staged-*/` | The run ends, `scoter kill`, or `scoter cleanup` |
+| A pull's working directory | `~/.config/surf-scoter.d/state/pull/` | The pull ends (unless `--keep-working-dir`), or `scoter cleanup` after a day |
 | The container images | Your container tool's image store, tagged `local-surf-scoter/...` (and the dev container's parents' tags) | You remove them, or `scoter cleanup --images` |
 | Each environment's ssh entries | `~/.ssh/config` and `~/.ssh/known_hosts` | The environment stops, as `ssh: values: config-cleanup` says; or `scoter cleanup` |
 
@@ -85,31 +98,32 @@ Before the project clone and the persistent store, each project had a *workspace
 * If you upgraded with one still running, stop its containers with your container tool (`docker ps` lists them, named `scoter-...`), then delete `~/.config/surf-scoter.d/state/running-env.json`.
 * Fetch anything you need from the old workspaces, then delete `~/.config/surf-scoter.d/state/workspaces`.  Nothing uses it any more, and `scoter cleanup` doesn't look there.
 
-## Accepted Settings
+## Configurations
 
-Each project you've accepted keeps one acceptance for each branch (one in all, without a version control system), with a copy of the project files it was for.  A new review replaces the branch's last one, so they don't pile up for a branch; but every branch you've reviewed on keeps its own, including expired ones.  An expired acceptance stops working, but it's kept so the next review can show what changed since.
+Each project you pull keeps your configurations of it, with a copy of their files: the one in use, and, after a pull replaces it, the one before it (`default.previous`).  `scoter lock` and `scoter review` replace the one they start from, so they don't pile up.
 
-`scoter list-accepted` lists them all, for every project, with how much space their copies take:
+`scoter list` lists them all, for every project, with how much space their copies take:
 
 ```text
 /home/me/src/my-project
-  20261021T091500Z-1a2b3c4d  reviewed  branch main  fingerprint 3f9a0c2e71bd  expires 2026-11-20T09:15:00+00:00 (valid)
-  20260915T140000Z-5e6f7a8b  reviewed  branch old-feature  fingerprint 77c1d09e4a52  expires 2026-10-15T14:00:00+00:00 (expired)
+  last reviewed 2026-10-21T09:15:00+00:00
+  20261021T091500Z-1a2b3c4d  default  made 2026-10-21 09:15 UTC  (in use)
+  20260915T140000Z-5e6f7a8b  default.previous  made 2026-09-15 14:00 UTC
 /home/me/src/gone-project  (the directory is gone)
-  20260901T120000Z-9c0d1e2f  reviewed  branch -  fingerprint 0b8e6f3a1c94  expires 2026-10-01T12:00:00+00:00 (expired)
-3 acceptances of 2 projects; their copies of the projects' files take 81920 bytes.  Revoke one with `scoter revoke ID`.
+  20260901T120000Z-9c0d1e2f  default  made 2026-09-01 12:00 UTC  (in use)
+3 configurations of 2 projects; their files take 81920 bytes.  Remove one with `scoter remove ID`.
 ```
 
-`scoter revoke` removes them, with the copies nothing else uses:
+`scoter remove` removes them, with the copies nothing else uses:
 
 ```shell
-scoter revoke ID              # One acceptance, from anywhere.
-scoter revoke old-feature     # In the project: a branch's.
-scoter revoke --all           # In the project: all of its acceptances.
-scoter revoke $( scoter list-accepted -q )   # Everything, for every project.
+scoter remove ID                  # One configuration, from anywhere.
+scoter remove default.previous    # In the project: one by name.
+scoter remove --all               # In the project: all of them, and forget the project.
+scoter remove $( scoter list -q ) # Everything, for every project.
 ```
 
-Revoking means the next run on that branch asks for a review again.  It also ends an exemption that uses the acceptance (see [Exemptions](system-config-file.md#exemptions)).  A project whose directory is gone can only be revoked by id; `scoter cleanup` revokes every such project's acceptances.
+Only your copies go: the project's own files are never touched.  Removing the configuration in use means the project's next run asks for `scoter pull`.  One a running environment uses goes once it stops.  The one your unlocked copy came from can't be removed until you `scoter lock` or `scoter lock --revert`.  A project whose directory is gone can only be removed by id; `scoter cleanup` removes every such project's configurations.
 
 ## Container Images
 
@@ -133,3 +147,12 @@ Each `scoter run` writes its environment's own `Host` entry to `~/.ssh/config`, 
 * `no`: they're kept, for you to remove.
 
 `scoter cleanup` finds the entries left behind (by `no`, a "no" to the question, or a crash).  The tools only change or remove the entries they wrote, which have a `# Surf Scoter environment` line; your own entries are left alone.  To remove one by hand, delete its `Host` entry from `~/.ssh/config`, and its key (`ssh-keygen -R HOST`).
+
+## Uninstalling
+
+`scoter user-cleanup` is meant to undo `scoter user-setup`, but it isn't implemented yet.  Until it is, uninstall by hand:
+
+1. Stop every environment (`scoter kill`), then run `scoter cleanup --project-state --persistent-stores --images`, so nothing is left in your container tool.
+2. Delete `~/.config/surf-scoter.d`: your setup, your configurations of each project, and the state directory.
+3. Delete the ssh key pair `scoter user-setup` made, `~/.ssh/scoter-dev-container` and `~/.ssh/scoter-dev-container.pub` (`ssh: paths: key-file` in your setup, if you moved it).  `scoter user-setup` only creates `~/.ssh/config` and `~/.ssh/known_hosts` when they're missing, so leave them, but for any `Host` entries with a `# Surf Scoter environment` line (see [SSH Entries](#ssh-entries)).
+4. Delete the distribution.

@@ -1,5 +1,8 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: run"""
+"""Start a dev environment for this project.
+
+A Surf Scoter sub-command.
+"""
 import argparse
 import contextlib
 import datetime
@@ -11,6 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from surf_scoter_lib import (
@@ -23,13 +27,14 @@ from surf_scoter_lib import (
     generator,
     jdata,
     persistent_store,
+    review,
+    run_config,
     setup_check,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr, VerifiedStoreErr
+from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr
 from surf_scoter_lib.user_config import Capture, OnError
-from surf_scoter_lib.verified import lookup, staging
 
 # The network gateway's configuration, in the resources directory.
 GATEWAY_CONFIG_FILE = "gateway-config"
@@ -37,8 +42,8 @@ GATEWAY_CONFIG_FILE = "gateway-config"
 # Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`.
 SUC_COPY_DIR = "environments"
 SUC_COPY_FILE = "suc.json"
-# The accepted copy of the project's files, staged to build from, beside it.
-BUILD_DIR = "build"
+# The configuration in use, staged to build from, under `scoter: paths: state-dir`.
+STAGED_PREFIX = "staged-"
 
 # The mode of the files in the settings directory the dev container mounts.
 MODE_SETTINGS_FILE = 0o666
@@ -58,46 +63,59 @@ ENV_VALUE_REFUSED = re.compile(r"[\x00-\x1f\x7f']|\\[\\']")
 # A container mount point, as the generator checks it.
 CONTAINER_PATH = re.compile(r"(/[A-Za-z0-9._-]+)+")
 
+@dataclass(frozen=True)
+class BuildPlan:
+    """What to build the dev container from."""
+
+    dev_container: Path
+    # The local parents, lowest first: (tag, directory).
+    parents: list[tuple[str, Path]]
+
+
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
 
 
-def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
-    """Start the dev environment."""
-    # Nothing runs from a project the user hasn't accepted: not its host
-    # commands, its egress rules, or its container.
-    if config.accepted_settings_file() is None:
-        print(_why_not_accepted(config), file=sys.stderr)
-        print("Run `scoter verify` to review them, then run again.", file=sys.stderr)
+def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
+    """Start the dev environment, from the configuration in use."""
+    # Not with a setup program a project, or another user, could supply.
+    if not _setup_programs_ok(found_config):
         return 1
-    # Nor with a setup program a project, or another user, could supply.
-    if not _setup_programs_ok(config):
+    # Nothing runs but the configuration in use, staged: not the project's
+    # live files, its host commands or its egress rules.
+    prepared = _prepare(found_config)
+    if prepared is None:
         return 1
-    # Under an exemption, the project file and `dev-env.yaml` files count as
-    # accepted, not as they are now: before anything reads them.
-    if not _adopt_accepted(config):
-        return 1
+    config = prepared.config
+    staged = prepared.staged
     vcs_section = config.get_vcs_section()
 
     # The environment is named by the project: one run of it at a time.
-    host = ssh_hosts.host_name(config)
+    try:
+        host = ssh_hosts.host_name(config)
+    except ConfigErr as err:
+        print(err, file=sys.stderr)
+        fileutil.rm(staged)
+        return 1
 
     # Reserve the host in the .ssh/config file.
     if not reserve_ssh_host(config, host):
+        fileutil.rm(staged)
         return 1
 
     # When complete, with failure or not, clean up the ssh host file.
     try:
-        # -- Stage the accepted copy of the project's files to build from.
-        plan = _stage_accepted(config, host)
-        if plan is None:
-            _release(config, host)
-            return 1
+        # A run that crashed may have left its directory behind.
+        _remove_environment_dir(config, host)
+        plan = BuildPlan(
+            config.require_active_location("dev-container-path"), config.dev_container_parent_builds(),
+        )
 
         # -- Build the containers
         image_tags = _build_containers(config, host, plan) # (dev-env, firewall, gateway)
         if not image_tags:
             _release(config, host)
+            fileutil.rm(staged)
             return 1
 
         # Remember to mark the work directories as ignored.
@@ -206,6 +224,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     except BaseException:
         print("Aborting execution.", file=sys.stderr)
         _release(config, host)
+        fileutil.rm(staged)
         raise
 
     # -- start the containers
@@ -269,8 +288,9 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Its ssh entries, as `ssh: values: config-cleanup` says.
     _release_ssh(config, host)
 
-    # scoter-host's copy of the configuration.
+    # scoter-host's copy of the configuration, and the staged configuration.
     fileutil.rm(universal_config_file.parent)
+    fileutil.rm(staged)
 
     # Clean up the setup and resource directories.
     # ... currently kept to help debugging.
@@ -309,12 +329,25 @@ def reserve_ssh_host(config: UserConfig, host: str) -> bool:
         print(err, file=sys.stderr)
         return False
 
-def _why_not_accepted(config: UserConfig) -> str:
-    """Why no acceptance holds for the project; the plain reason if that can't be told."""
+def _prepare(found_config: UserConfig) -> run_config.Prepared | None:
+    """Stage the configuration in use, and make the run's configuration; None, having said why, if it can't."""
+    state_dir = found_config.require_path("scoter", "state-dir")
+    state_dir.mkdir(mode=fileutil.MODE_USER_RWX, parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=STAGED_PREFIX, dir=state_dir))
     try:
-        return lookup.no_match_reason(config)
-    except (OSError, ValueError, SurfScoterErr):
-        return "You haven't accepted this project's settings."
+        prepared = run_config.prepare(found_config, staged, generate=generator.run)
+    except (OSError, SurfScoterErr) as err:
+        fileutil.rm(staged)
+        print(review.clean(str(err)) if not isinstance(err, run_config.RunRefused) else str(err), file=sys.stderr)
+        return None
+    except BaseException:
+        fileutil.rm(staged)
+        raise
+    for line in prepared.warnings:
+        print(f"Warning: {line}", file=sys.stderr)
+    for line in prepared.notices:
+        print(line, file=sys.stderr)
+    return prepared
 
 
 def _setup_programs_ok(config: UserConfig) -> bool:
@@ -371,60 +404,8 @@ def _remove_environment_dir(config: UserConfig, host: str | None) -> None:
         fileutil.rm(_environment_dir(config, host))
 
 
-def _adopt_accepted(config: UserConfig) -> bool:
-    """Under an exemption, give the run the accepted project file's and `dev-env.yaml`s' settings.
-
-    False, having said why, if they can't be read.
-    """
-    state_dir = config.require_path("scoter", "state-dir")
-    state_dir.mkdir(mode=fileutil.MODE_USER_RWX, parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix="exempt-", dir=state_dir))
-    try:
-        staging.adopt_accepted(config, directory, generator.run, datetime.datetime.now(datetime.UTC))
-    except staging.StagingErr as err:
-        print(err, file=sys.stderr)
-        if err.reverify:
-            print("Run `scoter verify` to review the project's settings, then run again.", file=sys.stderr)
-        return False
-    except (OSError, VerifiedStoreErr) as err:
-        print(f"Couldn't read the accepted copy of the project's files: {err}", file=sys.stderr)
-        return False
-    finally:
-        fileutil.rm(directory)
-    return True
-
-
-def _stage_accepted(config: UserConfig, host: str) -> staging.BuildPlan | None:
-    """Stage the accepted copy of the project's files; None, having said why, if it can't be."""
-    directory = _environment_dir(config, host)
-    # A run that crashed may have left one behind.
-    fileutil.rm(directory)
-    build_dir = fileutil.private_dir(
-        config.require_path("scoter", "state-dir"), (SUC_COPY_DIR, host, BUILD_DIR),
-    )
-    try:
-        plan = staging.prepare(
-            config, build_dir, generator.run, datetime.datetime.now(datetime.UTC),
-        )
-    except staging.StagingErr as err:
-        print(err, file=sys.stderr)
-        if err.reverify:
-            print(
-                "Run `scoter verify` to review the project's settings, then run again.",
-                file=sys.stderr
-            )
-        plan = None
-    except (OSError, VerifiedStoreErr) as err:
-        print(f"Couldn't stage the accepted copy of the project's files: {err}", file=sys.stderr)
-        plan = None
-    if plan is None:
-        # `prepare` gives None only without accepted settings, checked at the start.
-        fileutil.rm(directory)
-    return plan
-
-
 def _build_containers(
-    config: UserConfig, host: str, plan: staging.BuildPlan,
+    config: UserConfig, host: str, plan: BuildPlan,
 ) -> tuple[str, str, str] | None:
     # Build the dev-env container + firewall-router + network-gateway.
     ret = (
@@ -432,8 +413,8 @@ def _build_containers(
         config.require_value("dev-env", "firewall-router-image"),
         config.require_value("dev-env", "network-gateway-image"),
     )
-    # The dev-env's local parents come first, lowest first.  The project's
-    # build from the accepted copy (`plan`), never the live files.
+    # The dev-env's local parents come first, lowest first.  The
+    # configuration's build from its staged copy (`plan`), never the live files.
     containers: list[tuple[str, str, Path | None]] = [
         ("dev-env parent", tag, path)
         for tag, path in plan.parents

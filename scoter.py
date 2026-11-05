@@ -8,9 +8,11 @@ distribution script for processing.
 # Compatibility: Python 3.12+
 import argparse
 import enum
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess  # nosec: B404  # we know the issues around subprocess.
 import sys
@@ -39,8 +41,9 @@ EXIT_CANNOT_START = 127
 # These two files must live in the bin directory.  Each line declares
 # a sub-command that has a special requirement around the project configuration.
 # This is how we keep from hard-coding this list.
-NO_ACCEPTANCE_FILE = "subcmd-no-acceptance.txt"
 NO_PROJECT_FILE = "subcmd-no-project.txt"
+# The SUC key where a FOUND scope records the project it found, unparsed.
+FOUND_PROJECT = "found-project"
 
 
 # ---------------------------------------------------------------------
@@ -56,11 +59,10 @@ class ConfigScope(enum.Enum):
 
     # The setup alone: for commands, such as `help`, that don't need a project.
     SETUP = "setup"
-    # The project as it suggests, without the user's accepted settings: for
-    # `verify`, which reviews the suggestion.
-    SUGGESTED = "suggested"
-    # The project with the user's accepted settings, if they accepted it.
-    ACCEPTED = "accepted"
+    # The setup, and where the project and its repository are, without
+    # parsing the project's files (`found-project` in the SUC): every other
+    # command.  They read the project's files only from copies.
+    FOUND = "found"
 
 
 def load_config(
@@ -89,35 +91,23 @@ def load_config(
     vcs_root = find_vcs_root(settings, start)
     project_dir = find_project_dir(settings, start, vcs_root[0] if vcs_root else None)
 
+    found_by = "files"
+    if project_dir is None:
+        # A project started from a template has no files until its first
+        # push: its link in the store finds it.  Failing that, the start
+        # is where `init` and `unlock --from-template` would start one.
+        project_dir = find_linked_project(settings, start, vcs_root[0] if vcs_root else None)
+        found_by = "link" if project_dir else "start"
+        project_dir = project_dir or Path(os.path.realpath(start))
     # The branch, for the setup's `${scoter:project-branch}`.
-    branch = vcs_current_branch(settings, vcs_root) if project_dir and vcs_root else None
-
-    if project_dir:
-        # Phase 2: with the project, and the repository it's in.
-        settings = reprocess_config(
-            dist_dir,
-            project_dir,
-            vcs_root[0] if vcs_root else None,
-            settings,
-            project_branch=branch,
-        )
-        check_project_vcs(settings, vcs_root)
-    if project_dir and scope == ConfigScope.ACCEPTED:
-        # Phase 3: with the user's accepted settings, if they accepted it.
-        found = find_acceptance(settings)
-        accepted = found.get("accepted-settings") if found else None
-        notice = found.get("notice") if found else None
-        if isinstance(notice, str):
-            print(notice, file=sys.stderr)
-        settings = reprocess_config(
-            dist_dir,
-            project_dir,
-            vcs_root[0] if vcs_root else None,
-            settings,
-            accepted_settings=accepted if isinstance(accepted, str) else None,
-            project_branch=branch,
-        )
-
+    branch = vcs_current_branch(settings, vcs_root) if vcs_root else None
+    settings[FOUND_PROJECT] = {
+        "project-dir": str(project_dir),
+        "vcs-root": str(vcs_root[0]) if vcs_root else None,
+        "vcs": vcs_root[1] if vcs_root else None,
+        "project-branch": branch,
+        "found-by": found_by,
+    }
     return settings
 
 
@@ -251,91 +241,38 @@ def find_project_dir(
     return None
 
 
-def check_project_vcs(settings: DictJsonData, vcs_root: tuple[Path, str] | None) -> None:
-    """Check the project's `vcs` against the repository it was found in.
+# An environment id's parts, as the verified store makes them.
+MAX_ID_NAME_CHARS = 32
+ID_HASH_CHARS = 12
 
-    A VCS with a `runs: find-root` must be the one whose root was found.
-    One without (such as `file`) can be used anywhere.
+
+def environment_id(project_dir: Path) -> str:
+    """The environment's id, as `surf_scoter_lib.verified.store.environment_id` (and the generator) make it."""
+    canonical = os.path.realpath(project_dir)
+    name = re.sub(r"[^a-z0-9-]+", "-", os.path.basename(canonical).lower())[:MAX_ID_NAME_CHARS].strip("-")
+    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()[:ID_HASH_CHARS]
+    return f"{name or 'project'}-{digest}"
+
+
+def find_linked_project(settings: DictJsonData, start: Path, vcs_root: Path | None) -> Path | None:
+    """The nearest directory, from `start` up to the VCS root, with a link in the verified store.
+
+    Only the link file's presence is looked at; the sub-command reads it,
+    with its checks.
     """
-    vcs = _opt_lookup(settings, CURRENT_PROJECT_SETUP, "vcs")
-    if not isinstance(vcs, str):
-        return
-    rooted = {name for name, _ in vcs_find_root_commands(settings)}
-    if vcs not in rooted:
-        return
-    if vcs_root is None:
-        raise ConfigErr(
-            f"The project's `vcs` is '{vcs}', but it isn't in a {vcs} repository."
-        )
-    if vcs_root[1] != vcs:
-        raise ConfigErr(
-            f"The project's `vcs` is '{vcs}', but it's in a {vcs_root[1]} "
-            f"repository ({vcs_root[0]})."
-        )
-
-
-def find_acceptance(settings: DictJsonData) -> DictJsonData | None:
-    """Ask the setup's `verified: runs: find-acceptance` for the project's acceptance.
-
-    It's given the configuration with the project (`{x:universal}`), and
-    prints JSON: `match`, `acceptance`, `accepted-settings` (the file for
-    gen-scoter-uc) and `notice`.  None when the setup has no such command.
-    """
-    template = _opt_lookup(settings, "resolved", "scoter", "runs", "find-acceptance")
-    if template is None:
+    store = _opt_lookup(settings, "resolved", "verification", "paths", "store")
+    if not isinstance(store, str):
         return None
-    if not isinstance(template, list) or not all(isinstance(a, str) for a in template):
-        raise ConfigErr("The setup's `verified` `runs: find-acceptance` has no value.")
-    tmp = save_to_tmp(settings)
-    try:
-        args = [str(arg).replace("{x:universal}", tmp) for arg in template]
-        res = subprocess.run(  # nosec: B603  # The command comes from the user's setup.
-            args, stdout=subprocess.PIPE, check=False, shell=False,
-        )
-    finally:
-        remove_tmp(tmp)
-    if res.returncode != 0:
-        raise ConfigErr("Couldn't look up your acceptance of the project's settings.")
-    try:
-        found: JsonData = json.loads(res.stdout)
-    except ValueError as err:
-        raise ConfigErr(f"`find-acceptance` printed something that isn't JSON: {err}") from err
-    if not isinstance(found, dict):
-        raise ConfigErr("`find-acceptance` printed something unexpected.")
-    return found
-
-
-def reprocess_config(
-    dist_dir: Path,
-    project_dir: Path,
-    vcs_root: Path | None,
-    orig: DictJsonData,
-    *,
-    accepted_settings: str | None = None,
-    project_branch: str | None = None,
-) -> DictJsonData:
-    """Reprocess this configuration with the project, and the repository it's in.
-
-    With `accepted_settings`, the generator builds the host commands from them.
-    `project_branch` is the project's branch, for `${scoter:project-branch}`.
-    """
-    # Save the configuration for reprocessing.
-    tmp = save_to_tmp(orig)
-
-    try:
-        return generate_config(
-            distribution_dir=dist_dir,
-            project_dir=str(project_dir),
-            vcs_root=str(vcs_root) if vcs_root else None,
-            project_clone_dir=None,
-            dev_container_settings_dir=None,
-            universal_file=tmp,
-            no_setup_search=True,
-            accepted_settings=accepted_settings,
-            project_branch=project_branch,
-        )
-    finally:
-        remove_tmp(tmp)
+    real_start = Path(os.path.realpath(start))
+    dirs = [real_start]
+    if vcs_root is not None:
+        real_root = Path(os.path.realpath(vcs_root))
+        if real_start.is_relative_to(real_root):
+            dirs = [real_start, *list(real_start.parents)[:len(real_start.relative_to(real_root).parts)]]
+    for directory in dirs:
+        if (Path(store) / environment_id(directory) / "link.json").is_file():
+            return directory
+    return None
 
 
 def save_to_tmp(data: DictJsonData) -> str:
@@ -448,25 +385,19 @@ def generate_config(
     distribution_dir: Path,
     project_dir: str | None,
     project_clone_dir: str | None,
-    vcs_root: str | None = None,
     dev_container_settings_dir: str | None,
     universal_file: str | None,
     no_setup_search: bool,
-    accepted_settings: str | None = None,
-    project_branch: str | None = None,
 ) -> DictJsonData:
     """Run the gen-scoter-uc program.
 
-    With a project, the host commands and egress come only from
-    `accepted_settings` (the user's accepted settings); without them, there
-    are none.
+    Only for the setup: the sub-commands run it again on copies of the
+    project's files, so the live ones are never parsed.
     """
     gen_uc = _require_exe(_raw_bin_dir(distribution_dir) / GEN_SCOTER_UC_EXEC)
     args: list[str] = [str(gen_uc), "--distribution-dir", str(distribution_dir)]
     if project_dir:
         args.extend(("--project-dir", project_dir))
-    if vcs_root:
-        args.extend(("--vcs-root", vcs_root))
     if project_clone_dir:
         args.extend(("--project-clone-dir", project_clone_dir))
     if dev_container_settings_dir:
@@ -475,10 +406,6 @@ def generate_config(
         args.extend(("--universal", universal_file))
     if no_setup_search:
         args.append("--no-setup-search")
-    if accepted_settings:
-        args.extend(("--accepted-settings", accepted_settings))
-    if project_branch:
-        args.extend(("--project-branch", project_branch))
     res = subprocess.run(  # nosec: B603  # All input is validated.
         args,
         stdout=subprocess.PIPE,
@@ -553,14 +480,25 @@ def _is_windows() -> bool:
 # ---------------------------------------------------------------------
 # Sub Command Handlers
 
-def list_sub_commands(config: DictJsonData) -> list[str]:
+
+def print_sub_commands(config: DictJsonData) -> None:
+    """Output the sub-commands and their summaries."""
+    subs = list_sub_commands(config)
+    col_size = max([len(n[0]) for n in subs])
+    for name, summary in subs:
+        sep = " " * (col_size - len(name))
+        print(f"  {name}{sep}  {summary}")
+
+
+def list_sub_commands(config: DictJsonData) -> list[tuple[str, str]]:
     """Get the list of all sub-commands: the distribution's bin directory's scripts."""
     bin_dir = _dist_bin_dir(config)
-    ret: list[str] = []
-    for name in os.listdir(bin_dir):
-        if name.startswith(SUB_CMD_PREFIX) and name.endswith(SUB_CMD_SUFFIX):
-            name = name[len(SUB_CMD_PREFIX):-len(SUB_CMD_SUFFIX)].replace("_", "-")
-            ret.append(name)
+    ret: list[tuple[str, str]] = []
+    for filename in os.listdir(bin_dir):
+        summary = read_sub_command_summary(bin_dir / filename)
+        if summary is None:
+            continue
+        ret.append(summary)
     return ret
 
 
@@ -603,9 +541,13 @@ def sub_command_prefix(config: DictJsonData, cmd_file: Path) -> list[str]:
 
 def run_sub_command(config: DictJsonData, argv: Sequence[str]) -> int:
     """Run the sub-command, from the distribution's bin directory."""
-    bin_dir = _dist_bin_dir(config)
-    cmd_file = bin_dir / (SUB_CMD_PREFIX + argv[0].replace("-", "_") + SUB_CMD_SUFFIX)
-    if not cmd_file.is_file():
+    cmd_file = find_sub_command_file(config, argv[0])
+    if not cmd_file:
+        print(
+            f"No such sub-command '{argv[0]}'.  Run with 'help' to "
+            f"list all available sub-commands.",
+            file=sys.stderr,
+        )
         return 1
 
     # Checked before the configuration is saved, so a problem leaves no file.
@@ -636,6 +578,104 @@ def run_to_end(cmd_args: Sequence[str]) -> int:
             return process.wait()
         except KeyboardInterrupt:
             continue
+
+
+def find_sub_command_file(config: DictJsonData, name: str) -> Path | None:
+    """Discover the command file based on the sub-command name."""
+    bin_dir = _dist_bin_dir(config)
+    cmd_file = bin_dir / (SUB_CMD_PREFIX + name.replace("-", "_") + SUB_CMD_SUFFIX)
+    if not cmd_file.is_file():
+        return None
+    return cmd_file
+
+
+def read_sub_command_summary(file: Path) -> tuple[str, str] | None:
+    """Return the sub-command name + summary text.
+    
+    Returns (name, summary text).  If the file does not have summary text,
+    then it will be empty.  This returns None if it doesn't look like a
+    sub-command file.
+    """
+    if not file.is_file():
+        return None
+    name = file.name
+    if not name.startswith(SUB_CMD_PREFIX) or not name.endswith(SUB_CMD_SUFFIX):
+        return None
+    name = name[len(SUB_CMD_PREFIX):-len(SUB_CMD_SUFFIX)].replace("_", "-")
+    with open(file, "rb") as inp:
+        # Read the file as binary, because it might not be a unicode Python
+        # file.  The reading goes byte-by-byte to avoid "read to EOL" problems
+        # for binary files.
+        # The pattern this follows:
+        #   - read 'lines'.
+        #   - if the line starts with '#', ignore it.
+        #   - if the line starts with '"""', return it.
+        #   - note that '\r' and '\n' and '#' and '"'
+        #     are in the 1-byte utf-8 character set.
+        #   - if a line isn't blank or start with '#' or '"', stop.
+        buf = b""
+        tail = b""
+        state = 0
+        while True:
+            val = inp.read(1)
+            if state == 0:
+                # Start of line
+                if val in b'\r\n':
+                    # Stay on start-of-line.
+                    pass
+                elif val in b'\t ':
+                    # Whitespace line; can only contain whitespace + newlines.
+                    state = 1
+                elif val == b'#':
+                    # Comment line; ignore to end of line.
+                    state = 2
+                elif val == b'"':
+                    buf = b""
+                    state = 3
+                else:
+                    break
+            elif state == 1:
+                # Whitespace line
+                if val in b'\r\n':
+                    # Go back to start-of-line.
+                    state = 0
+                if val not in b'\t ':
+                    # Something else than whitespace
+                    break
+            elif state == 2:
+                # Comment line.
+                if val in b'\r\n':
+                    # Go back to start-of-line.
+                    state = 0
+            # Document string reader.
+            # Simple reader.  It isn't 100% right; it fails on
+            # '""foo', but that's not valid Python anyway.
+            # It just consumes the leading '"', then at EOL
+            # strips the trailing whitespace and '"'.
+            elif state == 3:
+                if val not in b'"':
+                    buf += val
+                    state = 4
+            elif state == 4:
+                # Inside the string.
+                if val in b'\r\n':
+                    break
+                if val in b'"\t ':
+                    tail = val
+                    state = 5
+                else:
+                    buf += val
+            elif state == 5:
+                if val in b'\r\n':
+                    # Don't consume the tail.
+                    break
+                if val in b'"\t ':
+                    tail += val
+                else:
+                    buf += tail + val
+                    state = 3
+
+    return (name, buf.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------
@@ -705,9 +745,7 @@ def config_scope(sub_cmd: str | None, dist_dir: Path) -> ConfigScope:
     # Read from the subcmd-* file for how to treat the project information loading.
     if _is_subcmd_in(sub_cmd, _raw_bin_dir(dist_dir) / NO_PROJECT_FILE):
         return ConfigScope.SETUP
-    if _is_subcmd_in(sub_cmd, _raw_bin_dir(dist_dir) / NO_ACCEPTANCE_FILE):
-        return ConfigScope.SUGGESTED
-    return ConfigScope.ACCEPTED
+    return ConfigScope.FOUND
 
 
 def _is_subcmd_in(sub_cmd: str, file: Path) -> bool:
@@ -733,8 +771,7 @@ def main(argv: Sequence[str]) -> int:
     sub_cmd_args = args.cmd_args
     if not sub_cmd or sub_cmd == "help":
         print("All supported sub-commands:")
-        for sub in list_sub_commands(config):
-            print(f"  {sub}")
+        print_sub_commands(config)
         print(f"Run '{argv[0]} SUB-CMD --help' for details on each one.")
         return 0
     if sub_cmd == "show-suc":

@@ -16,7 +16,7 @@ The weak points of [file access](files.md): how code in the development containe
 | --- | --- | --- |
 | Everything in the project clone, including `.git` | Code in the container | `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py); `rm` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); the VCS `runs` in [`setup.yaml`](../../defaults/setup.yaml); `scoter kill --fetch` in [`main_kill.py`](../../scripts/main_kill.py); the developer's tools |
 | The persistent store | Code in the container | The container tool; nothing on the host reads it |
-| `container: mounts: project-clone` | The project, as accepted | `parse_container` in [`project.rs`](../../host/src/config/project.rs); `project_mount_problems` in [`config.rs`](../../host/src/config.rs) |
+| `container: mounts: project-clone` | The project, as pulled into your configuration | `parse_container` in [`project.rs`](../../host/src/config/project.rs); `project_mount_problems` in [`config.rs`](../../host/src/config.rs) |
 | Object files hard-linked between the project and the clone | Code in the container | `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml) |
 | Setup directory files | `scoter`, and any local account that can write them | `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); `touch` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py) |
 | Changes brought back to the project | Code in the container, through the developer | The developer's review |
@@ -91,7 +91,7 @@ The container's own files, in its persistent store, are a container volume, not 
 **Severity:** High.  **Status:** By design; the developer must not use host tools there.
 **Where:** the developer's tools; the guidance in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host).
 
-Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` scripts).  Opening or running any of them in the project clone on the host runs the container's code there.
+Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` scripts).  Opening or running any of them in the project clone on the host runs the container's code there.  The same goes for a pull's working directory and your unlocked copy, which hold the project's files: seeding copies tool configuration only inside container directories (where it's build input), and says to open the working directory in the IDE's restricted mode.
 
 **Red team:** plant each kind of file in the clone and see which tools act on it when a developer browses the project's state directory on the host.
 
@@ -105,7 +105,7 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 `git fetch` from the project clone runs nothing, but what it brings is code the container wrote.  Changes that are easy to miss in review:
 
 * build and test scripts, CI workflows, package manifests with install hooks;
-* anything in `.surf-scoter.d/` (the project file, and the dev containers' `Dockerfile`, `dev-env.yaml` and build files, and its `egress` rules), which widen what the *next* environment may do.  [Project verification](verification.md) asks for a new review before the next run uses them, which narrows this to the review's own gaps: changes that match on meaning ([VER-1](verification-attack-vectors.md#ver-1-the-dockerfile-meaning-match-can-be-fooled), [VER-2](verification-attack-vectors.md#ver-2-any-file-named-dev-envyaml-matches-on-meaning)), values the review doesn't show ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)), and exemptions ([VER-4](verification-attack-vectors.md#ver-4-exemptions-accept-what-nobody-reviewed));
+* anything in `.surf-scoter.d/` (the project file, and the dev containers' `Dockerfile`, `dev-env.yaml` and build files, and its `egress` rules).  These no longer change what the next environment may do: a run uses only your configuration, and a change to the project's files reaches it only through `scoter pull`'s review, which shows every change since your last pull in full.  What's left is the review's own gaps ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts), [VER-27](verification-attack-vectors.md#ver-27-approval-cant-prove-a-person-reviewed)), and the developer committing such a change without looking;
 * `.vscode/`, `.idea/` and other settings tools act on when they open a folder;
 * symlinks, which point at host files once checked out on the host;
 * `.gitmodules` entries pointing at attacker-controlled repositories.
@@ -120,7 +120,7 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 **Severity:** High.  **Status:** Mitigated.
 **Where:** `_setup_project_clone` and `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); the mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
 
-The project clone is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts and the bridge commands come from your accepted settings in the verified store, never from the project or the clone, and the dev container is built from the accepted copy of `.surf-scoter.d`.  The persistent store is a container volume, so it brings nothing from the host either.  Nothing else from the host is mounted.
+The project clone is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts and the bridge commands come from your configuration in the verified store, never from the project or the clone, and the dev container is built from a staged copy of that configuration.  The persistent store is a container volume, so it brings nothing from the host either.  Nothing else from the host is mounted.
 
 **Red team:** look for anything from the host that reaches the container: project files, environment, mounts added through settings, and anything that shares storage with the project, as in FILE-2.
 

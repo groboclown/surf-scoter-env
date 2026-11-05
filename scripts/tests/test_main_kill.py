@@ -51,7 +51,11 @@ class KillTest(unittest.TestCase):
     def suc(self, *, project: bool = True) -> dict:
         recorder = [sys.executable, "-c", RECORDER]
         return {
-            "active-config-locations": {"project-dir": str(self.project) if project else None},
+            # As `scoter` finds the project, without parsing it.
+            "found-project": {
+                "project-dir": str(self.project), "vcs-root": None, "vcs": None,
+                "project-branch": None, "found-by": "files" if project else "start",
+            },
             "current-project-setup": {"vcs": "git"} if project else None,
             "resolved": {
                 "scoter": {"paths": {

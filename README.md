@@ -17,13 +17,13 @@ These are the things you need to do to keep Surf Scoter's protections working.  
 
 ### Review a project before you run it
 
-If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the files that decide what its container can do.  They define how the container can communicate outside its sandbox, which means it can do things you're not ready for.
+A project's files (`.surf-scoter.d`) only suggest what its container can do.  `scoter run` never uses them as they are: it runs *your* configuration, a copy you reviewed and approved with `scoter pull`, kept outside the project where it can't change behind your back.  The review is the moment that matters.  The files define how the container can communicate outside its sandbox, which means it can do things you're not ready for:
 
 - **The project configuration file** (`.surf-scoter.d/project.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
 - **The egress rules** (`egress` in `.surf-scoter.d/project.yaml`) say where the container may connect.
 - **The dev container's `Dockerfile` and `dev-env.yaml`** build and run the container.  Look for multi-line values in `dev-env.yaml`, a final `USER` other than an unprivileged user, and downloads in `RUN` steps.
 
-Review changes to these files whenever they come back from the project's clone, too.  They change what the *next* environment may do.
+When the project's files change, the next run says so; `scoter pull` shows you what changed, and nothing changes what you run until you approve it.  Treat changes that come back from the project's clone the same way, before you commit them.
 
 ### Don't run git or your IDE on the project clone from your host
 
@@ -88,17 +88,21 @@ You only need to do this once.
 
 ### Starting a Developer Environment for a Project
 
-If you're working with an established Surf Scoter project, and you've run through the above user setup, you should **first ensure it's safe to run.**  A project can declare [host-to-environment pass-through commands](#running-commands-on-the-host), which can lead to security issues.
+If you're working with an established Surf Scoter project, and you've run through the above user setup, first **pull** its files into your own configuration:
 
-Only then should you start the project environment by running:
+```shell
+scoter pull
+```
+
+This copies the project's committed files, checks them against your setup, and shows them to you in the terminal: the commands the container may run on your host (a project can declare [host-to-environment pass-through commands](#running-commands-on-the-host), which can lead to security issues), where it may connect, and its container files.  Nothing is used until you approve it.  Then start the environment:
 
 ```shell
 scoter run
 ```
 
-This will process the project files and start up containers.  It will report the launched process hostname, which you use to [connect to it with a shell or IDE](#connecting-to-a-developer-environment).
+This builds from your configuration, never the project's live files, and starts up containers.  It will report the launched process hostname, which you use to [connect to it with a shell or IDE](#connecting-to-a-developer-environment).
 
-If you want to set up your project to define a Surf Scoter development environment, then [the fine documentation can help](docs/new-project-setup.md).
+To change your configuration, `scoter unlock` gives you a copy to edit and run, and `scoter lock` reviews and stores it again (`scoter lock --revert` throws the edits away).  `scoter review` looks at the configuration in use again, `scoter switch NAME` goes to another (a pull keeps the one it replaced as `default.previous`), `scoter list` and `scoter remove` manage them, and `scoter push` offers yours back to the project, if it's yours.  If you want to set up your project to define a Surf Scoter development environment, `scoter init` starts one from a template; [the fine documentation can help](docs/new-project-setup.md).
 
 When a run ends, it stops its containers, but keeps the project's clone and the container's persistent store for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
 

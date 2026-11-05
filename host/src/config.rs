@@ -17,17 +17,16 @@
 //! setup files again, and its project file is used unless another is given.
 //! That allows building the configuration up in steps.
 
-pub mod accepted;
 pub mod command;
 pub mod dev_env;
 pub mod egress;
 pub mod environment;
 pub mod host_commands;
+pub mod host_file;
 pub mod pattern;
 pub mod project;
 pub mod public_suffix;
 pub mod read;
-pub mod review;
 pub mod simple_checks;
 pub mod system;
 
@@ -36,11 +35,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use accepted::AcceptedSettings;
 use dev_env::DevContainer;
 use environment::{EnvPlan, EnvRules};
+use host_file::HostFile;
 use project::ProjectConfig;
-use review::{ContainerUse, Review};
 use system::{Env, LoadedFrom, SetupBase, SetupInputs, SetupOptions, SetupRecord, SystemConfig};
 
 use crate::universal::ActiveConfigLocations;
@@ -48,89 +46,16 @@ use crate::universal::ActiveConfigLocations;
 /// The `scoter` section's `path-lists` key searched for a `dev-container: NAME`.
 pub const DEV_CONTAINERS_SEARCH: &str = "dev-containers-search";
 
-/// The checks on a review against the run: it's for this project, it
-/// hasn't expired, and a container the user chose is one of theirs.
-fn review_problems(review: &Review, system: &SystemConfig) -> Vec<ConfigError> {
-    if review.rejected {
-        return Vec::new();
-    }
-    let error = |key: &str, message: String| ConfigError::new(Some(&review.file), key, message);
-    let mut errors = Vec::new();
-    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let project_dir = system.get_path(system::SCOTER_SECTION, system::PROJECT_DIR);
-    if project_dir.as_deref().map(canonical) != Some(canonical(&review.project_dir)) {
-        errors.push(error(
-            "project-dir",
-            "isn't this run's project; leave it as the review gave it".to_string(),
-        ));
-    }
-    if review.expires_at <= accepted::now() {
-        errors.push(error("expires-at", "must be in the future".to_string()));
-    }
-    if let ContainerUse::Name(name) = &review.container_use
-        && find_user_container(name, system).is_none()
-    {
-        errors.push(error("dev-container.use", no_user_container(name)));
-    }
-    errors
-}
-
-/// The `dev-containers-search` directories that hold the user's own
-/// containers: those outside the project directory and its repository, which
-/// the project controls.  The default search list starts with the project's
-/// own files directory.
-fn user_containers_search(system: &SystemConfig) -> Vec<PathBuf> {
-    let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
-    let project: Vec<PathBuf> = [system::PROJECT_DIR, system::VCS_ROOT]
+/// Where a container found by name is looked for: the config directory,
+/// which holds the project's own containers, then the `dev-containers-search`
+/// directories.  The config directory is searched without being listed, as
+/// the list can't name anything in the project.
+fn containers_search(system: &SystemConfig) -> Vec<PathBuf> {
+    let config_dir = system.get_path(system::SCOTER_SECTION, system::CONFIG_DIR);
+    config_dir
         .into_iter()
-        .filter_map(|key| system.get_path(system::SCOTER_SECTION, key))
-        .map(canonical)
-        .collect();
-    system
-        .path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH)
-        .into_iter()
-        .filter(|dir| {
-            let dir = canonical(dir.clone());
-            !project.iter().any(|p| dir.starts_with(p))
-        })
+        .chain(system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH))
         .collect()
-}
-
-/// The search directory holding the user's own container `name`, if any.
-fn find_user_container(name: &str, system: &SystemConfig) -> Option<PathBuf> {
-    user_containers_search(system).into_iter().find(|dir| {
-        dir.join(name).join(dev_env::DOCKERFILE).is_file()
-            && dir.join(name).join(dev_env::DEV_ENV_FILE).is_file()
-    })
-}
-
-fn no_user_container(name: &str) -> String {
-    format!(
-        "there's no container '{name}' in your `dev-containers-search` directories outside the project"
-    )
-}
-
-/// The user's own container, `name`, which the accepted settings use
-/// instead of the project's.  It and its parents are looked for only
-/// outside the project, so a name can't lead back into the project's files.
-fn user_container(
-    name: &str,
-    accepted: &AcceptedSettings,
-    project_file: &Path,
-    system: &SystemConfig,
-) -> Result<DevContainer, Vec<ConfigError>> {
-    if find_user_container(name, system).is_none() {
-        return Err(vec![ConfigError::new(
-            Some(&accepted.file),
-            "dev-container.use",
-            no_user_container(name),
-        )]);
-    }
-    dev_env::find(
-        &project::ContainerRef::Name(name.to_string()),
-        project_file,
-        &user_containers_search(system),
-    )
 }
 
 /// The `scoter` section's `value-lists` key listing the domains an egress
@@ -203,6 +128,10 @@ pub struct LoadOptions {
     /// The project directory (`--project-dir`), if any: the directory holding
     /// the project files directory, with the project file in it.
     pub project_dir: Option<PathBuf>,
+    /// Where the project file and the project's container directories are read
+    /// from (`--config-dir`): a copy of the project's files.  Without it, the
+    /// project files directory in the project directory.
+    pub config_dir: Option<PathBuf>,
     /// The root of the repository holding the project (`--vcs-root`), as
     /// `scoter` found it from the setup's VCS sections.  It must hold the
     /// project directory.
@@ -221,14 +150,9 @@ pub struct LoadOptions {
     pub universal: Option<PathBuf>,
     /// Don't look for the user's setup file or the install directory's.
     pub no_setup_search: bool,
-    /// The user's accepted settings for the project (`--accepted-settings`):
-    /// an `accepted.json` in the verified store.
-    pub accepted_settings: Option<PathBuf>,
-    /// The user's review file for the project (`--review`).
-    pub review: Option<PathBuf>,
-    /// The review file of an earlier acceptance (`--previous-review`), for a
-    /// new review to start from: read, but not checked against the run.
-    pub previous_review: Option<PathBuf>,
+    /// The configuration's host file (`--host-file`): where each of its
+    /// commands' programs is.  It goes with `--config-dir`.
+    pub host_file: Option<PathBuf>,
 }
 
 /// What `load_all` uses from a universal configuration file: the setup, and
@@ -250,16 +174,15 @@ struct UniversalInput {
     /// The commands, as they run.
     #[serde(default)]
     host_brokered: Vec<serde_json::Value>,
-    /// The accepted settings `host-brokered` was built from: the store's
-    /// file, and its contents.
+    /// The host file `host-brokered` was built from: its file, and its contents.
     #[serde(default)]
-    accepted_settings: Option<AcceptedInput>,
+    host_file: Option<HostFileInput>,
 }
 
-/// A universal configuration file's `accepted-settings`.
+/// A universal configuration file's `host-file`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AcceptedInput {
+struct HostFileInput {
     file: PathBuf,
     contents: serde_json::Value,
 }
@@ -297,12 +220,8 @@ pub struct FullConfig {
     pub project: Option<ProjectConfig>,
     /// The project's dev container; present whenever `project` is.
     pub dev_container: Option<DevContainer>,
-    /// The user's accepted settings for the project, when given.
-    pub accepted: Option<AcceptedSettings>,
-    /// The user's review file for the project, when given.
-    pub review: Option<Review>,
-    /// An earlier acceptance's review file, when given.
-    pub previous_review: Option<Review>,
+    /// The configuration's host file, when given.
+    pub host_file: Option<HostFile>,
 }
 
 impl FullConfig {
@@ -348,6 +267,58 @@ fn project_mount_problems(
         })
         .into_iter()
         .collect()
+}
+
+/// With the project's files read from a copy (`--config-dir`), the values
+/// that name the live project files directory: an environment value a
+/// command gets, once its `${section:key}` references are expanded.  The run
+/// reads only the copy, so a value can't hand the live files to a program
+/// on the host instead.
+fn live_files_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<ConfigError> {
+    let (Some(project_dir), Some(files_dir)) = (
+        system.get_path(system::SCOTER_SECTION, system::PROJECT_DIR),
+        system.get(system::SCOTER_SECTION, system::PROJECT_FILES_DIR),
+    ) else {
+        return Vec::new();
+    };
+    let live = project_dir.join(&files_dir);
+    let mut names = vec![live.display().to_string()];
+    if let Ok(real) = live.canonicalize() {
+        names.push(real.display().to_string());
+    }
+    let names_live = |value: &str| {
+        names.iter().any(|name| {
+            value.match_indices(name.as_str()).any(|(at, _)| {
+                let after = &value[at + name.len()..];
+                after.is_empty() || after.starts_with(['/', std::path::MAIN_SEPARATOR, ':', ' '])
+            })
+        })
+    };
+    let mut errors = Vec::new();
+    let mut check = |plan: &environment::EnvPlan, key: &str| {
+        for (kind, values) in [("set", &plan.set), ("default", &plan.default)] {
+            for (name, value) in values {
+                if names_live(value) {
+                    errors.push(ConfigError::new(
+                        Some(&project.path),
+                        &child_key(&child_key(key, kind), name),
+                        format!(
+                            "names the project's live files ({}); a run reads only your configuration, so nothing may point a program at them",
+                            live.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    };
+    check(&project.env_resolved, "env");
+    for (i, rule) in project.commands.iter().enumerate() {
+        check(
+            &rule.env_resolved,
+            &child_key(&index_key("commands", i), "env"),
+        );
+    }
+    errors
 }
 
 /// Read the whole configuration, using the process environment to find the
@@ -435,6 +406,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     let setup = SetupOptions {
         project_dir: path_of(&active.project_dir),
         project_config: path_of(&active.project_config),
+        config_dir: path_of(&active.config_dir),
         vcs_root: path_of(&active.vcs_root),
         project_branch: active.project_branch.as_deref(),
         project_clone_dir: path_of(&active.project_clone_dir),
@@ -483,8 +455,8 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
     if let (Some(refused), Some(project)) = (&refused, &project) {
         errors.extend(egress_problems(project, refused));
     }
-    let accepted = universal.accepted_settings.and_then(|input| {
-        accepted::parse(input.contents, &input.file)
+    let host_file = universal.host_file.and_then(|input| {
+        host_file::parse(input.contents, &input.file)
             .map_err(|e| errors.extend(e))
             .ok()
     });
@@ -497,9 +469,7 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
             system,
             project,
             dev_container,
-            accepted,
-            review: None,
-            previous_review: None,
+            host_file,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -541,6 +511,31 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         })
     };
     let project_clone_dir = carried(&options.project_clone_dir, |a| &a.project_clone_dir);
+    // Given, or carried over with the project it was for.
+    let config_dir = match &options.config_dir {
+        // Kept, so the project files directory is never read in its place.
+        Some(dir) if !tidy_dir(dir).is_dir() => {
+            errors.push(ConfigError::new(
+                Some(&tidy_dir(dir)),
+                "",
+                "the --config-dir directory doesn't exist",
+            ));
+            Some(tidy_dir(dir))
+        }
+        Some(dir) => Some(tidy_dir(dir)),
+        None if options.project_dir.is_some() => None,
+        None => universal
+            .as_ref()
+            .and_then(|u| u.active_config_locations.config_dir.as_ref())
+            .map(PathBuf::from),
+    };
+    if config_dir.is_some() && project_dir.is_none() {
+        errors.push(ConfigError::new(
+            None,
+            "",
+            "--config-dir needs a project directory (--project-dir) to go with it",
+        ));
+    }
     // Given, or carried over with the project it was found for.
     let vcs_root = match &options.vcs_root {
         Some(root) => Some(tidy_dir(root)),
@@ -593,8 +588,10 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         distribution_dir: options.distribution_dir.as_deref(),
         project_dir: project_dir.as_deref(),
         project_branch: project_branch.as_deref(),
-        // Worked out from the project directory, with the setup.
+        // Worked out from the config directory, or else the project
+        // directory, with the setup.
         project_config: None,
+        config_dir: config_dir.as_deref(),
         find_project_config: true,
         vcs_root: vcs_root.as_deref(),
         project_clone_dir: project_clone_dir.as_deref(),
@@ -636,9 +633,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         None => (None, None),
     };
     let lookup = match (&container, &system) {
-        (Some(_), Some(system)) => {
-            Some(system.path_list(system::SCOTER_SECTION, DEV_CONTAINERS_SEARCH))
-        }
+        (Some(_), Some(system)) => Some(containers_search(system)),
         _ => None,
     };
     let dev_container = match (&container, project_path.as_deref(), lookup) {
@@ -659,17 +654,27 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     });
     if let (Some(system), Some(project)) = (&system, &mut project) {
         errors.extend(plan_environments(project, system));
+        if config_dir.is_some() {
+            errors.extend(live_files_problems(project, system));
+        }
     }
     if let (Some(refused), Some(project)) = (&refused, &project) {
         errors.extend(egress_problems(project, refused));
     }
-    // Checked against the project and the setup in effect.
-    let accepted = options.accepted_settings.as_deref().and_then(|file| {
-        let read = accepted::read(&absolute(file))
+    // Checked against the configuration's commands and this computer.
+    if options.host_file.is_some() && config_dir.is_none() {
+        errors.push(ConfigError::new(
+            None,
+            "",
+            "--host-file needs the configuration it's for (--config-dir) to go with it",
+        ));
+    }
+    let host_file = options.host_file.as_deref().and_then(|file| {
+        let read = host_file::read(&absolute(file))
             .map_err(|e| errors.extend(e))
             .ok()?;
         if let Some(system) = &system {
-            let problems = read.check(system);
+            let problems = read.check(system, project.as_ref());
             if !problems.is_empty() {
                 errors.extend(problems);
                 return None;
@@ -677,64 +682,6 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
         }
         Some(read)
     });
-    let review = options.review.as_deref().and_then(|file| {
-        let read = review::read(&absolute(file))
-            .map_err(|e| errors.extend(e))
-            .ok()?;
-        if let Some(system) = &system {
-            let problems = review_problems(&read, system);
-            if !problems.is_empty() {
-                errors.extend(problems);
-                return None;
-            }
-        }
-        Some(read)
-    });
-    // The wildcards a review or an acceptance gives get the same refusal as
-    // the project file's: a user's typed rule, or one accepted before the
-    // setup (or its suffix list) refused it.
-    if let Some(refused) = &refused {
-        let reason = |domain: &str| refused.reason(domain);
-        if let Some(review) = review.as_ref().filter(|r| !r.rejected) {
-            errors.extend(project::wildcard_errors(
-                &review.file,
-                review
-                    .egress
-                    .iter()
-                    .filter_map(|rule| rule["host"].as_str()),
-                &reason,
-            ));
-        }
-        if let Some(accepted) = &accepted {
-            errors.extend(project::wildcard_errors(
-                &accepted.file,
-                accepted.egress.iter().map(|rule| rule.host.as_str()),
-                &reason,
-            ));
-        }
-    }
-    // An earlier acceptance's review: it only seeds a new review, and has
-    // usually expired, so it isn't checked against the run.
-    let previous_review = options.previous_review.as_deref().and_then(|file| {
-        review::read(&absolute(file))
-            .map_err(|e| errors.extend(e))
-            .ok()
-    });
-    // The user's own container, when the accepted settings name one, in
-    // place of the project's.
-    let mut dev_container = dev_container;
-    if let (Some(accepted), Some(system), Some(path)) =
-        (&accepted, &mut system, project_path.as_deref())
-        && let Some(name) = &accepted.container_name
-    {
-        match user_container(name, accepted, path, system) {
-            Ok(dev) => {
-                system.set_dev_container_path(&dev.dir);
-                dev_container = Some(dev);
-            }
-            Err(e) => errors.extend(e),
-        }
-    }
     errors.extend(project_mount_problems(
         project.as_ref(),
         dev_container.as_ref(),
@@ -744,9 +691,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             system,
             project,
             dev_container,
-            accepted,
-            review,
-            previous_review,
+            host_file,
         }),
         _ => Err(ConfigErrors(errors)),
     }
@@ -1141,7 +1086,8 @@ mod tests {
         dir.write(
             "home/setup.yaml",
             &format!(
-                "{FILES_DIR_SETUP}  path-lists:\n    dev-containers-search:\n      - ./missing\n      - {}/containers\n",
+                "{FILES_DIR_SETUP}  path-lists:\n    dev-containers-search:\n      - {}/missing\n      - {}/containers\n",
+                dir.path().display(),
                 dir.path().display()
             ),
         );
@@ -1151,6 +1097,235 @@ mod tests {
             dir.path().join("containers/dev-env")
         );
         assert_eq!(config.system.files(), &[user_setup(&dir)]);
+    }
+
+    #[test]
+    fn config_dir_given() {
+        let dir = TempDir::new();
+        // The live files say one thing, the copy another; only the copy is read.
+        dev_container(&dir, "project/.surf-scoter.d/live");
+        dev_container(&dir, "copy/env");
+        dir.write(
+            "copy/project.yaml",
+            "container:\n  dev-container-path: env\n",
+        );
+        let mut opts = options(&dir, Some("container:\n  dev-container-path: live\n"), None);
+        let location =
+            |config: &FullConfig, key| config.system.get_path(system::SCOTER_SECTION, key);
+
+        // Without it, the config directory is the project files directory.
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
+        assert_eq!(
+            location(&config, system::CONFIG_DIR),
+            Some(dir.path().join("project/.surf-scoter.d"))
+        );
+
+        opts.config_dir = Some(dir.path().join("copy"));
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
+        assert_eq!(
+            location(&config, system::CONFIG_DIR),
+            Some(dir.path().join("copy"))
+        );
+        assert_eq!(
+            location(&config, system::PROJECT_CONFIG),
+            Some(dir.path().join("copy/project.yaml"))
+        );
+        assert_eq!(
+            location(&config, system::PROJECT_DIR),
+            Some(dir.path().join("project"))
+        );
+        assert_eq!(
+            config.dev_container.as_ref().unwrap().dir,
+            dir.path().join("copy/env")
+        );
+
+        // It carries over with the project, but not to a project given again.
+        let first = dir.write(
+            "first.json",
+            &crate::universal::to_json(
+                &crate::universal::build_brokering_project(&config).unwrap(),
+            ),
+        );
+        let again = LoadOptions {
+            universal: Some(first.clone()),
+            no_setup_search: true,
+            ..LoadOptions::default()
+        };
+        let config = load_all_with_env(&again, env(&dir)).unwrap();
+        assert_eq!(
+            location(&config, system::CONFIG_DIR),
+            Some(dir.path().join("copy"))
+        );
+        let config = load_universal_with_env(&first, env(&dir)).unwrap();
+        assert_eq!(
+            location(&config, system::CONFIG_DIR),
+            Some(dir.path().join("copy"))
+        );
+        let other = LoadOptions {
+            project_dir: Some(dir.path().join("project")),
+            ..again
+        };
+        let config = load_all_with_env(&other, env(&dir)).unwrap();
+        assert_eq!(
+            location(&config, system::CONFIG_DIR),
+            Some(dir.path().join("project/.surf-scoter.d"))
+        );
+    }
+
+    #[test]
+    fn live_files_refused_with_a_copy() {
+        let dir = TempDir::new();
+        dev_container(&dir, "project/.surf-scoter.d/env");
+        dev_container(&dir, "copy/env");
+        let project = "container:\n  dev-container-path: env\nenv:\n  set:\n    LIVE: ${scoter:project-dir}/.surf-scoter.d/secret\n    NEAR: ${scoter:project-dir}/.surf-scoter.dx\ncommands:\n  - command: x\n    args: []\n    env:\n      default:\n        DIR: ${scoter:project-dir}/.surf-scoter.d\n";
+        dir.write("copy/project.yaml", project);
+        let mut opts = options(&dir, Some(project), None);
+        // Reading the live files, they're what the values name: nothing to refuse.
+        load_all_with_env(&opts, env(&dir)).unwrap();
+        opts.config_dir = Some(dir.path().join("copy"));
+        let errors: Vec<String> = load_all_with_env(&opts, env(&dir))
+            .unwrap_err()
+            .0
+            .iter()
+            .map(|e| format!("{}: {}", e.key.clone().unwrap_or_default(), e.message))
+            .collect();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].starts_with("env.set.LIVE: names the project's live files"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].starts_with("commands[0].env.default.DIR: names"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn config_dir_errors() {
+        let dir = TempDir::new();
+        let mut opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
+        opts.config_dir = Some(dir.path().join("missing"));
+        let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
+        assert_eq!(errors[0], ": the --config-dir directory doesn't exist");
+        // The project files directory isn't read in its place.
+        assert!(
+            errors[1..].iter().all(|e| !e.contains(".surf-scoter.d")),
+            "{errors:?}"
+        );
+
+        // It's where a project's files are read from, so it needs a project.
+        dir.write("copy/project.yaml", "");
+        let opts = LoadOptions {
+            config_dir: Some(dir.path().join("copy")),
+            ..options(&dir, None, None)
+        };
+        assert_eq!(
+            messages(load_all_with_env(&opts, env(&dir)).unwrap_err()),
+            [": --config-dir needs a project directory (--project-dir) to go with it"]
+        );
+    }
+
+    #[test]
+    fn config_dir_searched_first() {
+        let dir = TempDir::new();
+        // A container named in the project is found in the copy, though no
+        // search directory lists it, and before the user's.
+        dev_container(&dir, "copy/dev-env");
+        dev_container(&dir, "containers/dev-env");
+        dir.write(
+            "copy/project.yaml",
+            "container:\n  dev-container: dev-env\n",
+        );
+        let mut opts = options(
+            &dir,
+            Some("container:\n  dev-container: dev-env\n"),
+            Some(&format!(
+                "  path-lists:\n    dev-containers-search: ['{}/containers']\n",
+                dir.path().display()
+            )),
+        );
+        opts.config_dir = Some(dir.path().join("copy"));
+        let config = load_all_with_env(&opts, env(&dir)).unwrap();
+        assert_eq!(
+            config.dev_container.unwrap().dir,
+            dir.path().join("copy/dev-env")
+        );
+    }
+
+    #[test]
+    fn search_in_project_refused() {
+        let dir = TempDir::new();
+        dev_container(&dir, "repo/project/.surf-scoter.d/env");
+        dir.write(
+            "repo/project/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: env\n",
+        );
+        let setup = |entry: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!(
+                    "{FILES_DIR_SETUP}  path-lists:\n    dev-containers-search: ['{entry}']\n"
+                ),
+            );
+        };
+        let opts = LoadOptions {
+            project_dir: Some(dir.path().join("repo/project")),
+            vcs_root: Some(dir.path().join("repo")),
+            project_clone_dir: Some(dir.path().join("clone")),
+            ..LoadOptions::default()
+        };
+        let root = dir.path().display().to_string();
+        for (entry, listed, location) in [
+            (
+                format!("{root}/repo/project/.surf-scoter.d"),
+                format!("{root}/repo/project/.surf-scoter.d"),
+                "scoter:project-dir",
+            ),
+            (
+                "./containers".to_string(),
+                format!("{root}/repo/project/containers"),
+                "scoter:project-dir",
+            ),
+            (
+                format!("{root}/repo/other"),
+                format!("{root}/repo/other"),
+                "scoter:vcs-root",
+            ),
+            (
+                format!("{root}/clone/x"),
+                format!("{root}/clone/x"),
+                "scoter:project-clone-dir",
+            ),
+        ] {
+            setup(&entry);
+            assert_eq!(
+                messages(load_all_with_env(&opts, env(&dir)).unwrap_err()),
+                [format!(
+                    ": `scoter:dev-containers-search` lists {listed}, which is in the project (`{location}`); the project's own containers are always searched first, so list only directories outside the project"
+                )],
+                "{entry}"
+            );
+        }
+
+        // Followed through a symlink.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
+            std::os::unix::fs::symlink(
+                dir.path().join("repo/project/.surf-scoter.d"),
+                dir.path().join("elsewhere/link"),
+            )
+            .unwrap();
+            setup(&format!("{root}/elsewhere/link"));
+            assert_eq!(
+                messages(load_all_with_env(&opts, env(&dir)).unwrap_err()).len(),
+                1
+            );
+        }
+
+        // Outside the project, it's fine.
+        setup(&format!("{root}/containers"));
+        assert!(load_all_with_env(&opts, env(&dir)).is_ok());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: kill
+"""Stop a running dev environment.
+
+A Surf Scoter sub-command.
 
 Stops a dev environment whose `scoter run` is gone, or stuck: stops its
 containers, fetches its project clone's changes into the project if asked,
@@ -17,18 +19,23 @@ from subprocess import SubprocessError  # nosec B404  # We know the security imp
 from surf_scoter_lib import (
     BAD_EXECUTION_ARGS_CODE,
     UserConfig,
+    cleanup,
     fileutil,
     gen_parser,
     persistent_store,
+    run_config,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.user_config import Capture, OnError
+from surf_scoter_lib.verified import remove
 
 # Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`
 # (as `main_run.py` has it).
 SUC_COPY_DIR = "environments"
+# Where `scoter run` stages the configuration it runs, under the state directory.
+STAGED_PREFIX = cleanup.STAGED_PREFIX
 
 
 class Clean(enum.Flag):
@@ -101,7 +108,7 @@ def run_kill(
         print("Its project clone is kept, and it's still listed.", file=sys.stderr)
         return 1
     if Clean.PROJECT_CLONE in clean and env.project_clone_dir:
-        problem = _unsafe_to_remove(Path(env.project_clone_dir), recorded)
+        problem = _unsafe_to_remove(Path(env.project_clone_dir), recorded, config, env)
         if problem:
             print(f"Not removing the project clone {env.project_clone_dir}: {problem}.", file=sys.stderr)
         else:
@@ -124,10 +131,22 @@ def run_kill(
         state_dir = recorded.optional_path("scoter", "state-dir")
         if state_dir is not None:
             fileutil.rm(state_dir / SUC_COPY_DIR / env.host)
+            # The configuration it ran, staged (`scoter run` removes it as it ends; a crash doesn't).
+            config_dir = recorded.active_location("config-dir")
+            staged = None if config_dir is None else config_dir.parent
+            if staged is not None and staged.parent == state_dir and staged.name.startswith(STAGED_PREFIX):
+                fileutil.rm(staged)
     except (OSError, SurfScoterErr) as err:
         print(f"Couldn't forget {env.host}: {err}", file=sys.stderr)
         return 1
     print(f"Stopped {env.host}.")
+    # Configurations removed or replaced while it ran them can go now (VER-40).
+    verified_store = remove.open_store(config)
+    if verified_store is not None:
+        try:
+            cleanup.remove_retired(verified_store, run_config.running_config_ids(config))
+        except (OSError, SurfScoterErr) as err:
+            print(f"Couldn't remove the configurations it was the last to use: {err}", file=sys.stderr)
     if ssh == SshEntries.RELEASE:
         try:
             if ssh_hosts.release(config, env.host):
@@ -147,7 +166,8 @@ def _choose(
             print(f"No environment `{host}` is running.", file=sys.stderr)
             _list(envs.environs.values())
         return env
-    project = config.active_location("project-dir")
+    found = config.found_project()
+    project = None if found is None or found.found_by == "start" else found.project_dir
     if project is None:
         print("There's no project here: give the environment with --host.", file=sys.stderr)
         _list(envs.environs.values())
@@ -201,14 +221,22 @@ def _fetch(config: UserConfig, env: EnvironmentDesc, branch: str) -> bool:
     return True
 
 
-def _unsafe_to_remove(clone: Path, config: UserConfig) -> str | None:
-    """Why removing `clone` would remove more than a project clone, if it would."""
+def _unsafe_to_remove(clone: Path, config: UserConfig, found_config: UserConfig, env: EnvironmentDesc) -> str | None:
+    """Why removing `clone` would remove more than a project clone, if it would.
+
+    The project is the one the run recorded, the run's configuration names,
+    and `scoter` found here: any of them.
+    """
+    found = found_config.found_project()
     real = Path(os.path.realpath(clone))
     if not real.is_dir() or os.path.islink(clone):
         return "it isn't a directory"
     guarded: list[tuple[str, Path | None]] = [
         ("the project directory", config.active_location("project-dir")),
+        ("the project directory", Path(env.project_dir) if env.project_dir else None),
+        ("the project directory", None if found is None or found.found_by == "start" else found.project_dir),
         ("the repository", config.active_location("vcs-root")),
+        ("the repository", None if found is None else found.vcs_root),
         ("your home directory", Path.home()),
     ]
     for name, path in guarded:

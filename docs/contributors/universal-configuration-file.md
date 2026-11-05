@@ -7,43 +7,41 @@ Because the tooling brings configuration settings from many different places, it
 The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, with the same configuration code that `scoter-host` uses):
 
 ```
-gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
+gen-scoter-uc [--project-dir DIR] [--config-dir DIR] [--vcs-root DIR] [--project-branch NAME]
               [--project-clone-dir DIR]
               [--dev-container-settings-dir DIR] [--distribution-dir DIR]
               [--universal UNIVERSAL.json] [--no-setup-search]
-              [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
-              [--previous-review REVIEW.yaml] [--output FILE]
+              [--host-file HOST.json] [--output FILE]
 ```
 
 * `--vcs-root`: the root of the repository holding the project, which `scoter` finds from the setup's VCS sections (see [Version control roots](../system-config-file.md#version-control-roots)).  It must exist and hold the project directory.  It's the `scoter` location `vcs-root`; setup files can't be read from inside it.  Without a `--project-dir` this time, a `--universal` file's carries over.
 * `--project-branch`: the project's branch, which `scoter` gets from the VCS section's `runs: current-branch`.  It's made safe as one path part and set as the `scoter` value `project-branch` (see [the `scoter:` section](../system-config-file.md#the-scoter-section)).  A `--universal` file's carries over while the project directory stays the same.  The generator also works out the `scoter` value `project-id` from the project directory, the same as the verified store's name for it.
 * `--project-dir`: the project: the directory holding the project files directory, with the project file in it (`scoter: values: project-files-dir` and `project-file-name` in the setup say where).  It must exist, and the setup files' `./` locations start there.  Without it, the project parts of the file (`active-config-locations`' `project-config`, `project-dir`, `vcs-root` and `dev-container-path`, `current-project-setup`, `host-brokered` and `dev-container`) are empty, unless `--universal` brings them along.
+* `--config-dir`: where the project file and the project's containers are read from, in place of the project files directory: a copy of them (see [user-owned project files](user-owned-project-files.md#the-projects-surf-scoterd-found-then-copied)).  It must exist, and needs `--project-dir`.  It's the `scoter` location `config-dir`, searched first for a container the project names; without it, it's the project files directory.
+* `--host-file`: the host file of the configuration `--config-dir` names: where each of its commands' programs is ([the host file](user-owned-project-files.md#the-host-file)).  It needs `--config-dir`.  It must name exactly the programs the configuration's commands run (a command's `program`, or its `command`), each still an executable, still the same real file (and the same contents, when it has a `sha256`), and outside the project, its clone and the repository.  `host-brokered` is then the configuration's commands, each with `program` the host file's `path`: nothing is looked up on the `PATH`.  The file goes into `host-file`, and the configuration's egress rules, with the setup's gateway, into `egress`.  Without a host file, `host-brokered` is empty and `egress` null: nothing runs on the host, and nothing gets out, without a reviewed configuration.
 * `--project-clone-dir` and `--dev-container-settings-dir`: the host directories mounted in the launched dev container: the project's clone (writable, at the dev container's `mounts: project-clone`, or the project file's `container: mounts: project-clone`), and the settings directory with the runtime configuration files (read-only).  The program that launches the container gives these; the configuration files can't set them.  They're made absolute, but needn't exist yet.  Without them, they're `null`, unless `--universal` brings them along.  The persistent store isn't among them: it's a container volume, not a host directory.
 * `--distribution-dir`: as for the [system configuration files](../system-config-file.md).  It wins over a `scoter: paths: distribution-dir` in the setup files.  The other setup file is the user's, found through `$SURF_SCOTER_HOME` or `$XDG_CONFIG_HOME` (by default `~/.config`); no setup file is ever read from a project.
 * `--universal`: a universal configuration file made earlier, to start from.  Its `setup` is used without reading those setup files again.  Its `active-config-locations` `project-config`, `project-dir`, `project-clone-dir`, `dev-container-settings-dir`, `user-setup-file`, `user-dir` and `distribution-dir` carry over, unless this run gives or finds others.  Its `distribution-bin-dir` carries over too, as long as the distribution directory stays the same, so another program can change it in the file.  (`dev-container-path` and `cwd` are worked out again.)  Setup files found by the search that it doesn't already have are added, with their usual priority.
 * `--no-setup-search`: don't look for the user's setup file (`$SURF_SCOTER_HOME`, `$XDG_CONFIG_HOME` or `~/.config`), or for the distribution directory's file when it comes from the setup files.  The `--distribution-dir` file is still read.
-* `--accepted-settings`: the user's accepted settings for the project: an `accepted.json` in the verified store (`verification: paths: store`; see step 8 of [Projects in v1](projects-v1.md)).  It must be for this run's project, and each command's program must still be an executable file outside the project, its clone and the repository.  `host-brokered` is then built from its `commands`, and only from them; the file goes into `accepted-settings`, and its egress rules into `egress`.  When its `dev-container: use` names one of the user's containers, that container (found in `dev-containers-search` directories outside the project directory and the VCS root, as are its parents) becomes the dev container: `dev-container-path` and `dev-container` are its, not the project's.
-* `--previous-review`: an earlier acceptance's review file, from the verified store, which a new review starts from (step 17 of [Projects in v1](projects-v1.md)).  It's parsed as `--review` is, but not checked against the run: it has usually expired.  The file's `previous-review` gets its `file`, and its `data` as the user left it, `$comment`s and `$override`s included.  Nothing is accepted from it.
-* `--review`: the user's review file for the project (step 12 of [Projects in v1](projects-v1.md)).  It's read as the project file is, its `project-dir` must be this run's, its `expires-at` in the future, and a `dev-container: use: {name: ...}` one of the user's containers.  The file's `review` gets its `result`, and, unless it's `reject`, the accepted settings it gives, in `accepted.json`'s shape.  Nothing runs from a review: `host-brokered` doesn't change.
 * `--output`: the file to write; without it, the JSON goes to stdout.
 
 If the configuration has problems, the program writes all of them to stderr, one per line, writes no JSON, and exits with 1.  Bad arguments exit with 2.
 
 ### Building up the configuration in steps
 
-The `scoter` program needs the system setup to find the project, and the project to find the user's acceptance of it.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` three times:
+The `scoter` program needs the system setup to find the project.  Rather than knowing the setup rules itself, it runs `gen-scoter-uc` once, without a project, and uses the setup to find the project directory and the repository holding it; it records them in the universal file's `found-project`, without parsing the project's files.  The sub-commands then run the generator again on copies of those files, never the live ones (see [user-owned project files](user-owned-project-files.md#the-projects-surf-scoterd-found-then-copied)):
 
 ```shell
 gen-scoter-uc --output first.json
 # ... run first.json's VCS `find-root` commands, then look for the project
-#     directory up to the root ...
-gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT --output second.json
-# ... run second.json's `scoter: runs: find-acceptance`, given second.json ...
-gen-scoter-uc --universal second.json --no-setup-search --project-dir DIR --vcs-root ROOT \
-    --accepted-settings ACCEPTED.json
+#     directory up to the root, and record it as `found-project` ...
+# A pull, on the snapshot it staged:
+gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT \
+    --config-dir STAGED/files
+# A run, on the configuration in use, staged:
+gen-scoter-uc --universal first.json --no-setup-search --project-dir DIR --vcs-root ROOT \
+    --config-dir STAGED/files --host-file STAGED/host.json
 ```
-
-The second run doesn't read the setup files again, but it does expand their settings again, so `./` locations are now relative to the project directory.  The third adds the accepted settings `find-acceptance` named.  Without any (no acceptance matches), there are no host commands and no egress rules until the user accepts a review with `scoter verify`.
 
 `scoter` writes each universal file it passes along into a new directory only the user can use, as a file only they can read, and removes it when it's done.
 
@@ -59,10 +57,9 @@ scoter-host --universal universal.json CONTAINER_NAME
 Before anything else, it checks:
 
 * the universal configuration file belongs to the user, and nobody else can use it (it decides what runs on the host);
-* with `accepted-settings`: its `file` is in the verified store (`verification: paths: store`), private, and still says exactly what `contents` does (a revoked, replaced or edited acceptance doesn't), and the acceptance's `expires-at` hasn't passed.  Only when it starts: a session that's running when its acceptance expires carries on;
-* the project directory is the accepted one, and it and the dev container directory are still there.
+* with `host-file`: each program it names is still an executable, the same real file, and, with a `sha256`, the same contents.  A missing or changed program stops it; it never looks for the program anywhere else.
 
-It reads the universal configuration file and **no other file** (but for the accepted settings' file in the store, to compare):
+It reads the universal configuration file and **no other file**:
 
 * the commands it runs are the `host-brokered` list, exactly as written there: each entry's `program` is the program run (`null` makes the command unavailable, and its requests are refused), and its `env` is the command's whole environment plan;
 * the system settings come from the file's `setup` record, expanded again;
@@ -249,47 +246,28 @@ The general layout:
         ]
     },
 
-    // The user's accepted settings, from the verified store, which 'host-brokered' and
-    // 'egress' were made from: the store's file, and its contents (see step 8 of
-    // projects-v1.md).  'null' without them.
-    "accepted-settings": {
-        "file": "/home/user/.config/surf-scoter.d/verified/my-project-3f9a0c17b2e4/acceptances/20261020T150405Z-7c1e/accepted.json",
+    // The configuration's host file, with --host-file, which 'host-brokered' was made from:
+    // its file, and its contents.  'null' without one.
+    "host-file": {
+        "file": "/home/user/.local/state/surf-scoter/pull/x1/host.json",
         "contents": {
-            "$schema": "surf-scoter-accepted-settings-1",
-            "project-dir": "/home/user/my-project",
-            "expires-at": "2026-11-19T15:04:05+00:00",
-            "vcs": "git",
-            "gateway": null,
-            "egress": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}],
-            "commands": []
+            "$schema": "surf-scoter-host-file-1",
+            "programs": {
+                "aws": {"path": "/usr/local/bin/aws", "real": "/opt/aws-cli/bin/aws",
+                        "origin": "resolved", "sha256": null}
+            }
         }
     },
 
-    // The accepted egress rules, and the gateway they were accepted for.  'null' without
-    // accepted settings.
+    // The configuration's egress rules, with the setup's gateway, which enforces them.
+    // 'null' without a host file.
     "egress": {
-        "gateway": null,
+        "gateway": "squid",
         "rules": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}]
     },
 
-    // The user's review file, when --review gives it: its `result` ('accept' or 'reject'),
-    // and the accepted settings it gives ('null' when rejected), for the checks to judge
-    // before anything is stored.  'null' without one.
-    "review": {
-        "file": "/tmp/surf-scoter-x1/review.yaml",
-        "result": "accept",
-        "accepted": {"$schema": "surf-scoter-accepted-settings-1", "...": "..."}
-    },
-
-    // With --previous-review: an earlier acceptance's review file, and its data as the user
-    // left it, which a new review starts from.  'null' without one.
-    "previous-review": {
-        "file": "/home/user/.config/surf-scoter.d/verified/proj-1a2b3c4d5e6f/acceptances/.../review.yaml",
-        "data": {"review": "surf-scoter-review-1", "egress": [], "commands": [], "...": "..."}
-    },
-
-    // The commands `scoter-host` runs: the accepted settings' `commands`.  Without accepted
-    // settings, empty.
+    // The commands `scoter-host` runs: the configuration's commands, each with the host
+    // file's program.  Without a host file, empty.
     "host-brokered": [
         // This is the `commands` section from the project configuration file.
         // It's nearly verbatim, except for two fields, so each entry says exactly what it does:

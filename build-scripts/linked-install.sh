@@ -37,8 +37,14 @@ cd "${target}/bin"
 ln -s "${here}/scripts/"* .
 
 cd "${target}"
-ln -s "${here}/containers" .
 ln -s "${here}/defaults" .
+
+# The tooling prohibits user's "containers" from linking into the
+# project directory.  For self-hosted scoter, that means we need a
+# copy, not a link.  If you've built in this directory, then the
+# "target" directory takes up lots of space and this copy will take
+# time and resources.
+cp -R "${here}/containers" .
 
 # These need a hard-link, not a symbolic link, because of how the
 # file finds itself.  But cross-filesystem hard-links can fail.

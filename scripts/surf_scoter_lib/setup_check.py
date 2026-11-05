@@ -22,6 +22,7 @@ PROJECT_LOCATIONS = (
     "project-dir",
     "vcs-root",
     "project-config",
+    "config-dir",
     "cwd",
     "dev-container-path",
     "project-clone-dir",

@@ -82,7 +82,7 @@ def translate(rules: list[gateway.Rule]) -> tuple[gateway.Report, str]:
             report.refused.append((rule, reason))
     lines = [
         "# The hosts the dev container may reach, on TCP 443: one pattern per line,",
-        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from your accepted egress rules.",
+        "# for Squid's `dstdom_regex`.  Made by Surf Scoter from your configuration's egress rules.",
     ]
     lines.extend(sorted({pattern(rule.host) for rule in report.enforced}))
     return report, "\n".join(lines) + "\n"

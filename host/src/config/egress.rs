@@ -45,6 +45,15 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    /// The protocol as the project file writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::Tls => "tls",
+            Protocol::Http => "http",
+            Protocol::Https => "https",
+        }
+    }
+
     fn default_port(self) -> u16 {
         match self {
             Protocol::Tls | Protocol::Https => HTTPS_PORT,
@@ -69,7 +78,23 @@ pub struct EgressRule {
     pub methods: Vec<String>,
 }
 
+/// The setup section and `values` key naming the network gateway, which the
+/// egress rules are enforced by.
+pub const GATEWAY_SECTION: &str = "dev-env";
+pub const GATEWAY_NAME: &str = "network-gateway-name";
+
 impl EgressRule {
+    /// The rule as the universal configuration file's `egress` holds it:
+    /// `host`, `protocol`, `port` and `methods`, every one given.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "host": self.host,
+            "protocol": self.protocol.name(),
+            "port": self.port,
+            "methods": self.methods,
+        })
+    }
+
     /// The domain whose subdomains a wildcard rule allows (`pkg.dev` for
     /// `*.pkg.dev`), if it's one.
     pub fn wildcard_domain(&self) -> Option<&str> {
