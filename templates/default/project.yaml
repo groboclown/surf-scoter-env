@@ -1,0 +1,17 @@
+# Your Surf Scoter configuration, started from the distribution's `default`
+# template.  Edit it while it's unlocked, try it with `scoter run`, then
+# `scoter lock` to review and store it.
+
+# The project's version control: `git`, or another `NAME-vcs` section of
+# your setup (`file` without one).
+vcs: git
+
+# The container files that run the dev environment, in this directory.
+container:
+  dev-container-path: dev-container
+
+# Where the dev container may connect, through the network gateway.
+egress:
+  # PyPI, for Python packages.  Add what your project needs.
+  - {host: pypi.org, protocol: tls}
+  - {host: files.pythonhosted.org, protocol: tls}

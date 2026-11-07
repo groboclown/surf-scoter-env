@@ -9,7 +9,7 @@ This document describes what the container is made of and how it's run.  [Dev co
 
 * **It runs untrusted code.**  The firewall and gateway containers run fixed programs.  The dev container runs whatever the project and its dependencies bring.
 * **The project supplies it.**  The firewall and gateway come from Surf Scoter or from your own settings.  The dev container comes from the project's `Dockerfile` and `dev-env.yaml`, which arrive with the code you clone.
-* **Every channel ends there.**  The workspace mount, the setup mount, the SSH connection, the host bridge's broker and the proxy all meet in this one container.
+* **Every channel ends there.**  The project clone mount, the persistent store, the setup mount, the SSH connection, the host bridge's broker and the proxy all meet in this one container.
 
 
 ## Who controls what
@@ -21,7 +21,8 @@ This document describes what the container is made of and how it's run.  [Dev co
 | `dev-env.yaml` (and its parents) | The project | The user name, mount points, broker location and SSH port |
 | Capabilities, limits, networks, mounts | Your [settings](settings.md) (the compose file) | What the running container is allowed to do |
 | The setup directory | `scoter`, on your host | SSH keys, allowed domains, the bridge command list |
-| The workspace | The container itself | Everything in it, including `.git` |
+| The project clone | The container itself | Everything in it, including `.git` |
+| The persistent store | The container itself | What the container keeps between runs; see [DEV-16](dev-container-attack-vectors.md#dev-16-the-persistent-store-outlives-the-session) |
 
 The split matters.  The project can change anything *inside* the image, but it can't add capabilities, networks, ports or mounts.  Those come from the compose file, which the project doesn't supply.  The protections that hold up against a hostile project are the ones outside the image: the [network](network.md), the [mounts](files.md), the [host bridge's checks](host-bridge.md), and your settings.
 
@@ -59,8 +60,10 @@ The default [compose file](../../defaults/docker-compose.yaml) runs the dev cont
 | `no-new-privileges` | `setuid` programs such as `sudo` can't raise privileges |
 | `pids_limit`, `mem_limit`, `memswap_limit`, `cpus` | Fork bombs and runaway builds stay contained |
 | Logging `max-size` | Container logs can't fill the disk |
-| `userns_mode: keep-id` (Podman) | The container user maps to your host user, so workspace files stay yours |
-| Workspace mount, read-write | The project clone; see [file access](files.md) |
+| `userns_mode: keep-id` (Podman) | The container user maps to your host user, so the clone's files stay yours |
+| Project clone mount, read-write | The project clone; see [file access](files.md) |
+| Persistent store, a named volume, read-write | The container's own files between runs, never a host directory; see [file access](files.md#the-persistent-store) |
+| Mounts in the long form | No value can add mount options |
 | Setup mount, read-only | Keys and lists the container mustn't change |
 
 The compose file does **not** set a read-only root file system, size limits on writable storage, a `user:`, or custom seccomp or AppArmor profiles.  The runtime's default profiles apply.  The container never gets the container runtime's socket, your home directory, or any published port.
@@ -96,9 +99,9 @@ The project's [`dev-env.yaml`](../project-dockerfile.md#the-dev-envyaml-file) te
 
 | Value | Checked for | Used in |
 | --- | --- | --- |
-| `user` | A non-empty string | Your `~/.ssh/config` (`Host` and `User` lines) |
-| `mounts: workspace`, `mounts: setup` | A string starting with `/` | The compose `.env` file |
-| `broker-bin` | A string starting with `/` | The command that starts the broker inside the container |
+| `user` | A plain user name: a letter or `_`, then letters, digits, `.`, `_` or `-`, at most 32 | Your `~/.ssh/config` (`User` line) |
+| `mounts: project-clone`, `persistent-store`, `setup` (and the project file's `container: mounts: project-clone`) | A plain container path: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`; none at, or inside, another | The compose `.env` file, single-quoted |
+| `broker-bin` | A plain container path, as the mounts | The command that starts the broker inside the container |
 | `sshd-port` | A port number | The compose `.env` file and `~/.ssh/config` |
 | `sshd-port-env` | A valid environment variable name | The compose file, as a variable in the container |
 

@@ -1,10 +1,10 @@
 #SPDX:MIT
 """Run the distribution's universal configuration file generator, `gen-scoter-uc`.
 
-For the scripts that need the generator's view of a file they have: a
-review file (`main_verify.py`), or a staged copy of the project's files
-(`main_run.py`).  Each run starts from the universal configuration file the
-script was given, without looking for the setup files again.
+For the scripts that need the generator's view of a copy of a project's
+files: a pull's staged snapshot, or a run's staged configuration.  Each run
+starts from the universal configuration file the script was given, without
+looking for the setup files again.
 """
 import json
 import os

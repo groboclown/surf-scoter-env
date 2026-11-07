@@ -1,0 +1,7 @@
+# This inherits all settings from the parent: the distribution's dev container.
+
+parents:
+  - name: dev-env
+    # The tag the Dockerfile's `FROM` names.  It's `dev-env:distro` with your
+    # setup's `dev-env: values: dev-env-image-prefix` in front.
+    tag: local-surf-scoter/dev-env:distro

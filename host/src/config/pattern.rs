@@ -1,7 +1,7 @@
-//! Workspace patterns: directory (and file) patterns relative to the
-//! workspace, such as `infra/**`.
+//! ProjectClone patterns: directory (and file) patterns relative to the
+//! project clone, such as `infra/**`.
 //!
-//!   * `.` is the workspace itself, and a leading `./` is allowed.
+//!   * `.` is the project clone itself, and a leading `./` is allowed.
 //!   * `*` matches any characters within one name, and `?` matches one character.
 //!   * `**`, as a whole name, matches any number of directories, including none.
 
@@ -10,12 +10,12 @@ use std::fmt;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
-/// A directory pattern relative to the workspace, such as `infra/**`.
+/// A directory pattern relative to the project clone, such as `infra/**`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct WorkspacePattern {
+pub struct ClonePattern {
     /// As written in the configuration.
     pub text: String,
-    /// One part per directory name below the workspace.
+    /// One part per directory name below the project clone.
     parts: Vec<PatternPart>,
 }
 
@@ -27,32 +27,36 @@ enum PatternPart {
     Name(String),
 }
 
-impl WorkspacePattern {
+impl ClonePattern {
     pub fn parse(text: &str) -> Result<Self, String> {
         if text.is_empty() {
             return Err(
-                "a workspace pattern must not be empty; use '.' for the workspace itself"
+                "a project clone pattern must not be empty; use '.' for the project clone itself"
                     .to_string(),
             );
         }
         if text.starts_with('/') {
             return Err(format!(
-                "workspace pattern '{text}' must be relative to the workspace; use '.' for the workspace itself"
+                "project clone pattern '{text}' must be relative to the project clone; use '.' for the project clone itself"
             ));
         }
-        if text.contains("{workspace}") {
+        if text.contains("{project-clone}") {
             return Err(format!(
-                "workspace pattern '{text}' is already relative to the workspace; leave out {{workspace}}"
+                "project clone pattern '{text}' is already relative to the project clone; leave out {{project-clone}}"
             ));
         }
         let mut parts: Vec<PatternPart> = Vec::new();
         for name in text.split('/').filter(|n| !n.is_empty() && *n != ".") {
             let part = match name {
-                ".." => return Err(format!("workspace pattern '{text}' must not contain '..'")),
+                ".." => {
+                    return Err(format!(
+                        "project clone pattern '{text}' must not contain '..'"
+                    ));
+                }
                 "**" => PatternPart::AnyDirs,
                 _ if name.contains("**") => {
                     return Err(format!(
-                        "workspace pattern '{text}': '**' must be a whole directory name"
+                        "project clone pattern '{text}': '**' must be a whole directory name"
                     ));
                 }
                 _ => PatternPart::Name(name.to_string()),
@@ -63,13 +67,13 @@ impl WorkspacePattern {
             }
             parts.push(part);
         }
-        Ok(WorkspacePattern {
+        Ok(ClonePattern {
             text: text.to_string(),
             parts,
         })
     }
 
-    /// Whether a directory, given as its names below the workspace, matches.
+    /// Whether a directory, given as its names below the project clone, matches.
     pub fn matches(&self, dirs: &[&str]) -> bool {
         match_parts(&self.parts, dirs)
     }
@@ -114,19 +118,19 @@ pub(crate) fn glob_matches(glob: &str, name: &str) -> bool {
     glob[g..].iter().all(|&c| c == '*')
 }
 
-impl<'de> Deserialize<'de> for WorkspacePattern {
+impl<'de> Deserialize<'de> for ClonePattern {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct PatternVisitor;
 
         impl Visitor<'_> for PatternVisitor {
-            type Value = WorkspacePattern;
+            type Value = ClonePattern;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a directory pattern relative to the workspace, such as infra/**")
+                f.write_str("a directory pattern relative to the project clone, such as infra/**")
             }
 
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<WorkspacePattern, E> {
-                WorkspacePattern::parse(v).map_err(E::custom)
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ClonePattern, E> {
+                ClonePattern::parse(v).map_err(E::custom)
             }
         }
 
@@ -138,8 +142,8 @@ impl<'de> Deserialize<'de> for WorkspacePattern {
 mod tests {
     use super::*;
 
-    fn pattern(text: &str) -> WorkspacePattern {
-        WorkspacePattern::parse(text).unwrap()
+    fn pattern(text: &str) -> ClonePattern {
+        ClonePattern::parse(text).unwrap()
     }
 
     fn matches(text: &str, dir: &str) -> bool {
@@ -149,28 +153,28 @@ mod tests {
 
     #[test]
     fn pattern_syntax_errors() {
-        let err = |text: &str| WorkspacePattern::parse(text).unwrap_err();
+        let err = |text: &str| ClonePattern::parse(text).unwrap_err();
         assert_eq!(
             err(""),
-            "a workspace pattern must not be empty; use '.' for the workspace itself"
+            "a project clone pattern must not be empty; use '.' for the project clone itself"
         );
         assert_eq!(
             err("/services"),
-            "workspace pattern '/services' must be relative to the workspace; use '.' for the workspace itself",
+            "project clone pattern '/services' must be relative to the project clone; use '.' for the project clone itself",
         );
         assert_eq!(
             err("../x"),
-            "workspace pattern '../x' must not contain '..'"
+            "project clone pattern '../x' must not contain '..'"
         );
         assert_eq!(
             err("a/../b"),
-            "workspace pattern 'a/../b' must not contain '..'"
+            "project clone pattern 'a/../b' must not contain '..'"
         );
         assert_eq!(
             err("a**"),
-            "workspace pattern 'a**': '**' must be a whole directory name"
+            "project clone pattern 'a**': '**' must be a whole directory name"
         );
-        assert!(err("{workspace}").contains("leave out {workspace}"));
+        assert!(err("{project-clone}").contains("leave out {project-clone}"));
     }
 
     #[test]

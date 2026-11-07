@@ -13,7 +13,7 @@
 # can't change them until you install again.
 #
 # The copy comes from `git archive`, so only committed files go in, never
-# uncommitted changes, untracked files, or the workspace.  It's built from that
+# uncommitted changes, untracked files, or the project clone.  It's built from that
 # export, installed outside this repository, and left read-only.
 
 set -e
@@ -137,7 +137,7 @@ rm -r \
     "${staging}/bin/surf_scoter_lib/__pycache__" \
     "${staging}/bin/surf_scoter_lib/"*/__pycache__ \
     2>/dev/null || true
-cp -R "${src}/containers" "${src}/defaults" "${src}/docs" "${staging}/"
+cp -R "${src}/containers" "${src}/defaults" "${src}/docs" "${src}/templates" "${staging}/"
 cp "${src}/scoter.py" "${src}/LICENSE" "${staging}/"
 # The distribution's own setup file.
 cp "${src}/defaults/setup.yaml" "${staging}/setup.yaml"

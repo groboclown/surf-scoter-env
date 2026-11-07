@@ -41,8 +41,12 @@ services:
       options:
         max-size: 10m   # the access log goes to stdout
     restart: unless-stopped
+    # The long form, so no value can add mount options.
     volumes:
-      - ${GATEWAY_CONFIG_HOST}:${GATEWAY_CONFIG_CONTAINER}:ro
+      - type: bind
+        source: ${GATEWAY_CONFIG_HOST}
+        target: ${GATEWAY_CONFIG_CONTAINER}
+        read_only: true
 
   dev:
     # The local developer places their Dockerfile in this directory.
@@ -71,6 +75,9 @@ services:
       - "NO_PROXY="
       - "no_proxy="
       - "${SSHD_PORT_ENV}=${SSHD_PORT}"
+      # Where the mounts are, for the container's start-up script.
+      - "SCOTER_PROJECT_CLONE=${PROJECT_CLONE_CONTAINER}"
+      - "SCOTER_PERSISTENT_STORE=${PERSISTENT_STORE_CONTAINER}"
     depends_on:
       - gateway
     cap_drop: [ALL]
@@ -83,10 +90,28 @@ services:
     logging:
       options:
         max-size: ${LOGGING_MAX_SIZE}  # container logs otherwise grow without bound.
+    # The long form, so no value can add mount options.  The persistent
+    # store is a volume, not a host directory: host commands can't reach it.
     volumes:
-      - ${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}
-      - ${SETTINGS_HOST}:${SETTINGS_CONTAINER}:ro
+      - type: bind
+        source: ${PROJECT_CLONE_HOST}
+        target: ${PROJECT_CLONE_CONTAINER}
+      - type: bind
+        source: ${SETTINGS_HOST}
+        target: ${SETTINGS_CONTAINER}
+        read_only: true
+      - type: volume
+        source: persistent-store
+        target: ${PERSISTENT_STORE_CONTAINER}
     # Should also put some file size limits on things like tmpfs.
+volumes:
+  # Made by `scoter run` (`docker: runs: create-volume`) and kept between
+  # runs: `external`, so `compose down --volumes` leaves it, and named in
+  # full, so compose doesn't prefix it with its project name, which is the
+  # same for every environment.
+  persistent-store:
+    external: true
+    name: ${PERSISTENT_STORE_VOLUME}
 networks:
   isolated:
     # Docker assigns the subnet per environment; the firewall finds it at startup.

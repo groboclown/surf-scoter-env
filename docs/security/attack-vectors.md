@@ -11,6 +11,7 @@ Each area has its own page:
 * [The development container](dev-container-attack-vectors.md) (`DEV`)
 * [File access](files-attack-vectors.md) (`FILE`)
 * [The host bridge](host-bridge-attack-vectors.md) (`BRIDGE`)
+* [Project verification](verification-attack-vectors.md) (`VER`)
 
 The [user and default settings](settings.md) aren't analyzed here.  They come from the developer rather than a cloned project, so they rank lower, but changes to them can break the network properties; that page has its own checklist.
 
@@ -56,18 +57,14 @@ The Critical vectors, and the High vectors that are open or unverified:
 
 | ID | Vector | Severity | Status |
 | --- | --- | --- | --- |
-| [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Open |
-| [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Open |
-| [FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace) | `scoter run` runs Git inside the workspace | Critical | Open |
+| [DEV-1](dev-container-attack-vectors.md#dev-1-user-is-written-into-the-ssh-configuration) | `user` is written into the SSH configuration | Critical | Mitigated |
+| [DEV-2](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file) | Mount points are written into the compose `.env` file | Critical | Mitigated |
 | [BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input) | Allowed commands that read container-controlled input | Critical | By design |
 | [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge) | The `file` VCS merge | High | Open |
 | [DEV-3](dev-container-attack-vectors.md#dev-3-image-builds-run-outside-the-isolation) | Image builds run outside the isolation | High | Open |
 | [DEV-4](dev-container-attack-vectors.md#dev-4-host-ids-under-rootful-docker) | Host ids under rootful Docker | High | Open |
 | [DEV-5](dev-container-attack-vectors.md#dev-5-the-ide-session-as-a-channel-to-the-host) | The IDE session as a channel to the host | High | Unverified |
-| [NET-2](network-attack-vectors.md#net-2-the-project-controls-the-allowlist) | The project controls the allowlist | High | Open |
 | [NET-3](network-attack-vectors.md#net-3-dns-from-the-dev-container) | DNS from the dev container | High | Unverified |
-| [BRIDGE-2](host-bridge-attack-vectors.md#bridge-2-the-project-chooses-the-commands) | The project chooses the commands | High | Open |
-| [BRIDGE-3](host-bridge-attack-vectors.md#bridge-3-path-checks-race-the-host-program) | Path checks race the host program | High | Open |
 
 
 ## Recurring themes
@@ -75,8 +72,11 @@ The Critical vectors, and the High vectors that are open or unverified:
 A few patterns show up across the areas, and are worth watching for in any new code:
 
 * **Project values written into host files.**  Anything the project supplies that `scoter` writes into a host file or command line needs strict validation and escaping (DEV-1, DEV-2).
-* **The host acting inside the workspace.**  Anything that runs on the host with the workspace as its working directory, or shares files with it, gives the container a way out (FILE-1, FILE-2, FILE-4).
-* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all come from the project, so they need review whenever they change (NET-2, BRIDGE-2, DEV-3).
+* **The host acting inside the project clone.**  Anything that runs on the host with the clone as its working directory, opens a path through it, or shares files with it, gives the container a way out.  The container can replace any directory in the clone with a symlink between sessions, so the host must never build a path below it.  Pushing into the clone runs its hooks too (FILE-1, FILE-2, FILE-4, FILE-10).
+* **Project configuration as permission.**  The allowlist, the bridge commands and the dev container all start as the project's suggestion.  [Project verification](verification.md) makes them the developer's own configuration: a pull's review copies them out of the project, and a run uses only that copy (NET-2, BRIDGE-2, DEV-3).  The review's own gaps are where these risks live now (VER-3, VER-26, VER-27), along with the unlocked state, which runs unreviewed edits (VER-33).
+* **Found, then copied.**  The project's files are read once, defensively, into a copy, and nothing parses or runs them in place.  Any new lookup, setting or default that reaches the live project brings back what the pull removed (VER-23, VER-24).
+* **The review must show everything it approves.**  A value that reaches the host but isn't in the review is approved unseen (VER-3, DEV-2, FILE-10).
+* **State that outlives a session.**  Anything the container can leave in the project clone (its `.git`) or its persistent store is input to the next session, and the clone is input to the host (DEV-16, FILE-1).
 * **Differences between runtimes.**  Rootful and rootless runtimes, Docker and Podman, and VM-based runtimes on macOS and Windows behave differently, so tests on one don't cover the others (NET-3, NET-8, DEV-4, BRIDGE-12).
 
 

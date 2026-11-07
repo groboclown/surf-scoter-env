@@ -6,9 +6,10 @@
 //! stream, decides what to do with it, and runs it.
 
 pub(crate) mod analyze;
+pub(crate) mod clone_path;
 pub(crate) mod container;
 pub(crate) mod exec;
-pub(crate) mod workspace;
+pub(crate) mod project_clone;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -23,11 +24,11 @@ use surf_scoter_env_launcher::comm::client_host::Invocation;
 
 use scoter_host::config;
 use scoter_host::config::project::Commands;
-use scoter_host::config::system::{DEV_CONTAINER_WORKSPACE_DIR, SCOTER_SECTION};
+use scoter_host::config::system::{PROJECT_CLONE_DIR, SCOTER_SECTION};
 
 use analyze::Decision;
 use exec::FrameSink;
-use workspace::Workspace;
+use project_clone::ProjectClone;
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
@@ -44,7 +45,7 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
             println!("{USAGE}");
             println!("Runs the broker in the container, and the commands its clients request.");
             println!(
-                "--universal gives the universal configuration file from gen-scoter-uc, with the project file and the dev container's workspace directory."
+                "--universal gives the universal configuration file from gen-scoter-uc, with the project file and the dev container's project clone directory."
             );
             return EXIT_OK;
         }
@@ -66,13 +67,8 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         }
     };
     // The universal file decides what runs here: it must be the user's
-    // alone, and its accepted settings must still be the store's, unexpired.
-    let problems = config::accepted::check_for_run(
-        &cli.universal,
-        config.accepted.as_ref(),
-        &config.system,
-        config::accepted::now(),
-    );
+    // alone, and its host file's programs must still be the ones approved.
+    let problems = config::host_file::check_for_run(&cli.universal, config.host_file.as_ref());
     if !problems.is_empty() {
         for e in &problems {
             eprintln!("scoter-host: {e}");
@@ -80,6 +76,7 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         return EXIT_FAILURE;
     }
     let universal = cli.universal.display();
+    let mounts = config.mounts();
     // Both are there when there's a project file.
     let (Some(mut project), Some(dev_container)) = (config.project, config.dev_container) else {
         eprintln!(
@@ -94,19 +91,20 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
         }
         return EXIT_FAILURE;
     }
-    let Some(workspace_dir) = config
-        .system
-        .get_path(SCOTER_SECTION, DEV_CONTAINER_WORKSPACE_DIR)
-    else {
+    let Some(workspace_dir) = config.system.get_path(SCOTER_SECTION, PROJECT_CLONE_DIR) else {
         eprintln!(
-            "scoter-host: {universal}: has no {DEV_CONTAINER_WORKSPACE_DIR}; make it with `gen-scoter-uc --{DEV_CONTAINER_WORKSPACE_DIR}`"
+            "scoter-host: {universal}: has no {PROJECT_CLONE_DIR}; make it with `gen-scoter-uc --{PROJECT_CLONE_DIR}`"
         );
         return EXIT_FAILURE;
     };
-    let workspace = match Workspace::new(&workspace_dir, &dev_container.env.mounts.workspace) {
+    let Some(mounts) = mounts else {
+        eprintln!("scoter-host: {universal}: has no dev container");
+        return EXIT_FAILURE;
+    };
+    let workspace = match ProjectClone::new(&workspace_dir, &mounts.project_clone) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("scoter-host: {universal}: the workspace: {e}");
+            eprintln!("scoter-host: {universal}: the project clone: {e}");
             return EXIT_FAILURE;
         }
     };
@@ -128,7 +126,7 @@ pub(crate) fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
     };
 
     eprintln!(
-        "scoter-host: workspace {} is mounted at {} in the container",
+        "scoter-host: the project clone {} is mounted at {} in the container",
         workspace.host.display(),
         workspace.container,
     );
@@ -219,7 +217,7 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
 /// What client requests are checked against.
 struct Settings {
     commands: Commands,
-    workspace: Workspace,
+    workspace: ProjectClone,
 }
 
 /// Client input for each running process.
@@ -342,7 +340,7 @@ fn handle_process<R: Read + Send + 'static, S: FrameSink>(
                     "scoter-host: process {proc}: running {} {:?} in {}",
                     request.program,
                     request.args,
-                    dir.display(),
+                    dir.path.display(),
                 ),
                 None => eprintln!(
                     "scoter-host: process {proc}: running {} {:?}",
@@ -531,7 +529,7 @@ mod tests {
             write("project/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
             write(
                 "project/.surf-scoter.d/env/dev-env.yaml",
-                "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+                "user: u\nmounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
             );
             TestProject {
                 project: write(
@@ -552,7 +550,7 @@ mod tests {
                     .then(|| self.project.parent().and_then(Path::parent))
                     .flatten()
                     .map(Path::to_path_buf),
-                dev_container_workspace_dir: workspace.map(Path::to_path_buf),
+                project_clone_dir: workspace.map(Path::to_path_buf),
                 ..LoadOptions::default()
             };
             // The setup file as the user's, and nothing else.
@@ -722,7 +720,7 @@ mod tests {
                 ..rule
             })
             .collect();
-        let workspace = Workspace {
+        let workspace = ProjectClone {
             host: std::env::temp_dir(),
             container: "/workspace".to_string(),
         };

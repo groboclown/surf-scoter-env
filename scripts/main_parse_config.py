@@ -1,5 +1,8 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: parse-config"""
+"""Parse the current configuration for potential issues.
+
+A Surf Scoter sub-command.
+"""
 import sys
 from collections.abc import Sequence
 

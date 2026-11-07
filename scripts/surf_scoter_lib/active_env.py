@@ -51,7 +51,7 @@ class EnvironmentDesc:
     network_gateway_name: str
     project_dir: str
     resources_dir: str
-    workspace_dir: str
+    project_clone_dir: str
     setup_dir: str
     compose_file: str
     compose_env_file: str
@@ -78,7 +78,7 @@ class EnvironmentDesc:
                 network_gateway_name=jdata.req_str(data, "network_gateway_name"),
                 project_dir=jdata.req_str(data, "project_dir"),
                 resources_dir=jdata.req_str(data, "resources_dir"),
-                workspace_dir=jdata.req_str(data, "workspace_dir"),
+                project_clone_dir=jdata.req_str(data, "project_clone_dir"),
                 setup_dir=jdata.req_str(data, "setup_dir"),
                 compose_file=jdata.req_str(data, "compose_file"),
                 compose_env_file=jdata.req_str(data, "compose_env_file"),
@@ -100,7 +100,7 @@ class EnvironmentDesc:
             "network_gateway_name": self.network_gateway_name,
             "project_dir": self.project_dir,
             "resources_dir": self.resources_dir,
-            "workspace_dir": self.workspace_dir,
+            "project_clone_dir": self.project_clone_dir,
             "setup_dir": self.setup_dir,
             "compose_file": self.compose_file,
             "compose_env_file": self.compose_env_file,
@@ -156,7 +156,7 @@ class ActiveEnvironmentSet:
             network_gateway_name="",
             project_dir=project_dir,
             resources_dir="",
-            workspace_dir="",
+            project_clone_dir="",
             setup_dir="",
             compose_file="",
             compose_env_file="",

@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as Json};
 use yaml_serde::Value as Yaml;
 
+use crate::config::egress;
 use crate::config::host_commands::{self, Combined};
 use crate::config::simple_checks::{EGRESS_HOSTS, PROJECT_FILES, SimpleCheck};
 use crate::config::system::{self, LoadedFrom, ScalarValue, SectionDefaults, SetupRecord};
@@ -51,26 +52,20 @@ pub struct Universal {
     /// its own (not merged): `{"env": PLAN, "commands": [{"env": PLAN}]}`,
     /// `${section:key}` expanded and `@NAME@` left.  The review shows them.
     pub current_project_resolved: Option<Json>,
-    /// The commands `scoter-host` runs: the accepted settings' `commands`
-    /// (empty without them), each with `program` the absolute executable, or
-    /// `null`, and `env` the command's whole
+    /// The commands `scoter-host` runs: the project's commands with each
+    /// `program` the host file's (empty without one), each with `program`
+    /// the absolute executable, or `null`, and `env` the command's whole
     /// environment plan: the project's `env` with the command's added, its
     /// `${section:key}` references expanded.  `@NAME@` is left as written,
     /// as it's the environment of the program running the commands.
     pub host_brokered: Vec<Json>,
-    /// The accepted settings `host-brokered` was built from: the verified
-    /// store's file, and its contents; `null` without them.
-    pub accepted_settings: Option<Json>,
-    /// The accepted egress rules, and the gateway they were accepted for;
-    /// `null` without accepted settings.
+    /// The host file `host-brokered` was built from: its `file`, and its
+    /// `contents`; `null` without one.
+    pub host_file: Option<Json>,
+    /// The egress rules the gateway enforces: the configuration's, with the
+    /// setup's gateway; `null` without a host file, so nothing gets out
+    /// without a reviewed configuration.
     pub egress: Option<Json>,
-    /// The user's review file, when given: its `file`, its `result`
-    /// (`accept` or `reject`), and the accepted settings it gives (`null`
-    /// when rejected), which the checks judge before anything is stored.
-    pub review: Option<Json>,
-    /// An earlier acceptance's review file, when given: its `file`, and its
-    /// `data` as the user left it, which a new review starts from.
-    pub previous_review: Option<Json>,
     /// The dev container's `dev-env.yaml`.
     pub dev_container: Option<Json>,
     /// The system setup as read.
@@ -87,6 +82,10 @@ pub struct ActiveConfigLocations {
     /// The project configuration file, if any.
     #[serde(default)]
     pub project_config: Option<String>,
+    /// Where the project file and the project's containers were read from
+    /// (`--config-dir`, or the project files directory).
+    #[serde(default)]
+    pub config_dir: Option<String>,
     /// The project directory: `--project-dir`, or the project file's.
     #[serde(default)]
     pub project_dir: Option<String>,
@@ -102,14 +101,10 @@ pub struct ActiveConfigLocations {
     /// The project's dev container directory.
     #[serde(default)]
     pub dev_container_path: Option<String>,
-    /// The dev container's mounts: the project workspace, and the settings
-    /// directory.
+    /// The host directories mounted in the dev container: the project's
+    /// clone, and the settings directory.
     #[serde(default)]
-    pub dev_container_workspace_dir: Option<String>,
-    /// Where the project is cloned: the workspace, with the project file's
-    /// `container: workspace-subdir`.  Worked out each run.
-    #[serde(default)]
-    pub dev_container_project_dir: Option<String>,
+    pub project_clone_dir: Option<String>,
     #[serde(default)]
     pub dev_container_settings_dir: Option<String>,
     /// The user's setup file found, and the user directory it's in.
@@ -253,12 +248,20 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
         .unwrap_or_default();
     errors.extend(simple_check_problems(system, &resolved));
 
-    // Only the accepted commands run, as accepted: never the project file's.
-    let host_brokered = config
-        .accepted
-        .as_ref()
-        .map(|accepted| accepted.raw_commands.clone())
-        .unwrap_or_default();
+    // Only the configuration's commands with the host file's programs: never
+    // a program found on the `PATH`.  Its egress rules go with it.
+    let (host_brokered, egress) = match (&config.host_file, &config.project) {
+        (Some(host_file), Some(project)) => (
+            brokered(project, &mut errors, |rule| {
+                host_file.path_of(rule.program_name()).map(path_text)
+            }),
+            Some(serde_json::json!({
+                "gateway": system.get(egress::GATEWAY_SECTION, egress::GATEWAY_NAME),
+                "rules": project.egress.iter().map(egress::EgressRule::to_json).collect::<Vec<_>>(),
+            })),
+        ),
+        _ => (Vec::new(), None),
+    };
 
     let current_project_setup = config
         .project
@@ -276,13 +279,13 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
     Ok(Universal {
         active_config_locations: ActiveConfigLocations {
             project_config: location(system::PROJECT_CONFIG),
+            config_dir: location(system::CONFIG_DIR),
             project_dir: location(system::PROJECT_DIR),
             vcs_root: location(system::VCS_ROOT),
             project_id: location(system::PROJECT_ID),
             project_branch: location(system::PROJECT_BRANCH),
             dev_container_path: location(system::DEV_CONTAINER_PATH),
-            dev_container_workspace_dir: location(system::DEV_CONTAINER_WORKSPACE_DIR),
-            dev_container_project_dir: location(system::DEV_CONTAINER_PROJECT_DIR),
+            project_clone_dir: location(system::PROJECT_CLONE_DIR),
             dev_container_settings_dir: location(system::DEV_CONTAINER_SETTINGS_DIR),
             user_setup_file: location(system::USER_SETUP_FILE),
             user_dir: location(system::USER_DIR),
@@ -307,26 +310,8 @@ pub fn build(config: &FullConfig) -> Result<Universal, ConfigErrors> {
             })
         }),
         host_brokered,
-        accepted_settings: config.accepted.as_ref().map(|a| a.to_universal()),
-        egress: config.accepted.as_ref().map(|a| a.egress_universal()),
-        review: config.review.as_ref().map(|review| {
-            let vcs = config.project.as_ref().and_then(|p| p.vcs.as_deref());
-            let gateway = system.get(
-                crate::config::accepted::GATEWAY_SECTION,
-                crate::config::accepted::GATEWAY_NAME,
-            );
-            serde_json::json!({
-                "file": review.file.to_string_lossy(),
-                "result": if review.rejected { "reject" } else { "accept" },
-                "accepted": (!review.rejected).then(|| review.accepted(vcs, gateway.as_deref())),
-            })
-        }),
-        previous_review: config.previous_review.as_ref().map(|review| {
-            serde_json::json!({
-                "file": review.file.to_string_lossy(),
-                "data": review.as_written,
-            })
-        }),
+        host_file: config.host_file.as_ref().map(|h| h.to_universal()),
+        egress,
         dev_container,
         setup: system.setup_record().clone(),
         loaded_from: system.loaded_from().clone(),
@@ -410,6 +395,35 @@ pub(crate) fn yaml_to_json(
     }
 }
 
+/// `host-brokered`: the project's commands as written, each with `program`
+/// what `program_of` gives (`null` for none) and `env` its whole plan.
+fn brokered(
+    project: &crate::config::project::ProjectConfig,
+    errors: &mut Vec<ConfigError>,
+    program_of: impl Fn(&crate::config::project::CommandRule) -> Option<String>,
+) -> Vec<Json> {
+    project
+        .commands
+        .iter()
+        .zip(&project.raw_commands)
+        .enumerate()
+        .map(|(i, (rule, raw))| {
+            let key = index_key("commands", i);
+            let mut entry = match yaml_to_json(raw, &project.path, &key, errors) {
+                Json::Object(entry) => entry,
+                _ => Map::new(),
+            };
+            entry.insert(
+                "program".to_string(),
+                program_of(rule).map_or(Json::Null, Json::String),
+            );
+            let env = serde_json::to_value(&rule.env_plan).expect("only text is stored");
+            entry.insert("env".to_string(), env);
+            Json::Object(entry)
+        })
+        .collect()
+}
+
 /// For tests that need a `host-brokered` list without accepted settings:
 /// the universal configuration, with `host-brokered` made from the
 /// project's commands as they'd be accepted (each program found on the
@@ -421,28 +435,12 @@ pub(crate) fn build_brokering_project(config: &FullConfig) -> Result<Universal, 
         return Ok(universal);
     };
     let mut errors = Vec::new();
-    universal.host_brokered = project
-        .commands
-        .iter()
-        .zip(&project.raw_commands)
-        .enumerate()
-        .map(|(i, (rule, raw))| {
-            let key = index_key("commands", i);
-            let mut entry = match yaml_to_json(raw, &project.path, &key, &mut errors) {
-                Json::Object(entry) => entry,
-                _ => Map::new(),
-            };
-            let program = rule.program.as_deref().unwrap_or(&rule.command);
-            let found = config
-                .system
-                .find_program(program)
-                .map(|p| Json::String(path_text(&p)));
-            entry.insert("program".to_string(), found.unwrap_or(Json::Null));
-            let env = serde_json::to_value(&rule.env_plan).expect("only text is stored");
-            entry.insert("env".to_string(), env);
-            Json::Object(entry)
-        })
-        .collect();
+    universal.host_brokered = brokered(project, &mut errors, |rule| {
+        config
+            .system
+            .find_program(rule.program_name())
+            .map(|p| path_text(&p))
+    });
     if errors.is_empty() {
         Ok(universal)
     } else {
@@ -458,7 +456,7 @@ mod tests {
     use crate::config::{ConfigErrors, LoadOptions, load_all_with_env};
     use std::path::PathBuf;
 
-    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  workspace: /workspace\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\nextra:\n  ratio: 0.5\n  1: one\n";
+    const DEV_ENV: &str = "user: ubuntu\nmounts:\n  project-clone: /workspace\n  persistent-store: /store\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\nextra:\n  ratio: 0.5\n  1: one\n";
 
     #[cfg(unix)]
     fn tool(dir: &TempDir, name: &str) -> PathBuf {
@@ -631,6 +629,10 @@ mod tests {
                                 ("distribution-bin-dir", Some("/opt/scoter/bin".to_string())),
                                 ("distribution-dir", Some("/opt/scoter".to_string())),
                                 ("note", Some(ssh_config.clone())),
+                                (
+                                    "config-dir",
+                                    Some(p(&dir.path().join("proj/.surf-scoter.d")))
+                                ),
                                 (
                                     "project-config",
                                     Some(p(&dir.path().join("proj/.surf-scoter.d/project.yaml")))
@@ -1204,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_container_project_dir() {
+    fn project_clone_mount() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
         dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
@@ -1212,62 +1214,56 @@ mod tests {
             "home/setup.yaml",
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
         );
-        let workspace = dir.path().join("ws");
-        let p = |path: &PathBuf| path.display().to_string();
-        let generate = |project: &str, workspace: Option<&Path>| {
+        let clone = dir.path().join("clone");
+        let load = |project: &str| {
             dir.write("proj/.surf-scoter.d/project.yaml", project);
             let options = LoadOptions {
                 project_dir: Some(dir.path().join("proj")),
-                dev_container_workspace_dir: workspace.map(Path::to_path_buf),
+                project_clone_dir: Some(clone.clone()),
                 ..LoadOptions::default()
             };
             let env = Env {
                 scoter_home: Some(dir.path().join("home")),
                 ..Env::default()
             };
-            build(&load_all_with_env(&options, env).unwrap()).unwrap()
+            load_all_with_env(&options, env)
         };
-        let with_subdir = "container:\n  dev-container-path: ./env\n  workspace-subdir: src/p\n";
+        let with_mount = |path: &str| {
+            format!(
+                "container:\n  dev-container-path: ./env\n  mounts:\n    project-clone: {path}\n"
+            )
+        };
 
-        let universal = generate(with_subdir, Some(&workspace));
-        let expected = p(&workspace.join("src/p"));
-        assert_eq!(
-            universal.active_config_locations.dev_container_project_dir,
-            Some(expected.clone())
-        );
+        // The container's own, without the project's.
+        let config = load("container:\n  dev-container-path: ./env\n").unwrap();
+        assert_eq!(config.mounts().unwrap().project_clone, "/workspace");
+
+        let config = load(&with_mount("/src/p")).unwrap();
+        assert_eq!(config.mounts().unwrap().project_clone, "/src/p");
+        assert_eq!(config.mounts().unwrap().setup, "/setup");
+        let universal = build(&config).unwrap();
         let json: Json = serde_json::from_str(&to_json(&universal)).unwrap();
         assert_eq!(
-            json["resolved"]["scoter"]["paths"]["dev-container-project-dir"],
-            expected
+            json["current-project-setup"]["container"]["mounts"]["project-clone"],
+            "/src/p"
         );
         assert_eq!(
-            json["current-project-setup"]["container"]["workspace-subdir"],
-            "src/p"
+            json["resolved"]["scoter"]["paths"]["project-clone-dir"],
+            clone.display().to_string()
         );
         // `scoter-host` works it out again from the file.
         let file = dir.write("universal.json", &to_json(&universal));
         let again = crate::config::load_universal_with_env(&file, Env::default()).unwrap();
-        assert_eq!(
-            again
-                .system
-                .get(system::SCOTER_SECTION, system::DEV_CONTAINER_PROJECT_DIR),
-            Some(expected)
-        );
+        assert_eq!(again.mounts().unwrap().project_clone, "/src/p");
 
-        // Without a subdir, the workspace itself; without a workspace, none.
-        let without = "container:\n  dev-container-path: ./env\n";
-        assert_eq!(
-            generate(without, Some(&workspace))
-                .active_config_locations
-                .dev_container_project_dir,
-            Some(p(&workspace))
-        );
-        assert_eq!(
-            generate(with_subdir, None)
-                .active_config_locations
-                .dev_container_project_dir,
-            None
-        );
+        // It can't land on, or in, another mount.
+        for path in ["/setup", "/setup/p", "/store/p"] {
+            let message = load(&with_mount(path)).unwrap_err().to_string();
+            assert!(
+                message.contains("container.mounts.project-clone"),
+                "{path}: {message}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1352,256 +1348,178 @@ mod tests {
             errors[0].contains("https://publicsuffix.org/list/public_suffix_list.dat"),
             "{errors:?}"
         );
+    }
 
-        // A wildcard typed in the review is refused the same way.
+    // ---- the host file ----
+
+    /// A project whose configuration (a copy, `copy/`) runs `aws` (as
+    /// `aws-cli`) and `ls`, and options with its host file `host` for them.
+    #[cfg(unix)]
+    fn host_file_project(dir: &TempDir, host: &str) -> (LoadOptions, Env, PathBuf) {
         dir.write(
             "proj/.surf-scoter.d/project.yaml",
             "container:\n  dev-container-path: ./env\n",
         );
-        let review = dir.write(
-            "review.yaml",
-            &format!(
-                "review: \"surf-scoter-review-1\"\nproject-dir: \"{}\"\nexpires-at: \"2999-01-01T00:00:00Z\"\negress:\n  - {{host: \"*.example.com\", protocol: \"tls\"}}\n",
-                dir.path().join("proj").display()
-            ),
+        dir.write("copy/env/Dockerfile", "FROM scratch\n");
+        dir.write("copy/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "copy/project.yaml",
+            "container:\n  dev-container-path: ./env\ncommands:\n  - {command: aws, program: aws-cli, args: [s3, ls]}\n  - {command: aws, program: aws-cli, args: [sts]}\n  - {command: ls, args: []}\n",
         );
-        let reviewed = LoadOptions {
-            review: Some(review),
-            ..options.clone()
-        };
         dir.write(
             "home/setup.yaml",
-            &format!("scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  path-lists:\n    public-suffix-lists: ['{psl}']\n"),
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
         );
-        let errors = error_texts(load_all_with_env(&reviewed, env).unwrap_err());
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].starts_with(
-            "egress[0].host: '*.example.com' would allow every name under `example.com`"
-        ));
-    }
-
-    // ---- accepted settings ----
-
-    /// A project with commands, a verified store, and an accepted settings
-    /// file in it for `program` (written private).
-    #[cfg(unix)]
-    fn accepted_project(
-        dir: &TempDir,
-        program: &str,
-        expires: &str,
-    ) -> (LoadOptions, Env, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
-        dir.write(
-            "proj/.surf-scoter.d/project.yaml",
-            "container:\n  dev-container-path: ./env\ncommands:\n  - {command: unreviewed, args: []}\n",
-        );
-        let verified = dir.path().join("verified");
-        dir.write(
-            "home/setup.yaml",
-            &format!(
-                "verification:\n  paths:\n    store: {}\nscoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
-                verified.display()
-            ),
-        );
-        let accepted = dir.write(
-            "verified/env-1/acceptances/a1/accepted.json",
-            &format!(
-                r#"{{"$schema": "surf-scoter-accepted-settings-1", "project-dir": "{}", "expires-at": "{expires}",
-                    "vcs": null, "gateway": null,
-                    "egress": [{{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}}],
-                    "commands": [{{"command": "aws", "program": "{program}", "args": ["s3", "ls"],
-                        "env": {{"allow": [], "drop": [], "error": [], "set": {{}}, "default": {{}}}}}}]}}"#,
-                dir.path().join("proj").display()
-            ),
-        );
-        for path in [&verified, &accepted] {
-            let mode = if path.is_dir() { 0o700 } else { 0o600 };
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
+        let file = dir.write("host.json", host);
         let options = LoadOptions {
             project_dir: Some(dir.path().join("proj")),
-            accepted_settings: Some(accepted.clone()),
+            config_dir: Some(dir.path().join("copy")),
+            host_file: Some(file.clone()),
             ..LoadOptions::default()
         };
         let env = Env {
             scoter_home: Some(dir.path().join("home")),
             ..Env::default()
         };
-        (options, env, accepted)
+        (options, env, file)
+    }
+
+    #[cfg(unix)]
+    fn host_json(entries: &[(&str, &Path)]) -> String {
+        let programs: Map<String, Json> = entries
+            .iter()
+            .map(|(name, path)| {
+                (
+                    name.to_string(),
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "real": path.canonicalize().unwrap_or(path.to_path_buf()).display().to_string(),
+                        "origin": "resolved",
+                    }),
+                )
+            })
+            .collect();
+        serde_json::json!({"$schema": crate::config::host_file::SCHEMA, "programs": programs})
+            .to_string()
     }
 
     #[cfg(unix)]
     #[test]
-    fn host_brokered_from_accepted() {
+    fn host_brokered_from_host_file() {
         let dir = TempDir::new();
         let aws = tool(&dir, "bin/aws");
-        let (options, env, accepted) =
-            accepted_project(&dir, &aws.display().to_string(), "2999-01-01T00:00:00Z");
-        let config = load_all_with_env(&options, env).unwrap();
+        let ls = tool(&dir, "bin/ls");
+        let host = host_json(&[("aws-cli", &aws), ("ls", &ls)]);
+        let (options, env, file) = host_file_project(&dir, &host);
+        let config = load_all_with_env(&options, env.clone()).unwrap();
         let universal = build(&config).unwrap();
-        assert_eq!(universal.host_brokered.len(), 1);
-        assert_eq!(universal.host_brokered[0]["command"], "aws");
+        let programs: Vec<&Json> = universal
+            .host_brokered
+            .iter()
+            .map(|c| &c["program"])
+            .collect();
+        let (aws, ls) = (aws.display().to_string(), ls.display().to_string());
         assert_eq!(
-            universal.host_brokered[0]["program"],
-            aws.display().to_string()
-        );
-        let settings = universal.accepted_settings.as_ref().unwrap();
-        assert_eq!(settings["file"], accepted.display().to_string());
-        assert_eq!(settings["contents"]["commands"][0]["command"], "aws");
-        let egress = universal.egress.as_ref().unwrap();
-        assert_eq!(egress["rules"][0]["host"], "registry.npmjs.org");
-        // The project's own commands are only a record.
-        assert_eq!(
-            universal.current_project_setup.as_ref().unwrap()["commands"][0]["command"],
-            "unreviewed"
-        );
-        // Without accepted settings, there's neither.
-        let plain = load(&dir, None, "a:\n  paths:\n    x: /x\n");
-        let universal = build(&plain).unwrap();
-        assert!(universal.accepted_settings.is_none() && universal.egress.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepted_checked_against_run() {
-        let dir = TempDir::new();
-        let in_project = tool(&dir, "proj/tool");
-        let (options, env, _) = accepted_project(
-            &dir,
-            &in_project.display().to_string(),
-            "2999-01-01T00:00:00Z",
-        );
-        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(
-            errors[0].starts_with("commands[0].program: ")
-                && errors[0].contains("is in the project"),
-            "{errors:?}"
-        );
-        let (options, env, _) = accepted_project(&dir, "/nonexistent/aws", "2999-01-01T00:00:00Z");
-        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
-        assert!(
-            errors[0].contains("isn't an executable file any more"),
-            "{errors:?}"
-        );
-        // Accepted for another project.
-        let aws = tool(&dir, "bin/aws");
-        let (mut options, env, _) =
-            accepted_project(&dir, &aws.display().to_string(), "2999-01-01T00:00:00Z");
-        std::fs::create_dir_all(dir.path().join("other/.surf-scoter.d/env")).unwrap();
-        dir.write("other/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
-        dir.write("other/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
-        dir.write(
-            "other/.surf-scoter.d/project.yaml",
-            "container:\n  dev-container-path: ./env\n",
-        );
-        options.project_dir = Some(dir.path().join("other"));
-        let errors = error_texts(load_all_with_env(&options, env).unwrap_err());
-        assert!(
-            errors[0].starts_with("project-dir: ")
-                && errors[0].contains("accepted for another project"),
-            "{errors:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepted_for_another_gateway() {
-        let dir = TempDir::new();
-        let aws = tool(&dir, "bin/aws");
-        let (options, env, accepted) =
-            accepted_project(&dir, &aws.display().to_string(), "2999-01-01T00:00:00Z");
-        let text = std::fs::read_to_string(&accepted).unwrap();
-        std::fs::write(
-            &accepted,
-            text.replace(r#""gateway": null"#, r#""gateway": "squid""#),
-        )
-        .unwrap();
-        // The setup names no gateway: not the one accepted.
-        let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
-        assert_eq!(
-            errors,
+            programs,
             [
-                "gateway: the egress rules were accepted for the `squid` gateway, but this setup's is `none`; review the project again"
+                &Json::String(aws.clone()),
+                &Json::String(aws),
+                &Json::String(ls.clone())
             ]
         );
-        // The same gateway is fine.
-        let setup = std::fs::read_to_string(dir.path().join("home/setup.yaml")).unwrap();
-        dir.write(
-            "home/setup.yaml",
-            &format!("{setup}dev-env:\n  values:\n    network-gateway-name: squid\n"),
+        assert_eq!(universal.host_brokered[1]["args"][0], "sts");
+        assert!(universal.host_brokered[0]["env"].is_object());
+        let host_file = universal.host_file.as_ref().unwrap();
+        assert_eq!(host_file["file"], file.display().to_string());
+        assert_eq!(
+            host_file["contents"]["programs"]["ls"]["origin"],
+            "resolved"
         );
-        assert!(load_all_with_env(&options, env).is_ok());
+        // The gateway's rules are the configuration's (none here).
+        assert_eq!(
+            universal.egress.as_ref().unwrap()["rules"],
+            Json::Array(vec![])
+        );
+
+        // `scoter-host` reads it back, and checks the programs again.
+        let suc = dir.write("suc.json", &to_json(&universal));
+        let loaded = crate::config::load_universal_with_env(&suc, env).unwrap();
+        assert_eq!(loaded.host_file, config.host_file);
+        assert_eq!(
+            loaded.project.as_ref().unwrap().commands[2]
+                .program
+                .as_deref(),
+            Some(ls.as_str())
+        );
+        let private = |mode: u32| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&suc, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        private(0o644);
+        let problems = crate::config::host_file::check_for_run(&suc, loaded.host_file.as_ref());
+        assert!(
+            problems[0].to_string().contains("others can use it"),
+            "{problems:?}"
+        );
+        private(0o600);
+        assert!(
+            crate::config::host_file::check_for_run(&suc, loaded.host_file.as_ref()).is_empty()
+        );
+        std::fs::remove_file(dir.path().join("bin/ls")).unwrap();
+        let problems = crate::config::host_file::check_for_run(&suc, loaded.host_file.as_ref());
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0]
+                .to_string()
+                .contains("isn't an executable file any more")
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn scoter_host_start_checks() {
-        use crate::config::accepted::{check_for_run, parse_time};
-        use std::os::unix::fs::PermissionsExt;
+    fn host_file_checked() {
         let dir = TempDir::new();
         let aws = tool(&dir, "bin/aws");
-        let (options, env, accepted) =
-            accepted_project(&dir, &aws.display().to_string(), "2030-01-01T00:00:00Z");
-        let first = build(&load_all_with_env(&options, env).unwrap()).unwrap();
-        let file = dir.write("suc.json", &to_json(&first));
-        let private = |path: &Path, mode: u32| {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        let in_project = tool(&dir, "proj/tools/ls");
+        let errors = |host: &str, change: &dyn Fn(&mut LoadOptions)| {
+            let (mut options, env, _) = host_file_project(&dir, host);
+            change(&mut options);
+            error_texts(load_all_with_env(&options, env).unwrap_err())
         };
-        private(&file, 0o600);
-        let loaded = crate::config::load_universal_with_env(&file, Env::default()).unwrap();
-        let check = |now: i64| -> Vec<String> {
-            check_for_run(&file, loaded.accepted.as_ref(), &loaded.system, now)
-                .into_iter()
-                .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
-                .collect()
-        };
-        let before = parse_time("2029-01-01T00:00:00Z").unwrap();
-        assert_eq!(check(before), Vec::<String>::new());
-        // Expired by the time it starts.
-        let after = parse_time("2030-01-01T00:00:00Z").unwrap();
-        assert_eq!(
-            check(after),
-            ["accepted-settings: the acceptance has expired; review the project again"]
-        );
-        // The universal file must be private.
-        private(&file, 0o644);
+        let same = |_: &mut LoadOptions| {};
+
+        // A program the commands run is missing; one they don't is listed.
+        let found = errors(&host_json(&[("aws-cli", &aws), ("extra", &aws)]), &same);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("has no `ls`"), "{found:?}");
         assert!(
-            check(before)[0].contains("others can use it"),
-            "{:?}",
-            check(before)
+            found[1].contains("programs.extra") && found[1].contains("isn't a program"),
+            "{found:?}"
         );
-        private(&file, 0o600);
-        // The store's file changed (or was revoked).
-        let original = std::fs::read_to_string(&accepted).unwrap();
-        std::fs::write(&accepted, original.replace("s3", "s4")).unwrap();
+
+        // Never a program from the project.
+        let found = errors(&host_json(&[("aws-cli", &aws), ("ls", &in_project)]), &same);
+        assert_eq!(found.len(), 1, "{found:?}");
         assert!(
-            check(before)[0].contains("no longer says what this file does"),
-            "{:?}",
-            check(before)
+            found[0].contains("is in the project (`scoter:project-dir`)"),
+            "{found:?}"
         );
-        std::fs::remove_file(&accepted).unwrap();
+
+        // A path that's now another file.
+        let host = host_json(&[("aws-cli", &aws), ("ls", &aws)]).replacen(
+            &format!("\"real\":\"{}\"", aws.display()),
+            "\"real\":\"/elsewhere/aws\"",
+            1,
+        );
+        let found = errors(&host, &same);
+        assert!(found.iter().any(|e| e.contains("is now")), "{found:?}");
+
+        // It goes with a configuration.
+        let fine = host_json(&[("aws-cli", &aws), ("ls", &aws)]);
+        let found = errors(&fine, &|o| o.config_dir = None);
         assert!(
-            check(before)[0].starts_with("accepted-settings: "),
-            "{:?}",
-            check(before)
-        );
-        std::fs::write(&accepted, &original).unwrap();
-        private(&accepted, 0o644);
-        assert!(
-            check(before)[0].contains("others can use it"),
-            "{:?}",
-            check(before)
-        );
-        private(&accepted, 0o600);
-        assert_eq!(check(before), Vec::<String>::new());
-        // The dev container went away.
-        std::fs::remove_dir_all(dir.path().join("proj/.surf-scoter.d/env")).unwrap();
-        assert_eq!(
-            check(before),
-            ["active-config-locations.dev-container-path: the dev container directory is gone"]
+            found.iter().any(|e| e.contains("needs the configuration")),
+            "{found:?}"
         );
     }
 
@@ -1695,7 +1613,7 @@ mod tests {
         );
         dir.write(
             "home/setup.yaml",
-            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nworkspace:\n  paths:\n    per-branch: /w/${scoter:project-id}/${scoter:project-branch}\n",
+            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nproject-state:\n  paths:\n    per-branch: /w/${scoter:project-id}/${scoter:project-branch}\n",
         );
         let env = || Env {
             scoter_home: Some(dir.path().join("home")),
@@ -1712,7 +1630,7 @@ mod tests {
         assert_eq!(active.project_id.as_deref(), Some(id.as_str()));
         assert_eq!(active.project_branch.as_deref(), Some("feature-..-x"));
         assert_eq!(
-            universal.resolved["workspace"].paths["per-branch"],
+            universal.resolved["project-state"].paths["per-branch"],
             Some(format!("/w/{id}/feature-..-x"))
         );
         // Carried over by a later run from the universal file.
@@ -1760,260 +1678,5 @@ mod tests {
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n    project-id: mine\n",
         );
         assert!(load_all_with_env(&options, env()).is_err());
-    }
-
-    // ---- review files ----
-
-    #[test]
-    fn review_into_universal_file() {
-        let dir = TempDir::new();
-        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
-        dir.write(
-            "proj/.surf-scoter.d/project.yaml",
-            "container:\n  dev-container-path: ./env\nvcs: git\n",
-        );
-        dir.write("mine/my-env/Dockerfile", "FROM scratch\n");
-        dir.write("mine/my-env/dev-env.yaml", DEV_ENV);
-        dir.write(
-            "home/setup.yaml",
-            &format!(
-                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}']\ndev-env:\n  values:\n    network-gateway-name: squid\n",
-                dir.path().join("mine").display()
-            ),
-        );
-        let project = dir.path().join("proj").display().to_string();
-        let write_review = |body: &str| {
-            dir.write(
-                "review.yaml",
-                &format!("review: \"surf-scoter-review-1\"\nproject-dir: \"{project}\"\n{body}"),
-            )
-        };
-        let load_with = |review: &Path| {
-            let options = LoadOptions {
-                project_dir: Some(dir.path().join("proj")),
-                review: Some(review.to_path_buf()),
-                ..LoadOptions::default()
-            };
-            let env = Env {
-                scoter_home: Some(dir.path().join("home")),
-                ..Env::default()
-            };
-            load_all_with_env(&options, env)
-        };
-        let review = write_review(concat!(
-            "expires-at: \"2999-01-01T00:00:00Z\"\n",
-            "commands:\n  - {command: \"aws\", program: \"/usr/local/bin/aws\", args: [\"s3\", \"ls\"]}\n",
-            "dev-container:\n  use: {name: \"my-env\"}\n",
-        ));
-        let universal = build(&load_with(&review).unwrap()).unwrap();
-        let section = universal.review.unwrap();
-        assert_eq!(section["result"], "accept");
-        assert_eq!(section["accepted"]["vcs"], "git");
-        assert_eq!(section["accepted"]["gateway"], "squid");
-        assert_eq!(
-            section["accepted"]["commands"][0]["program"],
-            "/usr/local/bin/aws"
-        );
-        assert_eq!(
-            section["accepted"]["dev-container"]["use"]["name"],
-            "my-env"
-        );
-        // A review isn't accepted settings: nothing runs from it.
-        assert!(universal.host_brokered.is_empty());
-
-        let rejected = write_review("result: reject\n");
-        let section = build(&load_with(&rejected).unwrap())
-            .unwrap()
-            .review
-            .unwrap();
-        assert_eq!(section["result"], "reject");
-        assert_eq!(section["accepted"], Json::Null);
-
-        let wrong = dir.write(
-            "wrong.yaml",
-            "review: \"surf-scoter-review-1\"\nproject-dir: \"/elsewhere\"\nexpires-at: \"2000-01-01T00:00:00Z\"\ndev-container:\n  use: {name: \"nope\"}\n",
-        );
-        assert_eq!(
-            error_texts(load_with(&wrong).unwrap_err()),
-            [
-                "project-dir: isn't this run's project; leave it as the review gave it",
-                "expires-at: must be in the future",
-                "dev-container.use: there's no container 'nope' in your `dev-containers-search` directories outside the project",
-            ]
-        );
-    }
-
-    #[test]
-    fn previous_review_as_written() {
-        let dir = TempDir::new();
-        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
-        dir.write(
-            "proj/.surf-scoter.d/project.yaml",
-            "container:\n  dev-container-path: ./env\n",
-        );
-        dir.write(
-            "home/setup.yaml",
-            "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
-        );
-        // Expired, and for a directory that isn't this run's: neither matters here.
-        let previous = dir.write(
-            "previous.yaml",
-            concat!(
-                "review: \"surf-scoter-review-1\"\n",
-                "project-dir: \"/elsewhere\"\n",
-                "expires-at: \"2000-01-01T00:00:00Z\"\n",
-                "$comment: \"for the release\"\n",
-                "egress:\n  - {host: \"github.com\", protocol: \"tls\", $comment: \"read only\"}\n",
-                "commands:\n  - {command: \"sh\", program: \"/bin/sh\", args: [\"-c\", {any: {}}], $override: [\"verification:shells\"]}\n",
-            ),
-        );
-        let load_with = |file: &Path| {
-            let options = LoadOptions {
-                project_dir: Some(dir.path().join("proj")),
-                previous_review: Some(file.to_path_buf()),
-                ..LoadOptions::default()
-            };
-            let env = Env {
-                scoter_home: Some(dir.path().join("home")),
-                ..Env::default()
-            };
-            load_all_with_env(&options, env)
-        };
-        let universal = build(&load_with(&previous).unwrap()).unwrap();
-        let section = universal.previous_review.unwrap();
-        assert_eq!(section["file"], previous.display().to_string());
-        let data = &section["data"];
-        assert_eq!(data["$comment"], "for the release");
-        assert_eq!(data["egress"][0]["$comment"], "read only");
-        assert_eq!(data["commands"][0]["$override"][0], "verification:shells");
-        // Nothing is accepted from it.
-        assert!(universal.review.is_none());
-        assert!(universal.host_brokered.is_empty());
-        // It's still parsed as a review is.
-        let broken = dir.write("broken.yaml", "review: \"surf-scoter-review-1\"\nproject-dir: \"/p\"\nexpires-at: \"2000-01-01T00:00:00Z\"\nmystery: 1\n");
-        assert_eq!(
-            error_texts(load_with(&broken).unwrap_err()),
-            ["mystery: unknown key"]
-        );
-    }
-
-    // ---- the accepted settings' container ----
-
-    /// A project, the user's containers in `mine` (searched after the
-    /// project's own files directory, as the default setup does), and
-    /// accepted settings with `dev_container`.
-    #[cfg(unix)]
-    fn accepted_container(dir: &TempDir, dev_container: &str) -> Result<FullConfig, ConfigErrors> {
-        use std::os::unix::fs::PermissionsExt;
-        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
-        // The same names as the user's, in the project: never used for them.
-        dir.write("proj/.surf-scoter.d/my-env/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/my-env/dev-env.yaml", "user: project\n");
-        dir.write("proj/.surf-scoter.d/base/Dockerfile", "FROM scratch\n");
-        dir.write("proj/.surf-scoter.d/base/dev-env.yaml", "user: project\n");
-        dir.write(
-            "proj/.surf-scoter.d/project.yaml",
-            "container:\n  dev-container-path: ./env\n",
-        );
-        dir.write("mine/base/Dockerfile", "FROM scratch\n");
-        dir.write("mine/base/dev-env.yaml", DEV_ENV);
-        dir.write("mine/my-env/Dockerfile", "FROM base\n");
-        dir.write(
-            "mine/my-env/dev-env.yaml",
-            "user: me\nparents:\n  - {name: base, tag: my-base}\n",
-        );
-        let project = dir.path().join("proj");
-        dir.write(
-            "home/setup.yaml",
-            &format!(
-                "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n  path-lists:\n    dev-containers-search: ['{}/.surf-scoter.d', '{}']\n",
-                project.display(),
-                dir.path().join("mine").display()
-            ),
-        );
-        let accepted = dir.write(
-            "verified/env-1/acceptances/a1/accepted.json",
-            &format!(
-                r#"{{"$schema": "surf-scoter-accepted-settings-1", "project-dir": "{}", "expires-at": "2999-01-01T00:00:00Z",
-                    "vcs": null, "gateway": null, "egress": [], "commands": [], "dev-container": {dev_container}}}"#,
-                project.display()
-            ),
-        );
-        for path in [&dir.path().join("verified"), &accepted] {
-            let mode = if path.is_dir() { 0o700 } else { 0o600 };
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
-        let options = LoadOptions {
-            project_dir: Some(project),
-            accepted_settings: Some(accepted),
-            ..LoadOptions::default()
-        };
-        let env = Env {
-            scoter_home: Some(dir.path().join("home")),
-            ..Env::default()
-        };
-        load_all_with_env(&options, env)
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepted_users_container() {
-        let dir = TempDir::new();
-        let config =
-            accepted_container(&dir, r#"{"use": {"name": "my-env"}, "images": {}}"#).unwrap();
-        let universal = build(&config).unwrap();
-        let mine = dir.path().join("mine");
-        assert_eq!(
-            universal.active_config_locations.dev_container_path,
-            Some(mine.join("my-env").display().to_string())
-        );
-        let dev = universal.dev_container.unwrap();
-        assert_eq!(dev["user"], "me");
-        // Its parent is the user's too, not the project's `base`.
-        assert_eq!(
-            dev["parent-builds"][0]["dir"],
-            mine.join("base").display().to_string()
-        );
-        // The project file is still the project's.
-        assert_eq!(
-            universal.current_project_setup.unwrap()["container"]["dev-container-path"],
-            "./env"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepted_projects_container() {
-        let dir = TempDir::new();
-        let config = accepted_container(&dir, r#"{"use": "project", "images": {}}"#).unwrap();
-        let universal = build(&config).unwrap();
-        assert_eq!(
-            universal.active_config_locations.dev_container_path,
-            Some(
-                dir.path()
-                    .join("proj/.surf-scoter.d/env")
-                    .display()
-                    .to_string()
-            )
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepted_users_not_in_project() {
-        let dir = TempDir::new();
-        // `env` is only in the project: not one of the user's.
-        let errors = error_texts(
-            accepted_container(&dir, r#"{"use": {"name": "env"}, "images": {}}"#).unwrap_err(),
-        );
-        assert_eq!(
-            errors,
-            [
-                "dev-container.use: there's no container 'env' in your `dev-containers-search` directories outside the project"
-            ]
-        );
     }
 }

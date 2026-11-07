@@ -1,11 +1,11 @@
 #SPDX:MIT
-"""The verified store: the user's accepted project settings."""
+"""The verified store: the user's locked configurations, and each environment's link to them."""
 
 __all__ = [
+    "configs",
     "lookup",
-    "records",
     "snapshot",
     "store",
 ]
 
-from . import lookup, records, snapshot, store
+from . import configs, lookup, snapshot, store

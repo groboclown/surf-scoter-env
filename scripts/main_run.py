@@ -1,15 +1,20 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: run"""
+"""Start a dev environment for this project.
+
+A Surf Scoter sub-command.
+"""
 import argparse
 import contextlib
 import datetime
 import json
 import os
+import re
 import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from surf_scoter_lib import (
@@ -21,13 +26,15 @@ from surf_scoter_lib import (
     gen_parser,
     generator,
     jdata,
+    persistent_store,
+    review,
+    run_config,
     setup_check,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
-from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr, VerifiedStoreErr
+from surf_scoter_lib.err import ActiveEnvErr, ConfigErr, SurfScoterErr
 from surf_scoter_lib.user_config import Capture, OnError
-from surf_scoter_lib.verified import lookup, staging
 
 # The network gateway's configuration, in the resources directory.
 GATEWAY_CONFIG_FILE = "gateway-config"
@@ -35,76 +42,106 @@ GATEWAY_CONFIG_FILE = "gateway-config"
 # Where scoter-host's copy of the configuration goes, under `scoter: paths: state-dir`.
 SUC_COPY_DIR = "environments"
 SUC_COPY_FILE = "suc.json"
-# The accepted copy of the project's files, staged to build from, beside it.
-BUILD_DIR = "build"
+# The configuration in use, staged to build from, under `scoter: paths: state-dir`.
+STAGED_PREFIX = "staged-"
 
 # The mode of the files in the settings directory the dev container mounts.
 MODE_SETTINGS_FILE = 0o666
+# The project's bundle: only read, by the container's user, whatever id it has.
+MODE_BUNDLE_FILE = 0o644
 # How often to check whether the dev container started.
 CONTAINER_POLL_SECONDS = 1.0
 # `inspect-container`'s exit code while the container isn't there yet.
 EXIT_CONTAINER_NOT_FOUND = 125
 
+# What a single-quoted value in the compose `.env` file can't hold: a control
+# character (a newline adds a line, DEV-2), the closing quote, or the escapes
+# python-dotenv (podman-compose) decodes inside single quotes.  Inside single
+# quotes, `$` and `#` are text.  The project's values, the mount points, are
+# also held to `CONTAINER_PATH`, as the generator holds them.
+ENV_VALUE_REFUSED = re.compile(r"[\x00-\x1f\x7f']|\\[\\']")
+# A container mount point, as the generator checks it.
+CONTAINER_PATH = re.compile(r"(/[A-Za-z0-9._-]+)+")
+
+@dataclass(frozen=True)
+class BuildPlan:
+    """What to build the dev container from."""
+
+    dev_container: Path
+    # The local parents, lowest first: (tag, directory).
+    parents: list[tuple[str, Path]]
+
+
 # ---------------------------------------------------------------------
 # Start and manage a dev environment.
 
 
-def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
-    """Start the dev environment."""
-    # Nothing runs from a project the user hasn't accepted: not its host
-    # commands, its egress rules, or its container.
-    if config.accepted_settings_file() is None:
-        print(_why_not_accepted(config), file=sys.stderr)
-        print("Run `scoter verify` to review them, then run again.", file=sys.stderr)
+def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
+    """Start the dev environment, from the configuration in use."""
+    # Not with a setup program a project, or another user, could supply.
+    if not _setup_programs_ok(found_config):
         return 1
-    # Nor with a setup program a project, or another user, could supply.
-    if not _setup_programs_ok(config):
+    # Nothing runs but the configuration in use, staged: not the project's
+    # live files, its host commands or its egress rules.
+    prepared = _prepare(found_config)
+    if prepared is None:
         return 1
-    # Under an exemption, the project file and `dev-env.yaml` files count as
-    # accepted, not as they are now: before anything reads them.
-    if not _adopt_accepted(config):
-        return 1
+    config = prepared.config
+    staged = prepared.staged
     vcs_section = config.get_vcs_section()
 
     # The environment is named by the project: one run of it at a time.
-    host = ssh_hosts.host_name(config)
+    try:
+        host = ssh_hosts.host_name(config)
+    except ConfigErr as err:
+        print(err, file=sys.stderr)
+        fileutil.rm(staged)
+        return 1
 
     # Reserve the host in the .ssh/config file.
     if not reserve_ssh_host(config, host):
+        fileutil.rm(staged)
         return 1
 
     # When complete, with failure or not, clean up the ssh host file.
     try:
-        # -- Stage the accepted copy of the project's files to build from.
-        plan = _stage_accepted(config, host)
-        if plan is None:
-            _release(config, host)
-            return 1
+        # A run that crashed may have left its directory behind.
+        _remove_environment_dir(config, host)
+        plan = BuildPlan(
+            config.require_active_location("dev-container-path"), config.dev_container_parent_builds(),
+        )
 
         # -- Build the containers
         image_tags = _build_containers(config, host, plan) # (dev-env, firewall, gateway)
         if not image_tags:
             _release(config, host)
+            fileutil.rm(staged)
             return 1
 
         # Remember to mark the work directories as ignored.
 
-        # -- workspace directory
         # Its parent first: by default in `state-dir`, so only yours.
-        _make_work_parent(config)
-        # Setup the workspace directory via the vcs command.
-        workspace_dir = _setup_workspace(
-            config, vcs_section, args.clean_workspace, args.workspace_fetch
-        )
-        _ignore_directory(config, vcs_section, workspace_dir)
+        _make_state_dir(config)
 
-        # -- settings directory
+        # -- settings directory (before the clone: it holds the clone's bundle)
         setup_dir = config.active_location("dev-container-settings-dir")
         if setup_dir is None:
-            setup_dir = config.require_path("workspace", "setup-dir")
+            setup_dir = config.require_path("project-state", "setup-dir")
             config.set_active_location("dev-container-settings-dir", setup_dir)
         setup_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, setup_dir)
+
+        # -- the project's clone
+        clone_dir = _setup_project_clone(
+            config, vcs_section, args.clean_project_clone, args.project_fetch, setup_dir,
+        )
+        _ignore_directory(config, vcs_section, clone_dir)
+
+        # -- the persistent store
+        volume = persistent_store.volume_name(config)
+        if args.clean_persistent_store:
+            persistent_store.remove(config, volume)
+        persistent_store.create(config, volume)
 
         # Write the authorized keys file.
         key_file = config.require_path("ssh", "key-file")
@@ -136,7 +173,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
             inp.write("\n".join(config.project_bridge_commands()))
 
         # -- resources directory
-        resources_dir = config.require_path("workspace", "resources-dir")
+        resources_dir = config.require_path("project-state", "resources-dir")
         resources_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, resources_dir)
 
@@ -146,7 +183,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
         # Setup the .env file in the resources directory.
         _write_compose_env_file(
             config=config, file=resources_dir / defaults.COMPOSE_ENV_FILENAME,
-            host=host, workspace_dir=workspace_dir,
+            host=host, clone_dir=clone_dir, volume=volume,
             settings_dir=setup_dir, gateway_config=gateway_config,
         )
 
@@ -174,7 +211,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
 
                 project_dir=str(config.require_active_location("project-dir")),
                 resources_dir=str(resources_dir),
-                workspace_dir=str(workspace_dir),
+                project_clone_dir=str(clone_dir),
                 setup_dir=str(setup_dir),
                 compose_file=str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
                 compose_env_file=str(resources_dir / defaults.COMPOSE_ENV_FILENAME),
@@ -187,6 +224,7 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     except BaseException:
         print("Aborting execution.", file=sys.stderr)
         _release(config, host)
+        fileutil.rm(staged)
         raise
 
     # -- start the containers
@@ -250,14 +288,15 @@ def run_env_runner(config: UserConfig, args: argparse.Namespace) -> int:
     # Its ssh entries, as `ssh: values: config-cleanup` says.
     _release_ssh(config, host)
 
-    # scoter-host's copy of the configuration.
+    # scoter-host's copy of the configuration, and the staged configuration.
     fileutil.rm(universal_config_file.parent)
+    fileutil.rm(staged)
 
     # Clean up the setup and resource directories.
     # ... currently kept to help debugging.
     #fileutil.rm(setup_dir)
     #fileutil.rm(resources_dir)
-    # Keep the 'workspace' directory, though.
+    # Keep the project's clone and its persistent store, though.
 
     return 1 if failed else 0
 
@@ -290,12 +329,25 @@ def reserve_ssh_host(config: UserConfig, host: str) -> bool:
         print(err, file=sys.stderr)
         return False
 
-def _why_not_accepted(config: UserConfig) -> str:
-    """Why no acceptance holds for the project; the plain reason if that can't be told."""
+def _prepare(found_config: UserConfig) -> run_config.Prepared | None:
+    """Stage the configuration in use, and make the run's configuration; None, having said why, if it can't."""
+    state_dir = found_config.require_path("scoter", "state-dir")
+    state_dir.mkdir(mode=fileutil.MODE_USER_RWX, parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=STAGED_PREFIX, dir=state_dir))
     try:
-        return lookup.no_match_reason(config)
-    except (OSError, ValueError, SurfScoterErr):
-        return "You haven't accepted this project's settings."
+        prepared = run_config.prepare(found_config, staged, generate=generator.run)
+    except (OSError, SurfScoterErr) as err:
+        fileutil.rm(staged)
+        print(review.clean(str(err)) if not isinstance(err, run_config.RunRefused) else str(err), file=sys.stderr)
+        return None
+    except BaseException:
+        fileutil.rm(staged)
+        raise
+    for line in prepared.warnings:
+        print(f"Warning: {line}", file=sys.stderr)
+    for line in prepared.notices:
+        print(line, file=sys.stderr)
+    return prepared
 
 
 def _setup_programs_ok(config: UserConfig) -> bool:
@@ -352,60 +404,8 @@ def _remove_environment_dir(config: UserConfig, host: str | None) -> None:
         fileutil.rm(_environment_dir(config, host))
 
 
-def _adopt_accepted(config: UserConfig) -> bool:
-    """Under an exemption, give the run the accepted project file's and `dev-env.yaml`s' settings.
-
-    False, having said why, if they can't be read.
-    """
-    state_dir = config.require_path("scoter", "state-dir")
-    state_dir.mkdir(mode=fileutil.MODE_USER_RWX, parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix="exempt-", dir=state_dir))
-    try:
-        staging.adopt_accepted(config, directory, generator.run, datetime.datetime.now(datetime.UTC))
-    except staging.StagingErr as err:
-        print(err, file=sys.stderr)
-        if err.reverify:
-            print("Run `scoter verify` to review the project's settings, then run again.", file=sys.stderr)
-        return False
-    except (OSError, VerifiedStoreErr) as err:
-        print(f"Couldn't read the accepted copy of the project's files: {err}", file=sys.stderr)
-        return False
-    finally:
-        fileutil.rm(directory)
-    return True
-
-
-def _stage_accepted(config: UserConfig, host: str) -> staging.BuildPlan | None:
-    """Stage the accepted copy of the project's files; None, having said why, if it can't be."""
-    directory = _environment_dir(config, host)
-    # A run that crashed may have left one behind.
-    fileutil.rm(directory)
-    build_dir = fileutil.private_dir(
-        config.require_path("scoter", "state-dir"), (SUC_COPY_DIR, host, BUILD_DIR),
-    )
-    try:
-        plan = staging.prepare(
-            config, build_dir, generator.run, datetime.datetime.now(datetime.UTC),
-        )
-    except staging.StagingErr as err:
-        print(err, file=sys.stderr)
-        if err.reverify:
-            print(
-                "Run `scoter verify` to review the project's settings, then run again.",
-                file=sys.stderr
-            )
-        plan = None
-    except (OSError, VerifiedStoreErr) as err:
-        print(f"Couldn't stage the accepted copy of the project's files: {err}", file=sys.stderr)
-        plan = None
-    if plan is None:
-        # `prepare` gives None only without accepted settings, checked at the start.
-        fileutil.rm(directory)
-    return plan
-
-
 def _build_containers(
-    config: UserConfig, host: str, plan: staging.BuildPlan,
+    config: UserConfig, host: str, plan: BuildPlan,
 ) -> tuple[str, str, str] | None:
     # Build the dev-env container + firewall-router + network-gateway.
     ret = (
@@ -413,8 +413,8 @@ def _build_containers(
         config.require_value("dev-env", "firewall-router-image"),
         config.require_value("dev-env", "network-gateway-image"),
     )
-    # The dev-env's local parents come first, lowest first.  The project's
-    # build from the accepted copy (`plan`), never the live files.
+    # The dev-env's local parents come first, lowest first.  The
+    # configuration's build from its staged copy (`plan`), never the live files.
     containers: list[tuple[str, str, Path | None]] = [
         ("dev-env parent", tag, path)
         for tag, path in plan.parents
@@ -449,6 +449,7 @@ def _build_containers(
             template={
                 "tag": tag,
                 "dir": str(path),
+                "dockerfile": str(Path(path) / "Dockerfile"),
             },
         )
         # TODO write the stderr + stdout to a file in the resources directory
@@ -513,58 +514,113 @@ def _wait_for_container(config: UserConfig, host: str, timeout_sec: float) -> bo
     return False
 
 
-def _setup_workspace(
-    config: UserConfig,
-    vcs_section: str | None,
-    clean_workspace: bool,
-    workspace_fetch: bool
+def _setup_project_clone(
+    config: UserConfig, vcs_section: str | None, clean: bool, fetch: bool, setup_dir: Path,
 ) -> Path:
-    # Setup the workspace's cloned project directory.
-    workspace_dir = config.active_location("dev-container-workspace-dir")
-    if workspace_dir is None:
-        workspace_dir = config.require_path("workspace", "workspace-dir")
-        config.set_active_location("dev-container-workspace-dir", workspace_dir)
-    clone_project_dir = config.active_location("dev-container-project-dir")
-    if clone_project_dir is None:
-        clone_project_dir = workspace_dir
-        workspace_subdir = config.project_str("container", "workspace-subdir")
-        if workspace_subdir:
-            clone_project_dir = clone_project_dir / workspace_subdir
-        config.set_active_location("dev-container-project-dir", clone_project_dir)
-    if clone_project_dir.exists():
-        if clean_workspace:
-            print(f"Cleaning out the workspace directory ({clone_project_dir})")
-            fileutil.rm(clone_project_dir)
-        elif workspace_fetch and vcs_section:
-            print(f"Fetching your project into {clone_project_dir} ...")
-            config.run_command(
-                vcs_section,
-                "fetch-changes",
-                cwd=clone_project_dir,
-            )
-        else:
-            print("Not copying project into the workspace.")
-    if not clone_project_dir.exists():
+    """Make the project's clone, and give it your newer commits; its directory.
+
+    The clone is the directory itself, mounted whole in the container, so
+    nothing the container can write is on the way to it (FILE-10).  It's
+    checked not to be a symlink, or anything but a directory, all the same.
+
+    Nothing here runs the VCS with the clone as its repository or working
+    directory, which would read the clone's configuration and run its hooks
+    (FILE-1).  Your newer commits go to the container as a bundle in the
+    setup directory, which the clone's `origin` points at, and Git in the
+    container fetches them.
+    """
+    clone_dir = config.active_location("project-clone-dir")
+    if clone_dir is None:
+        clone_dir = config.require_path("project-state", "project-clone-dir")
+        config.set_active_location("project-clone-dir", clone_dir)
+    _check_real_dir(clone_dir)
+    if clone_dir.exists() and clean:
+        print(f"Cleaning out the project's clone ({clone_dir})")
+        fileutil.rm(clone_dir)
+    if vcs_section and (fetch or not clone_dir.exists()):
+        _refresh_bundle(config, vcs_section, setup_dir)
+    if not clone_dir.exists():
         if vcs_section:
-            print("Cloning into the workspace")
-            print(f"Cloning your project into {clone_project_dir} ...")
+            print(f"Cloning your project into {clone_dir} ...")
             config.run_command(
                 vcs_section,
                 "local-clone",
                 cwd=config.active_location("project-dir"),
                 template={
-                    "workspace-dir": str(clone_project_dir),
+                    "project-clone-dir": str(clone_dir),
                 }
             )
+            _check_real_dir(clone_dir)
+            _point_clone_at_bundle(config, vcs_section, clone_dir, setup_dir)
         else:
-            print("Not copying project into the workspace (no version control system defined).")
-            clone_project_dir.mkdir(parents=True)
-    return workspace_dir
+            print("Not copying project into its clone (no version control system defined).")
+            clone_dir.mkdir(parents=True)
+    elif not fetch:
+        print("Not giving the project's clone your newer commits (--no-project-fetch).")
+    _check_real_dir(clone_dir)
+    return clone_dir
 
 
-def _make_work_parent(config: UserConfig) -> None:
-    """Make the workspace's parent directory, readable only by you, if it isn't there."""
-    parent = config.optional_path("workspace", "workspace-parent-dir")
+def _refresh_bundle(config: UserConfig, vcs_section: str, setup_dir: Path) -> None:
+    """Write the VCS's bundle of your branches into the setup directory, if it makes one.
+
+    It runs in your repository (`vcs-root`), never in the clone.  The file
+    is written beside the old one and renamed over it, readable by the
+    container's user under any id mapping.
+    """
+    if not config.has_run(vcs_section, "refresh-bundle"):
+        return
+    bundle = setup_dir / defaults.PROJECT_BUNDLE_FILE_NAME
+    temp = setup_dir / (defaults.PROJECT_BUNDLE_FILE_NAME + ".tmp")
+    fileutil.rm(temp)
+    res = config.run_command(
+        vcs_section, "refresh-bundle", on_error=OnError.RETURN, capture=Capture.NONE,
+        cwd=config.active_location("vcs-root") or config.active_location("project-dir"),
+        template={"bundle": str(temp)},
+    )
+    if res.returncode != 0 or not temp.is_file():
+        print(
+            "Couldn't bundle your project's branches (an empty repository has none); "
+            "the project's clone won't get your newer commits this run.",
+            file=sys.stderr,
+        )
+        fileutil.rm(temp)
+        return
+    os.chmod(temp, MODE_BUNDLE_FILE)
+    os.replace(temp, bundle)
+
+
+def _point_clone_at_bundle(
+    config: UserConfig, vcs_section: str, clone_dir: Path, setup_dir: Path,
+) -> None:
+    """Point a fresh clone's `origin` at the bundle, as the container sees it.
+
+    The clone was just made, so nothing in it is the container's yet.  The
+    command edits its configuration file only, run from the setup directory.
+    """
+    if not config.has_run(vcs_section, "set-clone-origin"):
+        return
+    mount = config.dev_container_mounts().get("setup")
+    if mount is None or not _is_container_path(mount):
+        raise ConfigErr(f"dev-env.yaml's `mounts: setup` isn't a plain container path: {mount!r}")
+    config.run_command(
+        vcs_section, "set-clone-origin", cwd=setup_dir,
+        template={
+            "project-clone-dir": str(clone_dir),
+            "origin": f"{mount}/{defaults.PROJECT_BUNDLE_FILE_NAME}",
+        },
+    )
+
+
+def _check_real_dir(path: Path) -> None:
+    """Refuse `path` if it's there and isn't a real directory: a symlink, or a file."""
+    if os.path.lexists(path) and (os.path.islink(path) or not path.is_dir()):
+        raise ConfigErr(f"{path}: not a directory (or a symlink); remove it, and run again")
+
+
+def _make_state_dir(config: UserConfig) -> None:
+    """Make the project's state directory, readable only by you, if it isn't there."""
+    parent = config.optional_path("project-state", "project-state-dir")
     if parent is not None and not parent.exists():
         parent.mkdir(mode=fileutil.MODE_USER_RWX, parents=True)
 
@@ -572,7 +628,7 @@ def _make_work_parent(config: UserConfig) -> None:
 def _ignore_directory(config: UserConfig, vcs_section: str | None, path: Path) -> None:
     """Mark the directory as ignored by adding the name to the parent's ignore file.
 
-    Only a directory in the project needs it (the workspace's default is
+    Only a directory in the project needs it (the project state's default is
     outside, in `state-dir`).
     """
     if not vcs_section:
@@ -704,15 +760,22 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
 def _write_compose_env_file(
     *,
     config: UserConfig, file: Path,
-    host: str, workspace_dir: Path, settings_dir: Path, gateway_config: Path,
+    host: str, clone_dir: Path, volume: str, settings_dir: Path, gateway_config: Path,
 ) -> None:
     """Write the settings the docker-compose file uses to its `.env` file.
 
     Most of them have well-defined meanings that every docker-compose file must use.
+    Each value is checked, then single-quoted, so compose reads it as text.
     """
     mounts = config.dev_container_mounts()
-    if "workspace" not in mounts or "setup" not in mounts:
-        raise ConfigErr(f"dev-env does not have expected mounts; has {mounts}")
+    for key in ("project-clone", "persistent-store", "setup"):
+        if key not in mounts:
+            raise ConfigErr(f"dev-env.yaml has no `mounts: {key}`; it has {sorted(mounts)}")
+        if not _is_container_path(mounts[key]):
+            raise ConfigErr(f"dev-env.yaml's `mounts: {key}` isn't a plain container path: {mounts[key]!r}")
+    gateway_mount = config.require_value("dev-env", "network-gateway-config-mount")
+    if not _is_container_path(gateway_mount):
+        raise ConfigErr(f"`dev-env: values: network-gateway-config-mount` isn't a plain container path: {gateway_mount!r}")
 
     lines: dict[str, str] = {
         # Image tags
@@ -726,15 +789,17 @@ def _write_compose_env_file(
         "NETWORK_GATEWAY_NAME": f"{host}-ng",
         "CONTAINER_NAME": host,
 
-        # File paths
-        "WORKSPACE_HOST": str(workspace_dir),
+        # File paths and the volume
+        "PROJECT_CLONE_HOST": str(clone_dir),
         "SETTINGS_HOST": str(settings_dir),
         "GATEWAY_CONFIG_HOST": str(gateway_config),
+        "PERSISTENT_STORE_VOLUME": volume,
 
         # Mount points
-        "WORKSPACE_CONTAINER": mounts["workspace"],
+        "PROJECT_CLONE_CONTAINER": mounts["project-clone"],
+        "PERSISTENT_STORE_CONTAINER": mounts["persistent-store"],
         "SETTINGS_CONTAINER": mounts["setup"],
-        "GATEWAY_CONFIG_CONTAINER": config.require_value("dev-env", "network-gateway-config-mount"),
+        "GATEWAY_CONFIG_CONTAINER": gateway_mount,
 
         # Limits
         "PIDS_LIMIT": config.require_value("dev-env", "pids-limit"),
@@ -746,7 +811,28 @@ def _write_compose_env_file(
         "SSHD_PORT_ENV": (config.dev_container_sshd_port_env() or "SSHD_PORT_ENV_UNSET"),
         "SSHD_PORT": (config.dev_container_sshd_port() or "not set"),
     }
-    file.write_text("\n".join([f"{k}={v}" for k, v in lines.items()]), encoding="utf-8")
+    file.write_text("".join(env_line(k, v) for k, v in lines.items()), encoding="utf-8")
+
+
+def env_line(key: str, value: str) -> str:
+    """`KEY='value'` and a newline, for a compose `.env` file.
+
+    Refuses a value compose could read as more than text: a newline would
+    add a line (DEV-2), and a quote would end the value early.
+    """
+    if ENV_VALUE_REFUSED.search(value):
+        raise ConfigErr(
+            f"Won't write {key}={value!r} into the compose .env file: it has a control "
+            "character, a `'`, or a backslash before a backslash or `'`."
+        )
+    return f"{key}='{value}'\n"
+
+
+def _is_container_path(path: str) -> bool:
+    """Whether `path` is a plain absolute container path, without `.` or `..` parts."""
+    return bool(CONTAINER_PATH.fullmatch(path)) and not any(
+        part in (".", "..") for part in path.split("/")
+    )
 
 
 def main(argv: Sequence[str]) -> int:
@@ -761,26 +847,35 @@ def main(argv: Sequence[str]) -> int:
     if not config:
         return BAD_EXECUTION_ARGS_CODE
     parser.add_argument(
-        "--clean-workspace",
+        "--clean-project-clone", "--clean-project",
         action="store_true",
-        dest="clean_workspace",
+        dest="clean_project_clone",
         default=False,
         help=(
-            "If the dev-env workspace directory already exists from a previous run, "
-            "remove it and recreate it."
+            "Remove the project's clone from a previous run, and clone the project "
+            "again.  Changes in it you haven't fetched are lost.  The persistent "
+            "store is kept."
         ),
     )
     parser.add_argument(
-        "--no-workspace-fetch",
+        "--clean-persistent-store",
+        action="store_true",
+        dest="clean_persistent_store",
+        default=False,
+        help=(
+            "Remove the dev container's persistent store from previous runs, and "
+            "start with an empty one.  The project's clone is kept."
+        ),
+    )
+    parser.add_argument(
+        "--no-project-fetch",
         action="store_false",
-        dest="workspace_fetch",
+        dest="project_fetch",
         default=True,
         help=(
-            "If the workspace directory exists, then don't fetch updates into it "
-            "from the project directory.  This can lead to the workspace directory "
-            "becoming out-of-date.  If the workspace directory doesn't exist, it "
-            "will still be populated from the project (essentially ignoring this "
-            "flag)."
+            "Don't bundle your project's newer commits for its existing clone to "
+            "fetch, so it can become out-of-date.  A clone that doesn't exist is "
+            "still made."
         ),
     )
     parser.add_argument(

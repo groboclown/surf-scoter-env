@@ -55,6 +55,7 @@ class DistTest(unittest.TestCase):
         os.symlink(SCRIPTS / "surf_scoter_lib", self.dist / "bin" / "surf_scoter_lib")
         os.symlink(REPO / "defaults", self.dist / "defaults")
         os.symlink(REPO / "containers", self.dist / "containers")
+        os.symlink(REPO / "templates", self.dist / "templates")
         shutil.copy(REPO / "defaults" / "setup.yaml", self.dist / "setup.yaml")
         self.verified = self.tmp / "verified"
         self.mine = self.tmp / "mine"
@@ -64,7 +65,6 @@ class DistTest(unittest.TestCase):
         (self.home / "setup.yaml").write_text(
             "scoter:\n"
             "  path-lists:\n    dev-containers-search:\n"
-            "      - ${scoter:project-dir}/${scoter:project-files-dir}\n"
             f"      - {json.dumps(str(self.mine))}\n"
             # Last, so a test can add to it.
             "verification:\n"
@@ -90,10 +90,8 @@ class DistTest(unittest.TestCase):
         )
         return json.loads(output.read_text(encoding="utf-8"))
 
-    def project_suc(self, accepted: Path | None = None) -> dict:
-        """The universal file with the project (`scoter`'s second run), or with `accepted` (its third)."""
-        args = ["--universal", str(self.tmp / "first.json"), "--no-setup-search",
-                "--project-dir", str(self.project)]
-        if accepted is not None:
-            args.extend(("--accepted-settings", str(accepted)))
-        return self.generate(*args)
+    def project_suc(self) -> dict:
+        """The universal file with the project, as the generator reads its files directory."""
+        return self.generate(
+            "--universal", str(self.tmp / "first.json"), "--no-setup-search", "--project-dir", str(self.project),
+        )

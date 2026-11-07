@@ -2,5 +2,4 @@
 # This uses the sub-command argument format of the name, not the script name.
 # Be sure to leave a trailing newline at the end of this file.
 cleanup
-init
-list-accepted
+list

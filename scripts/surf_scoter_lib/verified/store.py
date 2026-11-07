@@ -1,5 +1,5 @@
 #SPDX:MIT
-"""The verified store: the user's accepted project settings, in `verification: paths: store`.
+"""The verified store: the user's locked configurations, in `verification: paths: store`.
 
     store/                        0700
         index.json                0600  canonical project directory -> environment id
@@ -7,6 +7,8 @@
         blobs/AB/ABCD...          0600  file contents, by SHA-256
         ENV-ID/environment.json   0600  the environment's acceptances
         ENV-ID/acceptances/ID/... 0600  each acceptance's files
+        ENV-ID/link.json          0600  what the environment runs (`configs.py`)
+        ENV-ID/configs/ID.json    0600  each locked configuration (`configs.py`)
 
 Everything in it decides what a project may do, so every directory and file
 must belong to the user, with no access for anyone else, and no symlinks.
@@ -14,6 +16,7 @@ Every read checks that; every write replaces the file whole.  On Windows,
 which has no mode bits, the checks are left to the user profile's ACLs.
 """
 import contextlib
+import datetime
 import enum
 import hashlib
 import json
@@ -85,6 +88,24 @@ def canonical_json(data: jdata.JsonData) -> bytes:
 def json_id(data: jdata.JsonData) -> str:
     """The id of JSON data: `sha256:` and the hash of its canonical JSON."""
     return "sha256:" + hashlib.sha256(canonical_json(data)).hexdigest()
+
+
+def parse_time(text: str) -> datetime.datetime:
+    """An ISO 8601 (RFC 3339) time, which must have a time zone."""
+    value = datetime.datetime.fromisoformat(text)
+    if value.tzinfo is None:
+        raise ValueError(f"`{text}` has no time zone")
+    return value
+
+
+def time_text(value: datetime.datetime | None) -> str | None:
+    """A time as the store's records keep it; None for none."""
+    return None if value is None else value.isoformat()
+
+
+def now_utc() -> datetime.datetime:
+    """Now, in UTC, to the second."""
+    return datetime.datetime.now(datetime.UTC).replace(microsecond=0)
 
 
 def check_private(st: os.stat_result, path: Path) -> None:

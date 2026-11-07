@@ -41,7 +41,9 @@ docker:
         # How scoter-host starts the broker inside the dev container.
         # Note: adding a `-t` (terminal) will corrupt the binary wire protocol.
         broker: ${exec} exec -i {x:container} {x:broker}
-        build: ${exec} build -t {x:tag} {x:dir}
+        # The Dockerfile named, so Podman can't build a `Containerfile` beside it
+        # in its place, which the review's checks don't read (VER-1).
+        build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
         compose-up: ${exec} compose --env-file {x:env-file} -f {x:compose-file} up -d
         compose-service-stats: >
             ${exec} compose --env-file {x:env-file}
@@ -58,6 +60,18 @@ docker:
         list-images: ${exec} image ls --filter reference={x:pattern} --format {{.Repository}}:{{.Tag}}
         remove-image: ${exec} image rm {x:name}
         prune-images: ${exec} image prune -f
+        # The dev container's persistent store, a named volume kept between
+        # runs (`project-state: values: persistent-store-volume`).  The compose
+        # file declares it `external`, so `compose-down --volumes` leaves it;
+        # `scoter run` creates it, unless `inspect-volume` finds it (Podman's
+        # `volume create` fails for a volume that's there; Docker's doesn't),
+        # and `--clean-persistent-store` removes it.  `list-volumes` gives the
+        # names matching `{x:prefix}`, one a line, for `scoter cleanup
+        # --persistent-stores`.
+        inspect-volume: ${exec} volume inspect {x:name}
+        create-volume: ${exec} volume create {x:name}
+        remove-volume: ${exec} volume rm {x:name}
+        list-volumes: ${exec} volume ls --quiet --filter name=^{x:prefix}
 
 # The Python interpreter that runs the sub-command scripts (the distribution's
 # `bin/main_*.py`).  To give the scripts installed libraries, point `exec` at a
@@ -83,19 +97,73 @@ python:
             - ${script}
             - '{x:script}'
 
-# Where a project's run keeps its files: the workspace (the clone the
-# container works in), and the run's settings and resources.
-workspace:
+# Pulling the project's files into your own configuration (`scoter pull`).
+pull:
+    paths:
+        # Where `scoter unlock` puts a configuration for you to edit, one
+        # directory for each environment (`ENV-ID/files/` and `ENV-ID/host.json`).
+        # SECURITY: never inside a project, its clone, a state directory or the
+        # store (VER-37): a run uses what's here, unreviewed.
+        unlocked-dir: ${scoter:user-dir}/unlocked
+        # The templates `scoter init` and `scoter unlock --from-template` start
+        # from.  SECURITY: never inside a project, its clone or its repository
+        # (VER-7); a template is reviewed by `scoter lock` before it's stored.
+        templates-dir: ${scoter:distribution-dir}/templates
+    values:
+        # After this many days unlocked, each run's warning lists the egress
+        # rules and host commands in use (VER-33); `scoter lock` and
+        # `scoter unlock` start it again.
+        unlock-reminder-days: 7
+        # After this many days unlocked, runs stop until `scoter lock`; 0
+        # turns it off.
+        unlock-days: 0
+        # The template `scoter init` uses when it isn't given one.
+        default-template: default
+    runs:
+        # The reviewer `scoter pull` runs between seeding and approval, given
+        # the universal configuration file (`{x:universal}`), the working
+        # directory's id (`{x:workdir}`) and a session file (`{x:session}`,
+        # `surf-scoter-pull-session-1`), which it replaces with its decision:
+        # `approve` with the analysis id it showed, or `deny`.  A reviewer
+        # builds on `scoter pull analyze` and `changed`.
+        # SECURITY: the reviewer is trusted setup.  It must show the project's
+        # text only as plain text: the report's `clean` forms, never HTML or
+        # Markdown, which could run the project's script (VER-26).  It only
+        # decides whether to approve: `approve` checks everything again.
+        reviewer:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/pull_reviewer.py
+            - '{x:universal}'
+            - '{x:workdir}'
+            - '{x:session}'
+
+
+# Where a project's run keeps its state: the project's clone (which the
+# container works in), its persistent store, and the run's settings and
+# resources.
+project-state:
     paths:
         # Outside the project, named by its id (`${scoter:project-id}`, the same
         # for the same project directory), so the project's own files, and the
-        # container's, stay apart (FILE-9).  For a workspace per branch, add
+        # container's, stay apart (FILE-9).  For a clone per branch, add
         # `/${scoter:project-branch}`: the branch the VCS names, made safe as one
         # path part, and not set when there's none.
-        workspace-parent-dir: ${scoter:state-dir}/workspaces/${scoter:project-id}
-        setup-dir: ${workspace-parent-dir}/setup
-        resources-dir: ${workspace-parent-dir}/resources
-        workspace-dir: ${workspace-parent-dir}/workspace
+        project-state-dir: ${scoter:state-dir}/projects/${scoter:project-id}
+        setup-dir: ${project-state-dir}/setup
+        resources-dir: ${project-state-dir}/resources
+        # The clone is the directory itself, mounted at the dev container's
+        # `mounts: project-clone`.  Nothing the container can write is above it.
+        project-clone-dir: ${project-state-dir}/project-clone
+    values:
+        # The container volume mounted at the dev container's `mounts:
+        # persistent-store`: the container's own files, kept between runs.  It
+        # isn't a host directory, so host commands can't reach it.  It must be
+        # a valid volume name (`[a-z0-9][a-z0-9_.-]*`), and differ for each
+        # project; for one per branch, add `-${scoter:project-branch}`.  It
+        # starts with `persistent-store-prefix`, which `scoter cleanup
+        # --persistent-stores` looks for: only volumes named with it are its.
+        persistent-store-prefix: scoter-
+        persistent-store-volume: ${persistent-store-prefix}${scoter:project-id}-store
 
 
 # The 'git' VCS tool.
@@ -125,19 +193,34 @@ git-vcs:
         exec: git
     runs:
         # SECURITY: keep `--no-local`.  Without it, git clones a local path by
-        # hard-linking the object files, so the project and the workspace share
+        # hard-linking the object files, so the project and its clone share
         # them.  The container owns those files (through the user namespace
         # mapping), and could rewrite objects in your real repository behind
         # already-reviewed hashes.  See FILE-2 in
         # docs/security/files-attack-vectors.md.
-        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:workspace-dir}
-        fetch-changes-into: ${exec} fetch {x:workspace-dir} {x:branch}
-        fetch-changes: ${exec} fetch --all
+        local-clone: ${exec} clone --no-local --depth 4 ${scoter:vcs-root} {x:project-clone-dir}
+        # SECURITY: nothing here runs Git with the clone as its repository or
+        # working directory: Git would read the clone's configuration and run
+        # its hooks, which the container controls (FILE-1).  That includes
+        # pushing into it, which runs its hooks on your host.
+        #
+        # Getting your newer commits to the container: `refresh-bundle` runs
+        # in your repository (at `${scoter:vcs-root}`) and writes its branches
+        # and tags to a bundle file in the read-only setup directory.  After a
+        # fresh clone, `set-clone-origin` points the clone's `origin` at the
+        # bundle's path in the container (`{x:origin}`), editing the new
+        # clone's configuration file only; Git in the container then fetches
+        # from it (the distribution's dev container does as it starts).
+        refresh-bundle: ${exec} bundle create {x:bundle} --branches --tags
+        set-clone-origin: ${exec} config --file {x:project-clone-dir}/.git/config remote.origin.url {x:origin}
+        # Bringing the container's commits back: run in your repository, it
+        # only reads the clone's objects (`git upload-pack` runs no hooks).
+        fetch-changes-into: ${exec} fetch --no-recurse-submodules {x:project-clone-dir} {x:branch}
         show-fetch-changes: ${exec} log -p HEAD..FETCH_HEAD
 
         # Requires the user to review the changes and does not commit them.
-        # But it's potentially dangerous because it makes those workspace
-        # files active.
+        # But it's potentially dangerous because it makes those files from
+        # the project clone active.
         merge-changes: ${exec} merge {x:branch}
 
         find-root:
@@ -151,6 +234,44 @@ git-vcs:
             - ${python:script}
             - ${scoter:distribution-bin-dir}/vcs_git_branch.py
             - '{x:root}'
+        # What the pull asks about the project's committed files (see
+        # docs/security/files.md, "Adding a VCS implementation").  Each runs in
+        # your repository (`{x:root}`), never the clone; `{x:path}` is a
+        # directory in it, relative to the root.
+        # SECURITY: the script runs only `rev-parse`, `ls-tree -z` and
+        # `cat-file`, which read the repository's objects.  Nothing reads the
+        # working tree through Git, which would run `core.fsmonitor` and the
+        # filters `.gitattributes` names (VER-30).
+        # `list-files`: the files under `{x:path}` at `{x:ref}`, and the commit.
+        list-files:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - list-files
+            - '{x:root}'
+            - '{x:ref}'
+            - '{x:path}'
+        # `show-file`: the file `{x:path}` at `{x:commit}`, a commit id
+        # `list-files` gave.
+        show-file:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - show-file
+            - '{x:root}'
+            - '{x:commit}'
+            - '{x:path}'
+        # `file-status`: whether each file in `{x:files}`, a copy of
+        # `{x:path}`'s files, is as committed at `{x:ref}`.
+        file-status:
+            - ${python:script}
+            - ${scoter:distribution-bin-dir}/vcs_git_files.py
+            - ${exec}
+            - file-status
+            - '{x:root}'
+            - '{x:ref}'
+            - '{x:path}'
+            - '{x:files}'
     values:
         ignore-file: .gitignore
     value-lists:
@@ -173,12 +294,10 @@ file-vcs:
     programs:
         cp: cp
         diff: diff
-        noop: echo
     runs:
-        local-clone: ${cp} -R ${scoter:project-dir} ${workspace:workspace-dir}
-        fetch-changes: ${noop}
-        show-fetch-changes: ${diff} -R ${workspace:workspace-dir} ${scoter:project-dir}
-        merge-changes: ${cp} -R ${workspace:workspace-dir} ${scoter:project-dir}
+        local-clone: ${cp} -R ${scoter:project-dir} ${project-state:project-clone-dir}
+        show-fetch-changes: ${diff} -R ${project-state:project-clone-dir} ${scoter:project-dir}
+        merge-changes: ${cp} -R ${project-state:project-clone-dir} ${scoter:project-dir}
     values:
         ignore-file: ""
 
@@ -207,8 +326,9 @@ dev-env:
         # The network gateway: the only way out of the dev container (see
         # docs/security/network.md).  It enforces the project's egress rules, as
         # far as it can, and refuses to start with a rule it can't enforce.
-        # Its name: your acceptance of a project's egress rules is for this
-        # gateway, and a different one asks for a new review.
+        # Its name: the checks on egress rules are for this gateway, and the
+        # setup's fingerprint changes with it, so a different one asks for a
+        # new pull.
         network-gateway-name: squid
         # Where the gateway container reads the configuration
         # `network-gateway-write-config` makes (the docker-compose file mounts it
@@ -226,8 +346,9 @@ dev-env:
             - '{x:output}'
 
 
-# What a review of a project's settings checks (`scoter verify`), and where
-# your acceptances are kept.
+# What the checks on a configuration look for (`scoter pull`, `scoter lock`,
+# `scoter review`, and every `scoter run`), and where your configurations are
+# kept.
 #
 # `host-commands`: the checks on the commands a project asks to run on your
 # computer (its host commands).  Every check is here, so none is missed by
@@ -419,9 +540,9 @@ verification:
         version-manager:
             action: warn
             reason: >-
-                Dealing with version commits should stay within the workspace, and
+                Dealing with version commits should stay within the project clone, and
                 not call out to the host for performing these actions.  It could cause
-                the container to force the workspace to add a new remote repository,
+                the container to force the project clone to add a new remote repository,
                 promote changes in your name to the parent repository, or even run
                 arbitrary commands like commit hooks.
             commands: [git, hg, svn, cvs, p4]
@@ -430,7 +551,7 @@ verification:
             reason: >-
                 A version manager's shim picks the real program from a file (such as
                 `.tool-versions`) in its working directory, which may be the
-                workspace.  Name the real program instead.
+                project clone.  Name the real program instead.
             paths:
                 - ~/.asdf/shims
                 - ~/.local/share/mise/shims
@@ -448,15 +569,15 @@ verification:
             action: warn
             reason: >-
                 An allowed `docker` command can start a container that mounts your
-                home directory, and so change anything there, the accepted project
-                settings included.
+                home directory, and so change anything there, your configurations
+                and setup included.
             command-map:
                 docker: ${docker:exec}
 
     paths:
-        # Where your acceptances of projects' settings are kept.  They decide what
+        # Where your configurations of projects are kept.  They decide what
         # each project may do, so this must be an absolute path outside any
-        # project, its workspace, and its repository.
+        # project, its clone, and its repository.
         store: ~/.config/surf-scoter.d/verified
 
     path-lists:
@@ -477,12 +598,6 @@ verification:
         # (That file is under the MPL-2.0, and should be pulled for a fresh
         # copy, so it's not included here by default.)
         public-suffix-lists: []
-        # The `scoter: path-lists: dev-containers-search` directories whose
-        # containers are reviewed like a project's own: kept in the `store` with
-        # each acceptance, built from that copy, and a change to one asks for a
-        # new review.  Others are trusted as part of your installation.  Add
-        # `${scoter:distribution-dir}/containers` to review the distribution's too.
-        verified-containers: []
 
     # Checks on the files in a project's container directories: everything there
     # goes into the image, where the container can read it.  Each check has an
@@ -668,19 +783,40 @@ verification:
             # PYTHONPATH out (it can set it as you enter its directory).
             - python:runs:script
             - python:runs:sub-command
-            - scoter:runs:find-acceptance
-            # `--no-local` keeps the workspace from sharing your repository's
+            # `--no-local` keeps the clone from sharing your repository's
             # objects (FILE-2); finding the root and branch reads files, not Git.
             - git-vcs:runs:local-clone
+            # The clone gets your commits from a bundle, never from Git run in
+            # it (FILE-1).
+            - git-vcs:runs:refresh-bundle
+            - git-vcs:runs:set-clone-origin
+            - git-vcs:runs:fetch-changes-into
             - git-vcs:runs:find-root
             - git-vcs:runs:current-branch
+            # The pull reads committed files through these, and only reads
+            # the repository's objects (VER-30).
+            - git-vcs:runs:list-files
+            - git-vcs:runs:show-file
+            - git-vcs:runs:file-status
+            # The pull's reviewer shows the project's files; only you choose it (VER-26).
+            - pull:runs:reviewer
+            # Where an unlocked configuration runs from (VER-37), and the
+            # reminders while it is (VER-33).
+            - pull:paths:unlocked-dir
+            - pull:paths:templates-dir
+            - pull:values:unlock-reminder-days
+            - pull:values:unlock-days
+            # How long a configuration goes without a review (VER-20).
+            - verification:values:review-notice-first-days
+            - verification:values:review-notice-every-days
             # Adding a directory here is what weakens it: a project location
             # lets a project build from files outside its project files directory.
             - scoter:path-lists:dev-containers-search
-            # Where acceptances and state are kept, and where the run's files go.
+            # Where configurations and state are kept, and where the run's files go.
             - verification:paths:store
             - scoter:paths:state-dir
-            - workspace:paths:*
+            - project-state:paths:*
+            - project-state:values:*
             # The network: the gateway, its configuration, and the containers.
             - dev-env:values:network-gateway-name
             - dev-env:runs:network-gateway-write-config
@@ -693,36 +829,40 @@ verification:
             # How the tools reach the container.
             - ssh:runs:proxy-command
             - docker:runs:broker
+            # Which file the build reads: the one the review checked.
+            - docker:runs:build
             # The checks the review makes (`host-commands` replaced or removed
             # are reported with the overrides, from the generator's notices).
             - verification:project-files:*
             - verification:egress-hosts:*
-            # How long the container files can go without a review.
-            - verification:values:max-exempt-days
         # Deny-lists, where adding entries only strengthens: a change is reported
         # only when it leaves out one of the default's entries.
         guarded-removals:
             - git-vcs:value-lists:drop-env
             - verification:value-lists:egress-refused-wildcards
             - verification:path-lists:public-suffix-lists
-            - verification:path-lists:verified-containers
             - verification:value-lists:guarded
             - verification:value-lists:guarded-removals
 
     values:
-        # How long an acceptance of a project's settings lasts, in days.
-        expiry-days: 30
-        # The largest project file, and the most for all of a project's files,
-        # kept in the `store` with each acceptance, in bytes.
+        # The largest file, and the most for all of a configuration's files,
+        # read from a project or kept in the `store`, in bytes.
         max-file-size: 16777216
         max-snapshot-size: 268435456
-        # How long `scoter exempt` lasts when it isn't given `--for`, and the
-        # longest it can be given, in days.  An exemption never outlasts the
-        # acceptance it's started from.  While it holds, runs on its branch
-        # use the container files as they are, and keep the project file and
-        # the `dev-env.yaml` files as accepted.
-        exempt-days: 1
-        max-exempt-days: 7
+        # The review timers for the configuration in use, in days since you
+        # last reviewed it (`scoter pull` or `scoter review`); 0 turns one off
+        # (VER-20).  The notice: once `review-notice-first-days` pass, the next
+        # run says the configuration hasn't been reviewed, and again once in
+        # each `review-notice-every-days`.  The warning: every run warns.  The
+        # expiry: runs stop until you review.  The warning and the expiry are
+        # off: reviews forced on a configuration that hasn't changed teach
+        # people to approve unread (VER-41).
+        # SECURITY: turning the notice off, or lengthening it, is a weakening
+        # `scoter user-setup` reports.
+        review-notice-first-days: 30
+        review-notice-every-days: 7
+        review-warn-days: 0
+        review-expire-days: 0
 
 
 # The tools' own settings.  The configuration loader adds the locations it
@@ -734,8 +874,11 @@ scoter:
     #
     # Set by scoter, because the tool needs these to find the configuration files.  Allowing you to change
     # these after they've loaded would be a lie.
-    #    project-config: set to the project configuration file: `project-file-name` in the
-    #        project directory's `project-files-dir`.
+    #    project-config: set to the project configuration file: `project-file-name` in
+    #        `config-dir`.
+    #    config-dir: set to the directory the project file and the project's containers are
+    #        read from: a copy of the project's files, or the project directory's
+    #        `project-files-dir`.
     #    project-dir: set to the project directory, which holds the `project-files-dir`.
     #        scoter finds it, searching up from where it runs (or --project-dir) to the root
     #        of the repository holding it.
@@ -755,27 +898,15 @@ scoter:
         running-envs-lock: ${state-dir}/running-env.json.lock
 
     path-lists:
-        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml.
+        # Where `dev-container: NAME` looks for NAME/Dockerfile and NAME/dev-env.yaml,
+        # after the project's own containers (`${scoter:config-dir}`), which are
+        # always searched first without being listed here.
         # SECURITY: a dev container, and every parent it builds on, must be inside
-        # the project's `project-files-dir` or one of these directories.  Don't add
-        # directories a project controls, such as `${scoter:project-dir}` itself:
-        # they would let a project build from, and read, files outside its
-        # `project-files-dir`.
+        # `${scoter:config-dir}` or one of these directories.  A directory in the
+        # project, its repository or its clone is refused: it would let a project
+        # build from, and read, files nobody reviewed.
         dev-containers-search:
-            - ${scoter:project-dir}/${scoter:project-files-dir}
             - ${scoter:distribution-dir}/containers
-
-    runs:
-        # The distribution's own commands, which there's no reason to change.
-        #
-        # Finding your acceptance of a project's settings, in `verification:
-        # paths: store`.
-        # Given the universal configuration file (`{x:universal}`) with the
-        # project, prints JSON saying which acceptance matches, if any.
-        find-acceptance:
-            - ${python:script}
-            - ${scoter:distribution-bin-dir}/verified_find.py
-            - '{x:universal}'
 
     values:
         # The directory, inside the project directory, that holds the project file and the

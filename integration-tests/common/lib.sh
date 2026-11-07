@@ -70,12 +70,13 @@ it_init() {
     mkdir -p "${IT_DIST}/bin"
     ln -s "${IT_REPO}/host/target/debug/gen-scoter-uc" "${IT_DIST}/bin/gen-scoter-uc"
     ln -s "${IT_REPO}/host/target/debug/scoter-host" "${IT_DIST}/bin/scoter-host"
-    for script in "${IT_REPO}/scripts/"*.py; do
+    for script in "${IT_REPO}/scripts/"*.py "${IT_REPO}/scripts/"*.txt; do
         ln -s "${script}" "${IT_DIST}/bin/"
     done
     ln -s "${IT_REPO}/scripts/surf_scoter_lib" "${IT_DIST}/bin/surf_scoter_lib"
     ln -s "${IT_REPO}/defaults" "${IT_DIST}/defaults"
     ln -s "${IT_REPO}/containers" "${IT_DIST}/containers"
+    ln -s "${IT_REPO}/templates" "${IT_DIST}/templates"
     cp "${IT_REPO}/defaults/setup.yaml" "${IT_DIST}/setup.yaml"
     # A copy, not a link: it finds the distribution from where it is.
     cp "${IT_REPO}/scoter.py" "${IT_DIST}/scoter"
@@ -146,13 +147,15 @@ it_tty() {
     esac
 }
 
-# it_accept: use the project's review as it stands, through a terminal (the
-# prompt refuses to ask without one).
-it_accept() {
-    out="${IT_SANDBOX}/accept.log"
-    printf 'u\n' | it_tty "cd '${IT_PROJECT}' && '${IT_DIST}/scoter' verify" \
+# it_approve COMMAND [ARGS...]: run `scoter COMMAND` (`pull`, `lock` or
+# `review`) through a terminal (the reviewer refuses to ask without one), and
+# approve what the reviewer shows as it stands: `a`, then `approve`.  Its
+# output goes to IT_SANDBOX/COMMAND.log.
+it_approve() {
+    out="${IT_SANDBOX}/$1.log"
+    printf 'a\napprove\n' | it_tty "cd '${IT_PROJECT}' && '${IT_DIST}/scoter' $*" \
         > "${out}" 2>&1 || true
-    grep -q "Accepted (" "${out}" || { cat "${out}" >&2; it_fail "the review wasn't accepted"; }
+    grep -q "Approved: the configuration" "${out}" || { cat "${out}" >&2; it_fail "\`scoter $*\` wasn't approved"; }
 }
 
 # it_expect FILE TEXT: FILE has a line holding TEXT.

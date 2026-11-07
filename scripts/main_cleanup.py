@@ -1,12 +1,20 @@
 #SPDX:MIT
-"""Surf Scoter Sub-command: cleanup
+"""Remove what runs, pulls and deleted projects left behind.
+
+A Surf Scoter sub-command.
+
+The routine sweep, safe to run at any time: it keeps your setup, your ssh
+key, and anything a running environment or a project still there uses.
+To undo `scoter user-setup` instead, see `scoter user-cleanup`.
 
 Finds what Surf Scoter left behind that nothing else removes, lists it,
 and removes it once you say so: environments whose `scoter run` is gone
 (stopped as `scoter kill` does), a run's state no record uses, the
-accepted settings of projects whose directory is gone, and the verified
-store's leftovers.  With `--workspaces`, the workspaces no running
-environment uses; with `--images`, the images it built that none uses.
+configurations of projects whose directory is gone, and the verified
+store's leftovers.  With `--project-state`, the project state directories
+(each project's clone, settings and resources) no running environment uses;
+with `--persistent-stores`, the persistent store volumes none uses; with
+`--images`, the images it built that none uses.
 The ssh config entries of environments that aren't running go as `ssh:
 values: config-cleanup` says: with `ask`, they're asked about on their own,
 even with `--force`.  See docs/cleaning-up.md.
@@ -26,11 +34,13 @@ from surf_scoter_lib import (
     cleanup,
     gen_parser,
     review,
+    run_config,
     ssh_hosts,
 )
 from surf_scoter_lib.active_env import EnvironmentDesc
 from surf_scoter_lib.err import SurfScoterErr
-from surf_scoter_lib.verified import revoke, store
+from surf_scoter_lib.verified import remove as config_remove
+from surf_scoter_lib.verified import store
 
 PROMPT = "Remove these? [y/N]: "
 SSH_PROMPT = "Remove these ssh config entries? [y/N]: "
@@ -40,8 +50,10 @@ class Extras(enum.Flag):
     """What else the cleanup looks for, besides what nothing else removes."""
 
     NONE = 0
-    # The workspaces no running environment uses (`--workspaces`).
-    WORKSPACES = enum.auto()
+    # The project state directories no running environment uses (`--project-state`).
+    PROJECT_STATE = enum.auto()
+    # The persistent store volumes no running environment uses (`--persistent-stores`).
+    PERSISTENT_STORES = enum.auto()
     # The images no running environment uses (`--images`).
     IMAGES = enum.auto()
 
@@ -63,9 +75,10 @@ class Found:
 
     stale: list[EnvironmentDesc] = field(default_factory=list)
     state: list[Path] = field(default_factory=list)
-    gone: list[revoke.Environment] = field(default_factory=list)
+    gone: list[config_remove.Environment] = field(default_factory=list)
     leftovers: cleanup.StoreLeftovers = field(default_factory=cleanup.StoreLeftovers)
-    workspaces: list[Path] = field(default_factory=list)
+    project_state: list[Path] = field(default_factory=list)
+    persistent_stores: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     verified_store: store.VerifiedStore | None = None
     # The ssh config's entries for environments that aren't running, and
@@ -78,7 +91,8 @@ class Found:
     def others(self) -> bool:
         """Whether there's anything but ssh entries."""
         return bool(
-            self.stale or self.state or self.gone or self.leftovers or self.workspaces or self.images
+            self.stale or self.state or self.gone or self.leftovers or self.project_state
+            or self.persistent_stores or self.images
         )
 
     def __bool__(self) -> bool:
@@ -89,13 +103,15 @@ def find(config: UserConfig, now: datetime.datetime, *, extras: Extras) -> Found
     """Everything there is to clean up; it's only read."""
     runs = cleanup.find_runs(config)
     found = Found(stale=runs.stale, state=cleanup.find_orphaned_state(config, now))
-    found.verified_store = revoke.open_store(config)
+    found.verified_store = config_remove.open_store(config)
     if found.verified_store is not None:
         found.gone = cleanup.find_gone_projects(found.verified_store)
         found.leftovers = cleanup.find_store_leftovers(found.verified_store)
     # The stale runs go first, so what they used is free.
-    if Extras.WORKSPACES in extras:
-        found.workspaces = cleanup.find_workspaces(config, runs.running)
+    if Extras.PROJECT_STATE in extras:
+        found.project_state = cleanup.find_project_state(config, runs.running)
+    if Extras.PERSISTENT_STORES in extras:
+        found.persistent_stores = cleanup.find_persistent_stores(config, runs.running)
     if Extras.IMAGES in extras:
         found.images = cleanup.find_images(config, runs.running)
     found.ssh_mode = ssh_hosts.cleanup_mode(config)
@@ -119,7 +135,7 @@ def show(found: Found) -> None:
             for line in lines:
                 print("  " + review.clean(line))
 
-    section("Environments whose `scoter run` is gone (stopped as `scoter kill` does; their workspaces kept)", [
+    section("Environments whose `scoter run` is gone (stopped as `scoter kill` does; their project state kept)", [
         f"{env.host}  {'running' if env.suc else 'reserved'}  {env.project_dir or '-'}  since {env.created_at}"
         for env in found.stale
     ])
@@ -128,17 +144,17 @@ def show(found: Found) -> None:
     ])
     gone: list[str] = []
     for env in found.gone:
-        record = env.record()
-        count = len(record.acceptances) if record else 0
-        gone.append(f"{env.project_dir}  ({count} acceptance{'s' if count != 1 else ''})")
-    section("Accepted settings of projects whose directory is gone", gone)
+        count = len(env.configs())
+        gone.append(f"{env.project_dir}  ({count} configuration{'s' if count != 1 else ''})")
+    section("Configurations of projects whose directory is gone", gone)
     section(
         f"The verified store's leftovers ({found.leftovers.size} bytes)" if found.leftovers else "",
         found.leftovers.describe(),
     )
-    section("Workspaces no running environment uses (anything not fetched back is lost)", [
-        f"{path}  ({cleanup.dir_size(path)} bytes)" for path in found.workspaces
+    section("Project state no running environment uses (anything in its clone not fetched back is lost)", [
+        f"{path}  ({cleanup.dir_size(path)} bytes)" for path in found.project_state
     ])
+    section("Persistent stores no running environment uses", found.persistent_stores)
     section("Images no running environment uses", found.images)
     section(
         "SSH config entries for environments that aren't running"
@@ -173,28 +189,39 @@ def remove(config: UserConfig, found: Found, now: datetime.datetime) -> int:
             # Its ssh entries are asked about with the others, below.
             if cleanup.is_stale(config, env.host) and main_kill.run_kill(
                 config, host=env.host, fetch_branch=None,
-                workspace=main_kill.Workspace.KEEP, ssh=main_kill.SshEntries.KEEP,
+                ssh=main_kill.SshEntries.KEEP,
             ) != 0:
                 failed = True
         step(env.host, stop)
     step("the run's files", lambda: _say_removed(cleanup.remove_orphaned_state(config, found.state, now)))
     for gone in found.gone:
-        def revoke_gone(env: revoke.Environment = gone) -> None:
-            revoked = cleanup.remove_gone_project(env)
-            print(f"Revoked {len(revoked)} acceptance{'s' if len(revoked) != 1 else ''} of {env.project_dir}.")
-        step(gone.project_dir, revoke_gone)
+        def remove_gone(env: config_remove.Environment = gone) -> None:
+            removed = cleanup.remove_gone_project(env, run_config.running_config_ids(config))
+            print(f"Removed {len(removed)} configuration{'s' if len(removed) != 1 else ''} of {env.project_dir}.")
+        step(gone.project_dir, remove_gone)
     if found.verified_store is not None:
         verified_store = found.verified_store
 
+        def retired() -> None:
+            count = cleanup.remove_retired(verified_store, run_config.running_config_ids(config))
+            if count:
+                print(f"Removed {count} configuration{'s' if count != 1 else ''} removed or replaced while a run used it.")
+        step("the configurations no run uses any more", retired)
+
         def leftovers() -> None:
-            # Again after the revoking, which can leave none.
+            # Again after the removing, which can leave none.
             if cleanup.find_store_leftovers(verified_store):
                 removed = cleanup.remove_store_leftovers(verified_store)
                 for line in removed.describe():
                     print(f"Removed {line}.")
         step("the verified store's leftovers", leftovers)
-    if found.workspaces:
-        step("the workspaces", lambda: _say_removed(cleanup.remove_workspaces(config, found.workspaces)))
+    if found.project_state:
+        step("the project state", lambda: _say_removed(cleanup.remove_project_state(config, found.project_state)))
+    if found.persistent_stores:
+        def stores() -> None:
+            for name in cleanup.remove_persistent_stores(config, found.persistent_stores):
+                print(f"Removed {name}.")
+        step("the persistent stores", stores)
     if found.images:
         def images() -> None:
             for name in cleanup.remove_images(config, found.images):
@@ -276,20 +303,31 @@ def run_cleanup(
 def main(argv: Sequence[str]) -> int:
     """CLI entrypoint."""
     config, argv, parser = gen_parser(argv, (
-        "Find what Surf Scoter left behind that nothing else removes, list it, and remove it "
-        "once you say so: environments whose run is gone, a run's files no environment uses, "
-        "the accepted settings of projects whose directory is gone, and the verified store's "
-        "leftovers.  Expired acceptances stay: `scoter revoke` removes them."
+        "Remove what runs, pulls and deleted projects left behind.  It finds what nothing "
+        "else removes, lists it, and removes it once you say so: environments whose run is "
+        "gone, a run's files no environment uses, the configurations of projects whose "
+        "directory is gone, configurations removed or replaced while a run used them, and "
+        "the verified store's leftovers.  Safe to run at any time: your setup, your ssh key, "
+        "and anything a running environment or a project still there uses are kept.  "
+        "`scoter user-cleanup` is the one that undoes `scoter user-setup`."
     ))
     if not config:
         return BAD_EXECUTION_ARGS_CODE
     parser.add_argument(
-        "--workspaces",
+        "--project-state",
         action="store_true",
+        dest="project_state",
         help=(
-            "Also remove the workspaces no running environment uses.  Anything in them not "
-            "fetched back into its project is lost."
+            "Also remove the project state directories (each project's clone, settings and "
+            "resources) no running environment uses.  Anything in a clone not fetched back "
+            "into its project is lost."
         ),
+    )
+    parser.add_argument(
+        "--persistent-stores",
+        action="store_true",
+        dest="persistent_stores",
+        help="Also remove the dev containers' persistent stores no running environment uses.",
     )
     parser.add_argument(
         "--images",
@@ -305,8 +343,10 @@ def main(argv: Sequence[str]) -> int:
     )
     args = parser.parse_args(argv)
     extras = Extras.NONE
-    if args.workspaces:
-        extras |= Extras.WORKSPACES
+    if args.project_state:
+        extras |= Extras.PROJECT_STATE
+    if args.persistent_stores:
+        extras |= Extras.PERSISTENT_STORES
     if args.images:
         extras |= Extras.IMAGES
     confirm = Confirm.ASK

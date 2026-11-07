@@ -65,7 +65,7 @@
 //!
 //! The tool sets the `scoter` section's `paths` that say where the
 //! configuration came from: `project-config`, `project-dir`,
-//! `dev-container-path`, `dev-container-workspace-dir`, `dev-container-project-dir`,
+//! `dev-container-path`, `project-clone-dir`,
 //! `dev-container-settings-dir`, `user-setup-file`,
 //! `user-dir`, `distribution-dir`, `distribution-bin-dir` and `cwd`.  Setup files can set
 //! `distribution-dir` (the tool's value, when it has one, wins), but none of the others.
@@ -89,13 +89,15 @@ use super::{ConfigError, child_key, index_key};
 pub const SCOTER_SECTION: &str = "scoter";
 // The `scoter` section's `paths` the tool sets.
 pub const PROJECT_CONFIG: &str = "project-config";
+/// The directory the project file and the project's container directories are
+/// read from (`--config-dir`): a copy of the project's files, or, without
+/// one, the project files directory itself.
+pub const CONFIG_DIR: &str = "config-dir";
 pub const PROJECT_DIR: &str = "project-dir";
 pub const DEV_CONTAINER_PATH: &str = "dev-container-path";
-/// The project workspace, mounted in the dev container.
-pub const DEV_CONTAINER_WORKSPACE_DIR: &str = "dev-container-workspace-dir";
-/// Where the project is cloned: the workspace, with the project file's
-/// `container: workspace-subdir` added.
-pub const DEV_CONTAINER_PROJECT_DIR: &str = "dev-container-project-dir";
+/// The project's clone, mounted in the dev container at its `mounts:
+/// project-clone`.
+pub const PROJECT_CLONE_DIR: &str = "project-clone-dir";
 /// The settings directory, mounted read-only in the dev container.
 pub const DEV_CONTAINER_SETTINGS_DIR: &str = "dev-container-settings-dir";
 pub const USER_SETUP_FILE: &str = "user-setup-file";
@@ -122,7 +124,7 @@ pub const VCS_ROOT: &str = "vcs-root";
 /// The project's id, the same for the same project directory: its name and a
 /// hash of its canonical path (`environment_id`).  The verified store names
 /// the project's directory by it, and the setup can use it to name a
-/// workspace outside the project.
+/// project state directory outside the project.
 pub const PROJECT_ID: &str = "project-id";
 /// The project's branch (`--project-branch`, from the VCS section's
 /// `current-branch`), made safe as a single path part (`path_part`).  Not
@@ -131,13 +133,13 @@ pub const PROJECT_BRANCH: &str = "project-branch";
 /// The `scoter` `paths` only the tool sets.
 const TOOL_ONLY_KEYS: [&str; 13] = [
     PROJECT_CONFIG,
+    CONFIG_DIR,
     PROJECT_DIR,
     PROJECT_ID,
     PROJECT_BRANCH,
     VCS_ROOT,
     DEV_CONTAINER_PATH,
-    DEV_CONTAINER_WORKSPACE_DIR,
-    DEV_CONTAINER_PROJECT_DIR,
+    PROJECT_CLONE_DIR,
     DEV_CONTAINER_SETTINGS_DIR,
     USER_SETUP_FILE,
     USER_DIR,
@@ -433,14 +435,17 @@ pub struct SetupOptions<'a> {
     pub project_dir: Option<&'a Path>,
     /// The project file in effect: `scoter:project-config`.
     pub project_config: Option<&'a Path>,
+    /// Where the project's files are read from: `scoter:config-dir`.  Without
+    /// it, the project files directory in `project_dir`.
+    pub config_dir: Option<&'a Path>,
     /// The root of the repository holding the project: `scoter:vcs-root`.
     pub vcs_root: Option<&'a Path>,
     /// The project's branch, as the VCS gave it: `scoter:project-branch`,
     /// once made safe as a path part.
     pub project_branch: Option<&'a str>,
-    /// The dev container's mounts: `scoter:dev-container-workspace-dir` and
+    /// The dev container's mounts: `scoter:project-clone-dir` and
     /// `scoter:dev-container-settings-dir`.
-    pub dev_container_workspace_dir: Option<&'a Path>,
+    pub project_clone_dir: Option<&'a Path>,
     pub dev_container_settings_dir: Option<&'a Path>,
     /// The project has a dev container, whose directory is set as
     /// `scoter:dev-container-path` once it's found (with
@@ -635,10 +640,7 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
     add(PROJECT_CONFIG, options.project_config.map(path_text));
     add(PROJECT_DIR, options.project_dir.map(path_text));
     add(VCS_ROOT, options.vcs_root.map(path_text));
-    add(
-        DEV_CONTAINER_WORKSPACE_DIR,
-        options.dev_container_workspace_dir.map(path_text),
-    );
+    add(PROJECT_CLONE_DIR, options.project_clone_dir.map(path_text));
     add(
         DEV_CONTAINER_SETTINGS_DIR,
         options.dev_container_settings_dir.map(path_text),
@@ -785,43 +787,56 @@ pub fn load_with(options: &SetupOptions, env: Env) -> Result<SystemConfig, Vec<C
             ));
         }
     }
+    // A project's containers are read only from its configuration, which the
+    // generator searches first; a search directory in the project would be a
+    // second way in for the same files, one no review covers.
+    for dir in config.path_list(SCOTER_SECTION, super::DEV_CONTAINERS_SEARCH) {
+        if let Some(name) = in_project(&dir, options) {
+            location_errors.push(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "`{SCOTER_SECTION}:{}` lists {}, which is in the project (`{name}`); the project's own containers are always searched first, so list only directories outside the project",
+                    super::DEV_CONTAINERS_SEARCH,
+                    dir.display()
+                ),
+            ));
+        }
+    }
     errors.extend(location_errors);
-    // The project file is in the project directory's files directory, as the
-    // setup names them.  (A universal file made earlier gives it as it was.)
+    // The project file is in the config directory: the one given, or else the
+    // project directory's files directory, as the setup names them.  (A
+    // universal file made earlier gives both as they were.)
     if let (true, None, Some(project_dir)) = (
         options.find_project_config,
         options.project_config,
         options.project_dir,
     ) {
-        match project_file_path(&config, project_dir) {
-            Ok(path) => {
+        match config_dir_path(&config, project_dir, options.config_dir)
+            .and_then(|dir| Ok((project_file_name(&config)?, dir)))
+        {
+            Ok((file, dir)) => {
+                let path = dir.join(file);
                 if options.record_project {
                     history.project_config.insert(0, path_text(&path));
                 }
+                config.set_location(CONFIG_DIR, path_text(&dir));
                 config.set_location(PROJECT_CONFIG, path_text(&path));
             }
             Err(e) => errors.push(e),
         }
+    } else if let Some(dir) = options.config_dir {
+        config.set_location(CONFIG_DIR, path_text(dir));
     }
 
     errors.extend(kind_changes(&files));
-    // Stand in for the dev container's directory, and where the project is
-    // cloned in the workspace, until the project file says.
+    // Stand in for the dev container's directory until it's found.
     let mut later = Fallbacks::new();
     if options.dev_container {
         later.insert(
             (SCOTER_SECTION.to_string(), DEV_CONTAINER_PATH.to_string()),
             Entry::Path(DEV_CONTAINER_PATH.to_string()),
         );
-        if options.dev_container_workspace_dir.is_some() {
-            later.insert(
-                (
-                    SCOTER_SECTION.to_string(),
-                    DEV_CONTAINER_PROJECT_DIR.to_string(),
-                ),
-                Entry::Path(DEV_CONTAINER_PROJECT_DIR.to_string()),
-            );
-        }
     }
     errors.extend(config.validate(&later));
     record.files = files.iter().map(SetupFile::record).collect();
@@ -844,42 +859,59 @@ pub const PROJECT_FILES_DIR: &str = "project-files-dir";
 /// project files directory.
 pub const PROJECT_FILE_NAME: &str = "project-file-name";
 
-/// The project file for `project_dir`: `PROJECT_FILES_DIR/PROJECT_FILE_NAME`
-/// in it, as the setup names them, each a single name.
-fn project_file_path(config: &SystemConfig, project_dir: &Path) -> Result<PathBuf, ConfigError> {
-    let name = |key: &str, what: &str| -> Result<String, ConfigError> {
-        let setting = format!("the system configuration's `{SCOTER_SECTION}` `values: {key}`");
-        let name = match config.value(SCOTER_SECTION, key) {
-            Some(ScalarValue::String(name)) => name,
-            Some(_) => {
-                return Err(ConfigError::new(
-                    None,
-                    "",
-                    format!("{setting} must be text"),
-                ));
-            }
-            None => {
-                return Err(ConfigError::new(
-                    None,
-                    "",
-                    format!(
-                        "the system configuration sets no `{SCOTER_SECTION}` `values: {key}`, {what}"
-                    ),
-                ));
-            }
-        };
-        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+/// The directory the project's files are read from: `given`, or else
+/// `PROJECT_FILES_DIR` in `project_dir`, as the setup names it.
+fn config_dir_path(
+    config: &SystemConfig,
+    project_dir: &Path,
+    given: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    match given {
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => Ok(project_dir.join(single_name(
+            config,
+            PROJECT_FILES_DIR,
+            "the directory holding the project file",
+        )?)),
+    }
+}
+
+/// The project file's name in the config directory, as the setup names it.
+fn project_file_name(config: &SystemConfig) -> Result<String, ConfigError> {
+    single_name(config, PROJECT_FILE_NAME, "the project file's name")
+}
+
+/// The `scoter` `values` `key`, which must be a single file name.  `what`
+/// says what it names, for when it isn't set.
+fn single_name(config: &SystemConfig, key: &str, what: &str) -> Result<String, ConfigError> {
+    let setting = format!("the system configuration's `{SCOTER_SECTION}` `values: {key}`");
+    let name = match config.value(SCOTER_SECTION, key) {
+        Some(ScalarValue::String(name)) => name,
+        Some(_) => {
             return Err(ConfigError::new(
                 None,
                 "",
-                format!("{setting} ('{name}') must be a single name, without '/' or '\\'"),
+                format!("{setting} must be text"),
             ));
         }
-        Ok(name)
+        None => {
+            return Err(ConfigError::new(
+                None,
+                "",
+                format!(
+                    "the system configuration sets no `{SCOTER_SECTION}` `values: {key}`, {what}"
+                ),
+            ));
+        }
     };
-    let files_dir = name(PROJECT_FILES_DIR, "the directory holding the project file")?;
-    let file = name(PROJECT_FILE_NAME, "the project file's name")?;
-    Ok(project_dir.join(files_dir).join(file))
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err(ConfigError::new(
+            None,
+            "",
+            format!("{setting} ('{name}') must be a single name, without '/' or '\\'"),
+        ));
+    }
+    Ok(name)
 }
 
 /// Why the tools can't read a setup file they found by themselves in `dir`,
@@ -901,7 +933,7 @@ fn untrusted_setup_dir(dir: &Path, options: &SetupOptions) -> Option<String> {
 
 /// The name of the project location `dir` is in, once symlinks are
 /// resolved, if it's in one: the project directory, the project files
-/// directory, the dev container's workspace, or the repository holding the
+/// directory, the project's clone, or the repository holding the
 /// project (`scoter:vcs-root`).
 fn in_project(dir: &Path, options: &SetupOptions) -> Option<String> {
     let canonical = resolve_partly;
@@ -925,8 +957,8 @@ fn in_project(dir: &Path, options: &SetupOptions) -> Option<String> {
                 .map(Path::to_path_buf),
         ),
         (
-            format!("{SCOTER_SECTION}:{DEV_CONTAINER_WORKSPACE_DIR}"),
-            options.dev_container_workspace_dir.map(Path::to_path_buf),
+            format!("{SCOTER_SECTION}:{PROJECT_CLONE_DIR}"),
+            options.project_clone_dir.map(Path::to_path_buf),
         ),
         (
             format!("{SCOTER_SECTION}:{VCS_ROOT}"),
@@ -1670,16 +1702,6 @@ impl SystemConfig {
         self.set_location(DEV_CONTAINER_PATH, path_text(dir));
     }
 
-    /// Set `scoter:dev-container-project-dir` from the workspace and the
-    /// project file's `container: workspace-subdir`; without a workspace,
-    /// it's left unset.
-    pub fn set_dev_container_project_dir(&mut self, subdir: Option<&str>) {
-        if let Some(workspace) = self.get_path(SCOTER_SECTION, DEV_CONTAINER_WORKSPACE_DIR) {
-            let dir = subdir.map_or_else(|| workspace.clone(), |subdir| workspace.join(subdir));
-            self.set_location(DEV_CONTAINER_PROJECT_DIR, path_text(&dir));
-        }
-    }
-
     /// Set one of the `scoter` `paths` the tool sets.
     fn set_location(&mut self, key: &str, value: String) {
         self.sections
@@ -1866,18 +1888,18 @@ impl SystemConfig {
 
     /// The name of the project location `path` is in, once symlinks are
     /// resolved, if it's in one: the project directory, the project files
-    /// directory, the dev container's workspace, or the repository holding
+    /// directory, the project's clone, or the repository holding
     /// the project.
     pub fn project_location(&self, path: &Path) -> Option<String> {
         let location = |key| self.get_path(SCOTER_SECTION, key);
         let project_dir = location(PROJECT_DIR);
         let project_config = location(PROJECT_CONFIG);
-        let workspace = location(DEV_CONTAINER_WORKSPACE_DIR);
+        let workspace = location(PROJECT_CLONE_DIR);
         let vcs_root = location(VCS_ROOT);
         let options = SetupOptions {
             project_dir: project_dir.as_deref(),
             project_config: project_config.as_deref(),
-            dev_container_workspace_dir: workspace.as_deref(),
+            project_clone_dir: workspace.as_deref(),
             vcs_root: vcs_root.as_deref(),
             ..SetupOptions::default()
         };
@@ -2895,7 +2917,7 @@ mod tests {
             let options = SetupOptions {
                 project_dir: project.then_some(project_dir.as_path()),
                 project_config: project.then_some(project_config.as_path()),
-                dev_container_workspace_dir: project.then_some(workspace.as_path()),
+                project_clone_dir: project.then_some(workspace.as_path()),
                 ..SetupOptions::default()
             };
             let env = Env {
@@ -2914,7 +2936,7 @@ mod tests {
         assert!(one("${scoter:project-dir}/dist", true).contains("is in the project"));
         assert!(
             one(&format!("{}/dist", workspace.display()), true)
-                .contains("(`scoter:dev-container-workspace-dir`)")
+                .contains("(`scoter:project-clone-dir`)")
         );
         // Without a project, `./` would be wherever the tool runs.
         assert!(one("./dist", false).contains("must be absolute"));
@@ -2993,7 +3015,7 @@ mod tests {
             project_dir: Some(project_dir.as_path()),
             project_config: Some(project_config.as_path()),
             vcs_root: Some(repo.as_path()),
-            dev_container_workspace_dir: Some(workspace.as_path()),
+            project_clone_dir: Some(workspace.as_path()),
             ..SetupOptions::default()
         };
         let load_from = |home: &str| {
@@ -3010,7 +3032,7 @@ mod tests {
             ("repo/client/.surf-scoter.d", "scoter:project-dir"),
             ("repo/server/conf", "scoter:vcs-root"),
             ("repo", "scoter:vcs-root"),
-            ("ws/conf", "scoter:dev-container-workspace-dir"),
+            ("ws/conf", "scoter:project-clone-dir"),
         ] {
             assert_eq!(
                 load_from(home).unwrap_err(),
@@ -3342,45 +3364,6 @@ mod tests {
             config.get(SCOTER_SECTION, DEV_CONTAINER_PATH).as_deref(),
             Some("/dev")
         );
-    }
-
-    #[test]
-    fn dev_container_project_dir_set_later() {
-        let dir = TempDir::new();
-        dir.write(
-            "setup.yaml",
-            "a:\n  paths:\n    x: ${scoter:dev-container-project-dir}/x\n",
-        );
-        let env = crate::config::testing::home_env(dir.path(), Env::default());
-        let workspace = dir.path().join("ws");
-        let options = SetupOptions {
-            dev_container: true,
-            dev_container_workspace_dir: Some(&workspace),
-            ..SetupOptions::default()
-        };
-        let mut config = load_with(&options, env.clone()).unwrap();
-        assert_eq!(config.get("a", "x"), None);
-        config.set_dev_container_project_dir(Some("src/p"));
-        assert_eq!(
-            config.get_path(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR),
-            Some(workspace.join("src/p"))
-        );
-        assert_eq!(config.get_path("a", "x"), Some(workspace.join("src/p/x")));
-        // Without a subdir, the workspace itself.
-        config.set_dev_container_project_dir(None);
-        assert_eq!(
-            config.get_path(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR),
-            Some(workspace.clone())
-        );
-
-        // Without a workspace, it's never set.
-        let options = SetupOptions {
-            dev_container: true,
-            ..SetupOptions::default()
-        };
-        let mut config = load_with(&options, env).unwrap();
-        config.set_dev_container_project_dir(Some("src/p"));
-        assert_eq!(config.get(SCOTER_SECTION, DEV_CONTAINER_PROJECT_DIR), None);
     }
 
     // ---- file shape ----

@@ -29,7 +29,7 @@ docker:
     programs:
         exec: /usr/sbin/podman
     runs:
-        build: ${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}
+        build: ${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
     path-lists:
         compose:
             - ./.scoter/compose
@@ -89,10 +89,10 @@ Separate from the [references](#references), a command can on-the-fly insert a v
 For example, the `docker: runs: build` line above contains:
 
 ```
-${exec} -t {x:tag} -f {x:dockerfile} {x:dirname}
+${exec} build -t {x:tag} -f {x:dockerfile} {x:dir}
 ```
 
-Here, the reference placement will turn the `${exec}` into the location of the docker executable (from `docker: programs: exec`).  But the tool also needs to provide the tag for the constructed image, the location of the Dockerfile, and the directory in which it should run.  For that, the tool replaces `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}` (respectively) with the corresponding value.  If the tool doesn't provide one of those, then it goes into the called program without modification.
+Here, the reference placement will turn the `${exec}` into the location of the docker executable (from `docker: programs: exec`).  But the tool also needs to provide the tag for the constructed image, the location of the Dockerfile, and the directory in which it should run.  For that, the tool replaces `{x:tag}`, `{x:dockerfile}`, and `{x:dir}` (respectively) with the corresponding value.  If the tool doesn't provide one of those, then it goes into the called program without modification.
 
 Why the `x:` prefix?  It seems like it won't collide with other CLI tools.
 
@@ -106,7 +106,7 @@ Currently, the files can store at most 2 MB each.
 
 Surf Scoter has some sections that provide defaults that you may want to tweak:
 
-* `workspace` - where to copy project directories when you run them in a container.  This allows a full separation of container files versus your computer's files, so that you *explicitly* bring over files that you've authorized.
+* `project-state` - where a project's run keeps its clone of the project, and the name of its dev container's persistent store.  This allows a full separation of container files versus your computer's files, so that you *explicitly* bring over files that you've authorized.
 * `dev-env` - how to run your development environment.  You configure the firewall and gateway here, and you can include limitations on the container's resources.
 
 Surf Scoter expects some sections to exist in order to operate:
@@ -123,19 +123,19 @@ Additionally, the [`scoter` section](#the-scoter-section) has very special rules
 
 The `scoter` section has the unique trait where the tool fills in the `paths` that say where the configuration came from, and two `values` about the project, so you can refer to them from other places.  These are the same values as the universal configuration file's `active-config-locations` (see [The Universal Configuration File](contributors/universal-configuration-file.md)):
 
-* `project-config` - the project configuration file: `values: project-file-name` in the project directory's `values: project-files-dir` (below).  Not set without a project.
+* `project-config` - the project configuration file: `values: project-file-name` in `config-dir`.  Not set without a project.
+* `config-dir` - the directory the project file and the project's container directories are read from: the project directory's `values: project-files-dir` (below), unless the program that runs the generator gives a copy of those files instead (`gen-scoter-uc --config-dir`).  A container the project names is looked for here first, without it being in `dev-containers-search`.  Not set without a project.
 * `project-dir` - the project directory, where `./` locations start (see [File Locations](#file-locations)): the directory holding the project files directory.  `scoter` finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --project-dir`.  Not set without a project.
 * `vcs-root` - the root of the repository holding the project.  The `scoter` tool finds it (see [Version control roots](#version-control-roots)) and gives it to `gen-scoter-uc --vcs-root`; it must hold the project directory.  Not set without a project, or when the project isn't in a repository.  Setup files can't be read from inside it.
 * `dev-container-path` - the project's dev container directory, with its `Dockerfile` and `dev-env.yaml`.  Not set without a project configuration file.  The tool finds it using `path-lists: dev-containers-search` (see below), so that list can't refer to it.
-* `dev-container-workspace-dir` - the project workspace, mounted (writable) in the launched dev container.  The program that launches the container gives it (`gen-scoter-uc --dev-container-workspace-dir`).  Not set without that.
-* `dev-container-project-dir` - where the project is cloned in the workspace: `dev-container-workspace-dir` with the project file's `container: workspace-subdir` added, or the workspace itself without one (see [the development container](project-configuration-file.md#the-development-container)).  Not set without a project and a workspace.
-* `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `dev-container-workspace-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
+* `project-clone-dir` - the project's clone, mounted (writable) in the launched dev container at its `mounts: project-clone` (or the project file's `container: mounts: project-clone`; see [the development container](project-configuration-file.md#the-development-container)).  The program that launches the container gives it (`gen-scoter-uc --project-clone-dir`).  Not set without that.
+* `dev-container-settings-dir` - the settings directory, holding the runtime configuration files, mounted read-only in the launched dev container.  Like `project-clone-dir`, the launching program gives it (`gen-scoter-uc --dev-container-settings-dir`).
 * `user-setup-file` - the user's setup file that the tool found, as described [above](#where-to-find-the-system-configuration-files).  If the tool didn't find a user setup file, this isn't set.
 * `user-dir` - the directory the user's setup file was found in: `$SURF_SCOTER_HOME`, or `~/.config/surf-scoter.d`.  It isn't set when the file was found as `~/.config/surf-scoter.setup.{yaml,yml}` (that file isn't in a directory of its own), or when no user setup file was found.
 * `distribution-dir` - the Surf Scoter distribution directory, as described [above](#where-to-find-the-system-configuration-files): `--distribution-dir`, or else the highest priority setup file's `distribution-dir`.  Not set without either.
 * `distribution-bin-dir` - the distribution's programs: `${scoter:distribution-dir}/bin`.  A program working with the universal configuration file may change it there, and a later `gen-scoter-uc --universal` keeps the change while the distribution directory stays the same.  Not set without a distribution directory.
 * `cwd` - the directory the tool was run in.
-* `project-id` (a value, not a path) - the project's id: the project directory's name (lower-cased, with anything but letters, digits and `-` made `-`, at most 32 characters) and the first 12 hex digits of the SHA-256 of its canonical path, such as `client-3f9a0b1c2d4e`.  The same project directory always gets the same id; another clone gets another.  It names the project's directory in the verified store, and the default workspace (`workspace: paths: workspace-parent-dir`).  Not set without a project.
+* `project-id` (a value, not a path) - the project's id: the project directory's name (lower-cased, with anything but letters, digits and `-` made `-`, at most 32 characters) and the first 12 hex digits of the SHA-256 of its canonical path, such as `client-3f9a0b1c2d4e`.  The same project directory always gets the same id; another clone gets another.  It names the project's directory in the verified store, the default project state directory (`project-state: paths: project-state-dir`), and the default persistent store (`project-state: values: persistent-store-volume`).  Not set without a project.
 * `project-branch` (a value) - the branch checked out, from the project's VCS section's `runs: current-branch` (below), which `scoter` runs and gives to `gen-scoter-uc --project-branch`.  The project chooses its branch names, so it's made safe as one path part: only letters, digits, `.`, `_` and `-` are kept, each run of anything else made one `-` (`feature/x` becomes `feature-x`), `.` and `-` trimmed from the ends, and at most 64 characters.  Not set without a project, outside a repository, or when the VCS can't tell; a path that refers to it then has no value.  `--universal` carries it over while the project stays the same.
 
 ### Version control roots
@@ -151,7 +151,15 @@ Both stop below your home directory (so a home directory kept in a repository do
 
 The project directory is then looked for in the search's start, and each directory above it up to the repository root, never above it: a project planted above the repository isn't found.  Outside any repository, only the start is searched.  A project directory is one holding `values: project-files-dir`, with `values: project-file-name` in it.  A project whose `vcs` has a `find-root` must be in a repository of that VCS; one without (such as `file`) can be anywhere.
 
-A VCS section can also have a `runs: current-branch`: given `{x:root}`, the repository's root, it prints the branch checked out, or nothing when it can't tell.  `scoter verify` shows it in the review file, and `scoter` gives it to the generator as `${scoter:project-branch}`.  Like `find-root`, it should read the repository's files rather than run the VCS.  The distribution's `vcs_git_branch.py ROOT` does this for Git: it reads `.git/HEAD` (following a `.git` file's `gitdir:`, for worktrees and submodules), and prints the branch, or `detached at COMMIT`.
+A VCS section can also have a `runs: current-branch`: given `{x:root}`, the repository's root, it prints the branch checked out, or nothing when it can't tell.  `scoter` gives it to the generator as `${scoter:project-branch}`.  Like `find-root`, it should read the repository's files rather than run the VCS.  The distribution's `vcs_git_branch.py ROOT` does this for Git: it reads `.git/HEAD` (following a `.git` file's `gitdir:`, for worktrees and submodules), and prints the branch, or `detached at COMMIT`.
+
+A VCS section can also answer the pull's questions about the project's committed files.  Each runs in your repository (`{x:root}`, never the project clone), with `{x:path}` a directory or file in it, relative to the root; each `{x:...}` must be a whole argument.
+
+* `runs: list-files`, given `{x:ref}`: prints the files under `{x:path}` at that ref, and the commit it is, as JSON (`surf-scoter-vcs-files-1`): `{"commit": ID, "files": {PATH: {"kind": "file" | "executable" | "symlink" | "submodule", "id": ID, "size": BYTES}}}`, with paths relative to `{x:path}`.
+* `runs: show-file`, given `{x:commit}` (an id `list-files` gave): prints the file `{x:path}`'s contents at that commit.
+* `runs: file-status`, given `{x:ref}` and `{x:files}`, a copy of `{x:path}`'s files: prints, for each file in the copy, whether it's as committed (`surf-scoter-vcs-file-status-1`): `{"commit": ID, "files": {PATH: {"status": "committed" | "modified" | "untracked" | "ignored" | "unknown", "id": ID or null}}}`.
+
+`scoter` treats what they print as untrusted: it limits how much it reads, checks it against the schema, and refuses paths that could lead outside the directory or hold control or non-ASCII characters.  A VCS without `file-status` reports every file as `unknown`; one without `list-files` and `show-file` can only be pulled from the working tree.  The distribution's `vcs_git_files.py GIT ACTION ...` answers all three for Git, running only `rev-parse`, `ls-tree -z` and `cat-file`, which read the repository's objects, never the working tree; see [the VCS checklist](security/files.md#reporting-committed-files-list-files-show-file-file-status).
 
 All of the paths are absolute.
 
@@ -159,15 +167,29 @@ All of the paths are absolute.
 
 A run doesn't always have all of these: `project-dir` isn't set without a project, for example.  Referring to one that isn't set (say, `${scoter:user-dir}` when your setup file is `~/.config/surf-scoter.setup.yaml`) isn't an error, so one setup file can serve runs with and without a project:
 
-* A `path-lists` entry that needs it is left out, as a `./` entry is without a project.  So `dev-containers-search: ['${scoter:project-dir}/${scoter:project-files-dir}', '${scoter:distribution-dir}/containers']` is just the distribution's directory when there's no project.
+* A `path-lists` entry that needs it is left out, as a `./` entry is without a project.  So `compose: ['${scoter:project-dir}/compose', '${scoter:distribution-dir}/compose']` is just the distribution's directory when there's no project.
 * Any other value that needs it has no value (`null`), like a value that needs a program that isn't there.  The tool using that value reports the problem, if it needs it.
 
 A misspelled location, such as `${scoter:project-dirr}`, is still an error.
 
-When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), `user-setup-file` and `user-dir` aren't set, unless they come from an earlier run's universal configuration file (`--universal`).  A `--universal` file also brings along its `project-config`, `project-dir`, `dev-container-workspace-dir`, `dev-container-settings-dir` and `distribution-dir`, unless this run gives others.
+When the tool doesn't look for setup files (`gen-scoter-uc --no-setup-search`), `user-setup-file` and `user-dir` aren't set, unless they come from an earlier run's universal configuration file (`--universal`).  A `--universal` file also brings along its `project-config`, `project-dir`, `project-clone-dir`, `dev-container-settings-dir` and `distribution-dir`, unless this run gives others.
 
 The rest of the `scoter` section is yours to set.  The tools read its `path-lists: dev-containers-search` (see [Defining Executables](#defining-executables)).
 
+
+### The `pull:` section
+
+`scoter pull` copies the project's files into your own configuration (see [user-owned project files](contributors/user-owned-project-files.md)).  Between copying and storing them, it runs `runs: reviewer`, given the universal configuration file (`{x:universal}`), the working directory's id (`{x:workdir}`) and a session file (`{x:session}`).  The session file holds the pull's options (`allow-opaque`, `known-findings`); the reviewer replaces it with its decision, `result: approve` with the `analysis` id it showed, or `result: deny`.  A reviewer builds on `scoter pull analyze` and `scoter pull changed`, and only decides whether to approve: `scoter pull approve` checks everything again.
+
+`paths: unlocked-dir` is where `scoter unlock` puts a configuration for you to edit (`ENV-ID/files/` and `ENV-ID/host.json`).  While unlocked, every run warns; after `values: unlock-reminder-days` the warning lists the egress rules and host commands, and after `values: unlock-days` (0 for never) runs stop until `scoter lock`.
+
+`scoter unlock` refuses an `unlocked-dir` inside the project, its repository, the project clone, the state directory or the store.  `paths: templates-dir` holds the templates `scoter init` and `scoter unlock --from-template NAME` start from (the distribution's `templates`, never one inside a project or its repository), and `values: default-template` names the one `scoter init` uses by default.
+
+`scoter push` writes the configuration in use into the project's files directory, after showing the change as a patch; it checks each file against the patch's hash just before replacing it, never deletes, never writes the host file, and leaves committing to your VCS.
+
+The review timers are in the `verification` section's values, in days since you last reviewed the configuration in use, each 0 to turn it off: `review-notice-first-days` and `review-notice-every-days` (a notice at the next run after each due day), `review-warn-days` (a warning on every run) and `review-expire-days` (runs stop until `scoter review`).
+
+The distribution's reviewer, `pull_reviewer.py`, explores the analysis in the terminal, and needs a terminal for its input and output.  A reviewer of your own is trusted setup, like any other program the setup runs: it must show the project's text as plain text only, using the report's `clean` forms, never as HTML or Markdown.  `pull:runs:reviewer` is a [guarded setting](#guarded-settings).
 
 ## Value Types
 
@@ -197,7 +219,7 @@ References to a program, such as `${exec}`, get the program found.  If a program
 
 ### Defining Executables
 
-The tool makes heavy use of running other commands.  In order to remain flexible enough to work with your particular environment, it sets up executables based on the tool name and the uses for it.  In the example above, when the tool builds a container image, it will use the `docker` section's `runs: build` key.  The execution will include external values `{x:tag}`, `{x:dockerfile}`, and `{x:dirname}`, and the `${exec}` comes from the `docker` section's `programs: exec`.
+The tool makes heavy use of running other commands.  In order to remain flexible enough to work with your particular environment, it sets up executables based on the tool name and the uses for it.  In the example above, when the tool builds a container image, it will use the `docker` section's `runs: build` key.  The execution will include external values `{x:tag}`, `{x:dockerfile}`, and `{x:dir}`, and the `${exec}` comes from the `docker` section's `programs: exec`.
 
 When a `runs` pattern is a single string, the tool splits it into arguments at the spaces *before* it replaces the `${...}` references, so a referenced value with spaces in it (such as `C:\Program Files\...`) stays a single argument.  To put spaces into an argument yourself, quote it with `'...'` or `"..."`; inside `"..."`, write `\"` for a `"` and `\\` for a `\`.  A backslash anywhere else is an ordinary character.
 
@@ -221,32 +243,33 @@ The tools use these sections:
 * `docker`: the container tool.
     * `programs: exec`: the program; defaults to `docker`.
     * `runs: broker`: how `scoter-host` starts the broker inside the development container.  It defaults to `${exec} exec -i {x:container} {x:broker}`, where `{x:container}` is the container name and `{x:broker}` is the `broker-bin` from the container's `dev-env.yaml`.  It must not ask for a TTY.
+    * `runs: inspect-volume`, `create-volume`, `remove-volume` and `list-volumes`: the dev container's persistent store volume (`{x:name}`): `scoter run` creates it unless `inspect-volume` succeeds for it, `--clean-persistent-store` removes it, and `scoter cleanup --persistent-stores` lists those whose name starts with `{x:prefix}`, one a line.
 * `python`: the interpreter that runs the distribution's scripts: the sub-commands (`bin/main_*.py`) and the helpers the other sections' `runs` name.
     * `programs: exec`: the interpreter, normally `python3`.  Point it at a virtual environment's interpreter, such as `${scoter:distribution-dir}/.venv/bin/python`, to give the scripts installed libraries.  It runs on your computer with your privileges, so never point it into a project.
     * `runs: script`: how the tools run one of the distribution's scripts: `${exec} -E -s`.  Every `runs` entry that starts one begins with it (`- ${python:script}`, a reference that puts its items in place), so the flags are in one place: `-E` ignores the `PYTHON*` environment variables (which a project could set when you enter its directory) and `-s` your user site-packages.
     * `runs: sub-command`: how the tool starts a sub-command script: `${script} {x:script}`.  `{x:script}` is the script, and the tool adds the universal configuration file, the sub-command name and its arguments after it.  It must start with the interpreter.
-* `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  Its `value-lists: drop-env` is `GIT_*`, so the Git commands the tools run (`local-clone`, `fetch-changes-into`, `merge-changes`) don't get Git's environment variables, which a project could set as you enter its directory to point Git at another repository, configuration or program.  Set what you need in your Git configuration instead (`core.sshCommand` in place of `GIT_SSH_COMMAND`).
-* `workspace`: where a project's run keeps its files.
-    * `paths: workspace-parent-dir`: the directory holding them.  The default is `${scoter:state-dir}/workspaces/${scoter:project-id}`: outside the project, so the project's own files and the container's stay apart, named by the project's id (the same for the same project directory).  For a workspace per branch, use `${scoter:state-dir}/workspaces/${scoter:project-id}/${scoter:project-branch}`.
-    * `paths: workspace-dir`, `setup-dir` and `resources-dir`: the clone the container works in (mounted read-write), the run's settings (mounted read-only), and its resources (not mounted), in `workspace-parent-dir`.
+* `git-vcs`: the Git VCS (see [Version control roots](#version-control-roots)).  None of its commands run in the project clone: `refresh-bundle` (`{x:bundle}`) bundles your branches and tags, in your repository, for the clone to fetch, and `set-clone-origin` (`{x:project-clone-dir}`, `{x:origin}`) points a fresh clone's `origin` at the bundle's path in the container, as a file edit.  Its `value-lists: drop-env` is `GIT_*`, so the Git commands the tools run (`local-clone`, `refresh-bundle`, `set-clone-origin`, `fetch-changes-into`, `merge-changes`) don't get Git's environment variables, which a project could set as you enter its directory to point Git at another repository, configuration or program.  Set what you need in your Git configuration instead (`core.sshCommand` in place of `GIT_SSH_COMMAND`).
+* `project-state`: where a project's run keeps its files, and its persistent store.
+    * `paths: project-state-dir`: the directory holding the files.  The default is `${scoter:state-dir}/projects/${scoter:project-id}`: outside the project, so the project's own files and the container's stay apart, named by the project's id (the same for the same project directory).  For a clone per branch, use `${scoter:state-dir}/projects/${scoter:project-id}/${scoter:project-branch}`.
+    * `paths: project-clone-dir`, `setup-dir` and `resources-dir`: the clone the container works in (mounted read-write, as the directory itself), the run's settings (mounted read-only), and its resources (not mounted), in `project-state-dir`.  Keep all three where the container can't write: `scoter run` refuses a clone directory that's a symlink.
+    * `values: persistent-store-volume`: the name of the container volume mounted at the dev container's `mounts: persistent-store`, kept between runs.  The default is `${persistent-store-prefix}${scoter:project-id}-store`; it must be a volume name, and differ for each project.  It's a volume, not a host directory, so host commands can't reach it.
+    * `values: persistent-store-prefix`: what every persistent store's name starts with, `scoter-` by default.  `scoter cleanup --persistent-stores` only looks at volumes named with it.
 * `dev-env`: the containers of a development environment.
     * `paths: docker-compose`, `firewall-router` and `network-gateway`: the compose file, and the distribution's firewall and gateway container directories.
     * `values`: the images' names, the containers' limits (`mem-limit`, `cpus`, `pids-limit`, `logging-max-size`), and `start-sshd-port`, the first port tried for a container's sshd when its `dev-env.yaml` leaves it to the run.
-    * `values: network-gateway-name`: the network gateway's name (`squid`): the gateway is the only way out of the development container.  Your acceptance of a project's egress rules is for this gateway; a different one asks for a new review.
+    * `values: network-gateway-name`: the network gateway's name (`squid`): the gateway is the only way out of the development container.  A configuration's egress rules were reviewed for this gateway; it's part of the setup a pull records, so a different one asks for a new pull.
     * `values: network-gateway-config-mount`: where the gateway container reads the configuration `network-gateway-write-config` makes.
     * `runs: network-gateway-write-config`: given the universal configuration file (`{x:universal}`) and where to write (`{x:output}`), writes the gateway's configuration from the egress rules, and prints JSON saying what it enforces and what it refuses (each with its reason).  It exits with 1, writing nothing, when it refuses any rule: `scoter run` then shows the refusals and doesn't start.  The distribution runs its `bin/gateway_squid.py`.
-* `verification`: what a review of a project's settings checks (`scoter verify`), and where your acceptances are kept (see [The verified store](#the-verified-store)).
+* `verification`: what the checks on a configuration look for (at `scoter pull`, `lock`, `review`, and every `scoter run`), and where your configurations are kept (see [The verified store](#the-verified-store)).
     * `host-commands`: every [host command check](#host-command-checks): shells, interpreters, programs that run other programs, options and environment variables that run code, version manager shims, and the `docker` command (mapped to the `docker` section's program).  Keeping them in one section means none is missed by being somewhere else.
-    * `paths: store`: where your acceptances are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the dev container's workspace and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
-    * `path-lists: verified-containers`: the `scoter: path-lists: dev-containers-search` directories whose containers are reviewed like a project's own: kept in the store with each acceptance, and built from that copy.  The others (such as the distribution's `containers`) are trusted as part of your installation.  Empty by default; add `${scoter:distribution-dir}/containers` to review the distribution's containers too.
+    * `paths: store`: where your configurations are kept.  They decide what each project may do, so it must be an absolute path, outside the project directory, the project files directory, the project's clone and the repository holding the project; otherwise the tools stop with an error.  The default is `~/.config/surf-scoter.d/verified`, whether or not a user setup file is found there.
     * `project-files`: checks on the files in a project's container directories, as [project file and egress host checks](#project-file-and-egress-host-checks).  The distribution's `secret-files` warns about names that look like secrets, such as `.env`, `*.pem` or `.aws/`, as everything in a container directory goes into the image.
     * `egress-hosts`: checks on the hosts a project's egress rules reach, the same way.  The distribution's warn about hosts anyone can upload to (`code-hosts`, `paste-sites`, `object-storage`, `user-content`, `webhooks`, `file-sharing`): a rule that reaches one lets the container send data out, whatever the other rules say.
-    * `path-lists: public-suffix-lists`: [Public Suffix List](https://publicsuffix.org/) files: a project's egress rule can't allow every subdomain (`*.DOMAIN`) of a public suffix, where anyone can have a name.  None by default.  To use the published list, download it (`curl -o ~/.config/surf-scoter.d/public_suffix_list.dat https://publicsuffix.org/list/public_suffix_list.dat`), name the file here, and refresh it now and then.  Its plain, wildcard (`*.ck`) and exception (`!www.ck`) rules are all used, its private section (shared hosting) too; entries outside ASCII are skipped, as egress hosts are written in their `xn--` form.  A file named here that can't be read is an error.  The refusal applies to the project file's rules, to those typed in a review, and to accepted settings at each run, so a refreshed list can refuse a wildcard accepted before.
+    * `path-lists: public-suffix-lists`: [Public Suffix List](https://publicsuffix.org/) files: a project's egress rule can't allow every subdomain (`*.DOMAIN`) of a public suffix, where anyone can have a name.  None by default.  To use the published list, download it (`curl -o ~/.config/surf-scoter.d/public_suffix_list.dat https://publicsuffix.org/list/public_suffix_list.dat`), name the file here, and refresh it now and then.  Its plain, wildcard (`*.ck`) and exception (`!www.ck`) rules are all used, its private section (shared hosting) too; entries outside ASCII are skipped, as egress hosts are written in their `xn--` form.  A file named here that can't be read is an error.  The refusal applies to the rules a pull reviews, and to the configuration in use at each run, so a refreshed list can refuse a wildcard approved before.
     * `value-lists: egress-refused-wildcards`: the domains a project's egress rule can't allow every subdomain of, such as `github.io` or `co.uk`: public suffixes and shared hosting, where anyone can have a name.  A `*.` on a single label (`*.com`) is always refused.  The distribution gives a starting list; to add to it, copy it into your setup and add your own.
     * `value-lists: guarded` and `guarded-removals`: the settings that keep the tools' protections in place; see [Guarded settings](#guarded-settings).
-    * `values: expiry-days`: how long an acceptance lasts, in days.  The default is 30.
-    * `values: max-file-size` and `max-snapshot-size`: the largest project file, and the most for all of a project's files, that the tools copy into the store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be accepted.
-    * `values: exempt-days` and `max-exempt-days`: how long `scoter exempt` lasts without `--for`, and the longest it can be given, in days.  The defaults are 1 and 7.  `max-exempt-days` is guarded (see "Guarded Settings").  See "Exemptions".
+    * `values: max-file-size` and `max-snapshot-size`: the largest file, and the most for all of a configuration's files, that the tools read from a project or keep in the store, in bytes.  The defaults are 16 MB and 256 MB.  A project over either can't be pulled.
+    * `values: review-notice-first-days`, `review-notice-every-days`, `review-warn-days` and `review-expire-days`: the review timers; see [The `pull:` section](#the-pull-section).
 * `ssh`: the SSH client used to connect to the development container.
     * `programs: exec`: the program, normally `ssh`.
     * `paths: home`: your SSH directory, normally `~/.ssh`.
@@ -257,10 +280,9 @@ The tools use these sections:
 * `scoter`: the tool's own settings.
     * `paths`: where the configuration came from, set by the tool (except that you can set `distribution-dir`), as described in [The `scoter:` section](#the-scoter-section).
     * `values: project-id` and `project-branch`, set by the tool for a project: see [The `scoter:` section](#the-scoter-section).
-    * `paths: state-dir`: where the tools keep their own state, such as the running environments, and the workspaces by default.  It has the same rules as `verification: paths: store`.  The default is `~/.config/surf-scoter.d/state`.
-    * `paths: running-envs` and `running-envs-lock`: the running environments file, in `state-dir`.  It holds each environment's whole configuration, so it's written readable only by you; each change to it is made under the lock, which is let go when the command ends, however it ends.  `scoter kill` stops an environment its `scoter run` left behind (after a crash, say): it stops its containers, and with `--fetch BRANCH` fetches the workspace's branch into the project, and with `--force-clean` removes the workspace (never one that is, or holds, the project, its repository or your home directory).  Without `--host`, it stops the project's one.
-    * `runs: find-acceptance`: given the universal configuration file with the project (`{x:universal}`), prints JSON saying which of your acceptances matches the project's files, if any, and its accepted settings.  The distribution runs its `bin/verified_find.py`.  There's no reason to change it.
-    * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`.  The first directory that has both is used.  A dev container, and every parent it builds on, must be inside the project files directory or one of these directories, so don't list directories a project controls, such as `${scoter:project-dir}` itself.  The default is `${scoter:project-dir}/${scoter:project-files-dir}` and the distribution's `containers` directory.
+    * `paths: state-dir`: where the tools keep their own state, such as the running environments, and the projects' state by default.  It has the same rules as `verification: paths: store`.  The default is `~/.config/surf-scoter.d/state`.
+    * `paths: running-envs` and `running-envs-lock`: the running environments file, in `state-dir`.  It holds each environment's whole configuration, so it's written readable only by you; each change to it is made under the lock, which is let go when the command ends, however it ends.  `scoter kill` stops an environment its `scoter run` left behind (after a crash, say): it stops its containers, and with `--fetch BRANCH` fetches the project clone's branch into the project, with `--clean-project-clone` (or `--clean-project`) removes the clone (never one that is, or holds, the project, its repository or your home directory), and with `--clean-persistent-store` removes the persistent store.  Without `--host`, it stops the project's one.
+    * `path-lists: dev-containers-search`: where the project configuration's `dev-container: NAME` looks for the `NAME` directory, with its `Dockerfile` and `dev-env.yaml`, after the project's own containers in `${scoter:config-dir}`, which are always searched first.  The first directory that has both is used.  A dev container, and every parent it builds on, must be inside `${scoter:config-dir}` or one of these directories.  A directory inside the project directory, the repository holding it or the project's clone, once symlinks are resolved, is refused: it would let a project build from, and read, files outside its configuration.  The default is the distribution's `containers` directory.
     * `values: project-files-dir`: the name of the project files directory, which holds the project configuration file and the project's dev containers.  The project directory is the one holding it.  It must be a single directory name; the default is `.surf-scoter.d`.
     * `values: project-file-name`: the name of the project configuration file, in the project files directory.  It must be a single file name; the default is `project.yaml`.
 
@@ -321,7 +343,7 @@ A list can't refer to the distribution's copy of itself, so adding means copying
 
 The `docker` section has no `drop-env`.  A project could set `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` as you enter its directory, to point the tools' Docker commands at another daemon, or at a configuration whose credential helpers run programs.  But `DOCKER_HOST` is also how Podman, and remote Docker daemons, are commonly set up, so dropping it by default would break those setups.  If your setup doesn't rely on them, consider adding one in your setup file, such as `docker: value-lists: drop-env: [DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, DOCKER_CERT_PATH, DOCKER_TLS_VERIFY]`, and setting what you need in the section's `runs` instead (`--host`, `--config`).
 
-The programs your setup runs are checked before `scoter run` starts anything, and by `scoter user-setup`: a program can't be written relative to the project (`./`), refer to a project location, or be found inside the project, the workspace or the repository; nor can another user own it, or anyone write to it or a directory above it (one its group can write to is warned about); nor can it be under a `host-commands` check's `paths`, such as the version manager shims.  A relative `PATH` entry is warned about: the tools skip it when finding programs.
+The programs your setup runs are checked before `scoter run` starts anything, and by `scoter user-setup`: a program can't be written relative to the project (`./`), refer to a project location, or be found inside the project, its clone or the repository; nor can another user own it, or anyone write to it or a directory above it (one its group can write to is warned about); nor can it be under a `host-commands` check's `paths`, such as the version manager shims.  A relative `PATH` entry is warned about: the tools skip it when finding programs.
 
 ### Plain Values
 
@@ -358,7 +380,7 @@ docker:
         exec: podman
 ```
 
-`gen-scoter-uc` checks, expands and combines these (see the universal configuration file's `host-command-checks`), and `scoter verify` applies them to a project's commands.
+`gen-scoter-uc` checks, expands and combines these (see the universal configuration file's `host-command-checks`), and the checks apply them to a configuration's commands, at each pull, lock, review and run.
 
 The distribution keeps all its checks in the `verification` section, and so should your setup: someone checking what's refused reads one list.  (Any section can still have them, and their names are `section:key`.)  A check has:
 
@@ -377,7 +399,7 @@ Names are case sensitive.  A check doesn't look only at the name: a command whos
 
 Only `command-map` values and `paths` entries are expanded.  The other fields are used as written, and a `${` in them is an error.  Every field is checked: a misspelled field, or a value that can't be right (a `commands` entry with a `/` in it, say), is an error.
 
-A command's program can't be in the project directory, the project files directory, the workspace or the repository holding the project, and two checks can't map the same command to different programs; `gen-scoter-uc` reports either as an error.
+A command's program can't be in the project directory, the project files directory, the project's clone or the repository holding the project, and two checks can't map the same command to different programs; `gen-scoter-uc` reports either as an error.
 
 #### When checks disagree
 
@@ -440,7 +462,7 @@ verification:
             overrides: [verification:code-hosts]
 ```
 
-* `action` (required): `refuse`, `warn` or `allow`.  Each check that counts is shown, with its reason, and the most restrictive decides: a refused file or egress rule can't be accepted as it is.
+* `action` (required): `refuse`, `warn` or `allow`.  Each check that counts is shown, with its reason, and the most restrictive decides: a configuration with a refused file or egress rule can't be approved, or run.
 * `reason` (required): why, shown when the check matches.
 * `patterns` (`project-files`): names of files, and, ending in `/`, directories, with `*`, `?` and `[...]`, matched against each file's and directory's own name in the project's container directories.
 * `hosts` (`egress-hosts`): host names, or `*.` and a domain for its subdomains.  A check's host matches an egress rule that reaches it: `github.com` matches a rule for `github.com`, `*.githubusercontent.com` one for `raw.githubusercontent.com`, and a rule for `*.github.com` matches a check for `gist.github.com`.
@@ -448,12 +470,12 @@ verification:
 
 They merge across your setup files key by key, as the other checks do: add a check with a name of your own, set one again to replace it, or set it to `null` to remove it.  Prefer `overrides` to replacing or removing one, for the same reason.
 
-An egress rule an `egress-hosts` check refuses is written commented out in the review, with an `$override` naming the check: uncommenting it with its `$override` accepts it for that project only.  A refused file has no such override: change the file, choose your own container (`use: {name}`), or change the check.
+A configuration with a refused egress rule or file can't be approved: change it (edit the pull's working directory while you review it, or `scoter unlock` it), or relax the check in your setup with one that `overrides` it.
 
 
 ## Guarded Settings
 
-Some settings keep the tools' protections in place: `-E` on the Python scripts (so a project's `PYTHONPATH` stays out), `--no-local` on the workspace's clone, Git's `drop-env`, the network gateway and its configuration, where the store and the workspace are, the review's checks.  The defaults mark them, in `verification: value-lists: guarded`, as `section:kind:key` (`*` for every key of a kind), and `scoter user-setup` and the review list each one your setup file changes, with the default beside it:
+Some settings keep the tools' protections in place: `-E` on the Python scripts (so a project's `PYTHONPATH` stays out), `--no-local` on the project's clone, Git's `drop-env`, the network gateway and its configuration, where the store and the project state are, the review's checks.  The defaults mark them, in `verification: value-lists: guarded`, as `section:kind:key` (`*` for every key of a kind), and `scoter user-setup` and the review list each one your setup file changes, with the default beside it:
 
 ```
 Your setup changes these guarded settings; check each is what you want:
@@ -467,33 +489,19 @@ So a change copied in from instructions you didn't look at closely doesn't go un
 * `guarded-removals` are deny-lists, where adding entries only strengthens (`drop-env`, `egress-refused-wildcards`): they're reported only when your setup leaves out one of the default's entries.
 * Your setup can add guards of its own to either list.  It can't take the distribution's out: they're always used, and a setup that tries is reported too.
 
-`scoter verify --skip-setup-review` leaves this, and the host command checks' report, out of the review.
 
 
 ## The Verified Store
 
-`verification: paths: store` holds the project settings you've accepted, and a copy of the project files you accepted them from: the project file, and the project's container directories (with `verification: path-lists: verified-containers`, some of the installation's too).  Each project's are in a directory named by its `${scoter:project-id}`.  The tools build and run a project from that copy, so what runs is what you reviewed.
+`verification: paths: store` holds your configurations of each project: for each, a copy of its files (the project file, and the container directories the build uses) and its host file, where each host command's program is on your computer.  Each project's are in a directory named by its `${scoter:project-id}`, with its link: the configuration in use (or that it's unlocked), the snapshot last pulled from the project, and when you last reviewed it.  The tools build and run a project only from a configuration, staged from the store, so what runs is what you approved.  See [user-owned project files](contributors/user-owned-project-files.md) for the whole design.
 
-The copies take disk space.  Each file is kept once, however many acceptances share it, so each new acceptance costs a copy of the files that changed since the last one; but container directories can hold large files copied into the image.  To keep it bounded:
+The copies take disk space.  Each file is kept once, however many configurations share it, so each new one costs a copy of the files that changed.  To keep it bounded:
 
-* A project keeps one acceptance per branch (one in all without a VCS branch): a new acceptance, from a review, from a change only to comments, or from `verify --with-exemption`, replaces the branch's last one, and its files go.
-* Each acceptance expires after `verification: values: expiry-days`.  Expired acceptances are kept, so a review can show what changed since; nothing removes them on its own.  `scoter revoke` removes them (`scoter list-accepted` lists them), with the files nothing else uses.
-* `verification: values: max-file-size` and `max-snapshot-size` limit what one acceptance can copy.
+* A pull keeps the configuration it replaces as `NAME.previous`, and removes the one that had that name: one step of history for each name.  `scoter lock` and `scoter review` remove the one they replace.  One a running environment uses is kept until it stops.
+* `scoter remove` removes configurations (`scoter list` lists them), with the files nothing else uses.
+* `verification: values: max-file-size` and `max-snapshot-size` limit what one configuration can copy.
 
 Everything in it must belong to you, with no access for anyone else (directories `0700`, files `0600`), and contain no symlinks; the tools refuse to read it otherwise.  On Windows, which has no file modes, that's left to your user profile's permissions.
-
-Each `scoter` run with a project looks for the acceptance that matches the project's files, as they are now, and the setup values it was accepted under.  A change that only touches comments or blank lines (in a Dockerfile, a JSON file, or the YAML files the tools read) carries the acceptance forward, with its settings and its expiry; any other change needs a new review.
-
-### Exemptions
-
-While you work on a project's container, a review for every change to a Dockerfile gets in the way.  `scoter exempt` starts an exemption on the project, from your newest usable acceptance, for `exempt-days` (or `--for 8h`, `2d`, `1d12h`: at most `max-exempt-days`, and never past the acceptance's expiry).  While it holds, runs on the branch it was started on (any run, for a project without a VCS branch):
-
-* use the container files as they are, copied off when the run starts, once the setup's `project-files` checks (and the checks on links) pass on them;
-* keep the project file and the `dev-env.yaml` files as you accepted them, along with your accepted settings: the run says which of them you've changed, and ignores those changes.
-
-`scoter verify --with-exemption` picks those changes up: it accepts the project's settings as they stand, without showing you the review, when the checks refuse nothing, and moves the exemption to the new acceptance (shown as `exempted` by `scoter list-accepted`), with the same end, in place of the branch's earlier acceptance.  Anything the checks refuse needs `scoter verify`.
-
-`scoter exempt --end` ends the exemption; revoking its acceptance does too.  `scoter list-accepted` shows it, with its end, branch and acceptance.  For automation, start an exemption, then have it run `scoter verify --with-exemption` before each run.
 
 `scoter run` keeps `scoter-host`'s copy of the configuration in `${scoter:state-dir}/environments/HOST/suc.json`, private to you, and removes it when the environment stops.
 

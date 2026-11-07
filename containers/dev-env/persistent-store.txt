@@ -1,0 +1,12 @@
+# What in the home directory the dev container keeps in its persistent store,
+# between runs: one path a line, relative to the home directory.  A path
+# ending in `/` is a directory; any other, a file.  Lines starting with `#`
+# are comments.  See entrypoint.sh.
+#
+# Keep this to state and caches.  Shell start-up files, programs on the PATH
+# and the like come from the image on every start, so a change an earlier
+# session made to them doesn't last (DEV-16).
+.vscode-server/
+.cache/
+.local/share/
+.bash_history

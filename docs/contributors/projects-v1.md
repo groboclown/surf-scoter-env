@@ -1,8 +1,10 @@
 # Projects in v1
 
+*A record of the first design.  Its acceptance flow (the review file, `scoter verify`, acceptances, carried acceptances and exemptions) has been replaced by [user-owned project files](user-owned-project-files.md): the developer pulls the project's files into a configuration of their own, and runs only that.  The steps marked "Superseded" below describe code that's gone; the rest still stands.*
+
 v1 changes how a project describes its development environment, and how much of that description the tools trust.  Today the tools act on the project's [configuration file](../project-configuration-file.md) directly.  In v1, the project file only *suggests* settings.  The developer reviews them and accepts, edits or denies them.  The tools then run only from the developer's accepted copy.
 
-This page collects the design, the reasons behind it, and the weak points to keep in mind while building it.  It builds on the [configuration weaknesses](../security/configuration-weaknesses.md) analysis, and addresses several vectors in the [file access](../security/files-attack-vectors.md) and [host bridge](../security/host-bridge-attack-vectors.md) attack vector lists.
+This page collects the design, the reasons behind it, and the weak points to keep in mind while building it.  [User-owned project files](user-owned-project-files.md) proposes an alternative, where the developer owns their own copy of these files.  It builds on the configuration weaknesses analysis, which is now the [project verification](../security/verification.md) page, and addresses several vectors in the [file access](../security/files-attack-vectors.md) and [host bridge](../security/host-bridge-attack-vectors.md) attack vector lists.
 
 
 ## Summary of the changes
@@ -87,7 +89,7 @@ The default Git setup clones with `--depth 4`.
 * Git ignores `--depth` for local clones that take the local shortcut.  With `--no-local` it should take effect.  Add a test that checks for `.git/shallow` in a new workspace.
 * `--depth` implies `--single-branch`.  Developers who need other branches will be surprised, so make the depth and the branch choice user settings, not project settings.
 * Bringing changes back still works: fetching from the shallow workspace into the full project succeeds, because the project already has the base commits.  A rebase or merge in the workspace that reaches past the depth will fail.
-* [FILE-1](../security/files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-workspace) still applies.  Refresh a shallow workspace by pushing from the project into it, never by running `git fetch` inside it.
+* [FILE-1](../security/files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone) still applies.  Refresh a shallow workspace by pushing from the project into it, never by running `git fetch` inside it.
 
 Mercurial and other VCS implementations follow the [VCS checklist](../security/files.md#adding-a-vcs-implementation), and need their own answer for root detection and history depth.
 
@@ -210,7 +212,7 @@ Values from the project still reach the rendered file, so they need care too:
 
 * Create the file with `mkstemp` in a directory only the developer can read.  Open it without following symlinks, and read it once.
 * Use `VISUAL`, then `EDITOR`.
-* Start the editor in a neutral directory, such as the temporary directory, not the project.  Editors read project-local configuration (vim modelines and `.exrc`, VS Code workspace settings), which is [FILE-4](../security/files-attack-vectors.md#file-4-host-tools-acting-on-the-workspace) on the host.
+* Start the editor in a neutral directory, such as the temporary directory, not the project.  Editors read project-local configuration (vim modelines and `.exrc`, VS Code workspace settings), which is [FILE-4](../security/files-attack-vectors.md#file-4-host-tools-acting-on-the-project-clone) on the host.
 * After the editor exits, run steps 1 to 6 again on the edited file, then ask again, the way `visudo` does.  Paths in the edited file now come from the developer, and get the same path checks as resolved ones.  Never store a file that fails validation.
 
 ### Defaults
@@ -245,7 +247,7 @@ If any of these is still read live from the project, it's a way around the revie
 
 ### Identity, expiry and revoking
 
-The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second clone of the same repository, or a moved directory, gets a new review.  The expiry, temporary exemption and revoking ideas from [configuration weaknesses](../security/configuration-weaknesses.md#authorization-for-a-project) still apply, and expiry matters more here: the permissions of the cloud services a project uses can change while an old acceptance stays the same.
+The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second clone of the same repository, or a moved directory, gets a new review.  The expiry, temporary exemption and revoking ideas from the configuration weaknesses analysis (now [project verification](../security/verification.md#expiry-revoking-and-cleaning-up)) still apply, and expiry matters more here: the permissions of the cloud services a project uses can change while an old acceptance stays the same.
 
 
 ## Documents to update
@@ -254,7 +256,7 @@ The accepted file is keyed by the canonical path of `.surf-scoter.d`.  A second 
 * [Network](../security/network.md): the allowed domain list becomes the accepted egress rules, translated per gateway.
 * [File access attack vectors](../security/files-attack-vectors.md): FILE-5 (one directory to review), FILE-8 (the whole repository is exposed), FILE-9 (the workspace location).
 * [Host bridge attack vectors](../security/host-bridge-attack-vectors.md): BRIDGE-11 (closed by absolute paths), and shims as a new vector.
-* [Configuration weaknesses](../security/configuration-weaknesses.md): the accepted file replaces fingerprint-only authorization.
+* [Configuration weaknesses](../security/verification.md) (now project verification): the accepted file replaces fingerprint-only authorization.
 * [The developer environment Dockerfile](../project-dockerfile.md): `parents: dir` limited to `.surf-scoter.d` and the installation directory.
 * [The system configuration file](../system-config-file.md): the new `project-files-dir`, `project-file-name` and `dev-containers-search` settings.
 
@@ -502,6 +504,8 @@ Some entries that look out of place:
 **Tests:** in `host_commands.rs`: parsing, each field's checks, the combinations, the name patterns.  In `system.rs`: references to a check, errors and their keys, a kind change across files, expansion (`${exec}`, a missing program, `~`, a spliced `path-lists`), a null check hiding the distribution's.  In `universal.rs`: the combined checks (identity through a symlink, `name-patterns` on the real file's name), overrides (another matching check still counting after one; an override with nothing to override) and their notices, the override errors (two overrides of one check and command, with and without options; an override of an override), the other errors, a program in the project, replacement notices with their ids, parameters and sources, the `files` of a replaced check, and the checks surviving a `--universal` round trip.  In `test_setup_check.py`: the `user-setup` report.
 
 ## 5. Design the user-directory verified storage
+
+*Superseded by [user-owned project files](user-owned-project-files.md): The store's layout and locking still stand; its acceptance records, and the confinement rule (a container inside `.surf-scoter.d` or a search directory), are now configurations and links, and "inside the configuration's copy, or a search directory".*
 
 The verified storage lives in the directory the setup files name as `scoter: paths: verified-dir` (default `~/.config/surf-scoter.d/verified`), not in `${scoter:user-dir}`, which isn't set when the user's setup file is `~/.config/surf-scoter.setup.yaml` or there's none.  Loading the setup files already refuses a `verified-dir` that's relative, or inside the project, its workspace or its repository.  It needs a solid structure around how to store each project's verified storage.
 
@@ -819,6 +823,8 @@ The refused wildcards are a list of plain text, which no kind of setup value hol
 
 ## 8. Update the SUC generator to also pull in the user's verified project settings
 
+*Superseded by [user-owned project files](user-owned-project-files.md): `--accepted-settings` is replaced by `--config-dir` and `--host-file`.*
+
 Add another CLI option to the SUC generator to read from the user's verified project settings, and integrate the results into the SUC file.  At this point, the "host-brokered" section will become valid again.
 
 This will introduce a new section for the egress settings, and expand the VCS settings.  A consumer of the SUC should be able to recreate the original user's verified project settings.
@@ -975,6 +981,8 @@ The secret-looking files and the hosts that can carry data out are `value-lists`
 
 ## 12. Establish a user verification file format
 
+*Superseded by [user-owned project files](user-owned-project-files.md): the review file is gone; the pull's analysis report and reviewer take its place.*
+
 When verifying a project directory, the user will need an easy to use file format.  As the rest of the scoter files use YAML, I think this should also be in YAML format.
 
 The file needs to include all the options the user needs to sign-off on.  This will need some iterating to make it easy to use.
@@ -1130,6 +1138,8 @@ A `runs: current-branch` in each VCS section, like `find-root`: the distribution
 
 ## 13. Add the user verification file format parser
 
+*Superseded by [user-owned project files](user-owned-project-files.md): `review.rs` is gone.*
+
 Parsing the user verification file requires YAML parsing, which we currently only parse through the SUC generator.  It makes sense to allow this to be an additional input file passed to the SUC generator as another input file format.  It would output into the SUC in the same way as the verified project settings.
 
 The same parsing rules as step 7 apply.  After parsing, the checks library (step 11) runs on the result before anything is stored: paths the user typed get the same path checks as resolved ones, and the refused lists still apply.
@@ -1146,6 +1156,8 @@ Completed:
 **Tests:** in `review.rs`: a full review, `reject` winning over a broken file, `result` other than `reject`, the format name, unknown keys, a relative `program`, a Windows device name, a `${...}` value, a bad `$override`, bad `use` and `images`, a merge key, a duplicate key, a control character, an unknown command field; and what it gives reading back as accepted settings.  In `universal.rs`: `--review` accepted, rejected, and refused (another project, expired, a container that isn't there), and `host-brokered` unchanged.  In `test_checks.py`: a policy refusal with and without an override, an override naming a check that doesn't refuse, a safety refusal that can't be overridden, the user's own container skipping the project's files, and no review or a rejected one.  Run on this repository, a review accepting `sh -c {any}` with `$override: [host-bridge:shells]` gives a note for the shell and keeps the `-c` and `github.com` warnings.
 
 ## 14. Add the main_verify.py script
+
+*Superseded by [user-owned project files](user-owned-project-files.md): `scoter verify` is gone; see `scoter pull`.*
 
 Add in a script that can process the user-directory verified storage and construct the items for the user to verify.
 
@@ -1169,6 +1181,8 @@ Completed:
 **Tests:** in [`test_review.py`](../../scripts/tests/s_lib/test_review.py): the step's three (a value with a newline and `# reviewed: safe` stays one quoted line; bidirectional, zero-width and look-alike characters show as escapes; terminal escape sequences go, from a setup check's reason and from a Dockerfile), the YAML pieces, the layout (refused items with and without `$override`, `${...}` sources, `images`), and the branch (a branch, detached, unreadable, a worktree's `.git` file).  In `universal.rs`: `current-project-resolved`.  By hand, on a scratch project: `scoter verify` writes a review that the generator's `--review` reads back as written, and again with the refused shell uncommented, where the checks turn the refusal into "You overrode `host-bridge:shells`".
 
 ## 15. Add the use / deny / edit prompt
+
+*Superseded by [user-owned project files](user-owned-project-files.md): replaced by the pull's terminal reviewer.*
 
 With this step, an acceptance can be made, so remove `gen-scoter-uc --unreviewed-project-commands` and `scoter.py`'s warning (step 7's stand-in, kept by step 8).
 
@@ -1195,6 +1209,8 @@ Completed:
 **Tests:** in [`test_main_verify.py`](../../scripts/tests/test_main_verify.py): the step's three (the file replaced by a link while the editor is open, an edit that uncomments the refused shell, no terminal); the same edit with its `$override`, stored; use, deny, a broken edit, `result: reject`; the choices; the editor's choice (Notepad on Windows); and `read_once` on a link, a FIFO, a hard-linked file and an oversized one.  The prompt tests run the debug generator, and skip without it.  In [`test_accept.py`](../../scripts/tests/s_lib/verified/test_accept.py): storing, with private files and an exact lookup afterwards; newest first; no `verified-dir`.  In `universal.rs`: `host-brokered` empty without accepted settings.  In `test_gateway.py`: only the accepted rules.
 
 ## 16. Add verification handling in main_run.py
+
+*Superseded by [user-owned project files](user-owned-project-files.md): the run uses the configuration in use, staged from the store.*
 
 The main_run.py script should then consume the verification section from the SUC, and use the above library to determine if the verification applies to the current settings.
 
@@ -1258,6 +1274,8 @@ Completed:
 **Tests:** in [`test_main_run_staging.py`](../../scripts/tests/test_main_run_staging.py), with the generator and acceptances made through the review prompt: the step's two (a change to `.surf-scoter.d` after the run read it doesn't reach the build, and one before it stops the run; an expired acceptance asks for a review), no acceptance, an `accepted.json` outside the store, a parent inside the project, `images` rewriting only the copy, and the user's own container.  `rewrite_images` on flags, stages, local tags, a mapping to itself, and continued lines.  In `universal.rs`: accepted settings using the user's container (with its parent the user's, not the project's same-named one), the project's, and a name only found in the project refused.  In `test_snapshot.py`: the restored modes.  In `test_scoter.py`: `verify` loads without the acceptance.  By hand: `scoter run` on a project with no acceptance stops with the message.  A full run wasn't tried: the scratch setup's state directory is the real one in `~/.config`.
 
 ## 17. Add diff verify to main_verify.py script
+
+*Superseded by [user-owned project files](user-owned-project-files.md): the reviewer compares a pull with the base and the configuration in use.*
 
 Add in the capability for the main_verify.py script to perform a diff if the directory changed.
 
@@ -1453,13 +1471,15 @@ Suggested: a `verification: value-lists: guarded` list of `section:kind:key` nam
 
 ## 21. Allow a timed exemption for working on a project.
 
+*Superseded by [user-owned project files](user-owned-project-files.md): exemptions are gone; `scoter unlock` and `scoter lock` take their place.*
+
 Allow a timed exemption for working on a project.
 
 It covers blanket acceptances too (moved from step 18).  The kind exists in the records and the lookup (step 5), for a private project nobody else contributes to, but no command creates one, and `scoter.py` treats a match as none (steps 8 and 11).  Step 16 also changed what one would have to mean: the run builds only from a stored, accepted copy, and a blanket acceptance has none.  One way, drafted in step 18: "accept as suggested" on each run, recorded by a `scoter verify` option: each run takes a fresh snapshot and, if the checks refuse nothing, stores an acceptance of the suggestion as it stands (as using the review unedited would), and builds from that; refusals, setup changes and a gateway change still stop it.  A timed exemption ("don't ask me again for a week") covers much of the same need with less trust handed out.
 
 ### Draft: what an exemption is
 
-The [configuration weaknesses](../security/configuration-weaknesses.md#authorization-for-a-project) design: "for a time period disable the checksum analysis.  This can be useful when the user actively works on making a running environment."  That's someone editing their project's Dockerfile, running it, editing again: each edit is a change to the files, and asks for a review.
+The original configuration weaknesses design (now [project verification](../security/verification.md#exemptions)): "for a time period disable the checksum analysis.  This can be useful when the user actively works on making a running environment."  That's someone editing their project's Dockerfile, running it, editing again: each edit is a change to the files, and asks for a review.
 
 So an exemption is a window, on one project, in which a run with changed files doesn't stop for a review.  It never builds from the live files (step 16): instead each run carries the user's last acceptance forward over the changed files, as a match on meaning does (step 5).  The new acceptance keeps the last one's accepted settings (`accepted.json`: the host commands, egress rules and container choices) and its expiry; only the files it's for are the current ones.  It's marked as made by the exemption, so the next review compares with the last acceptance the user reviewed, not one the exemption made.
 
@@ -1525,6 +1545,8 @@ Run inside a project, it still needs a project file the generator can read; outs
 **Tests:** [`test_main_revoke.py`](../../scripts/tests/test_main_revoke.py): nothing accepted, the listing, by branch (several), by fingerprint (whole, short and upper case; too short refused), carried acceptances going too, an unmatched name revoking nothing, `--all` (and the blobs it frees), and `--all` with names.
 
 ## 22. Allow a user to list accepted projects, with their expiration and exemption.
+
+*Superseded by [user-owned project files](user-owned-project-files.md): now `scoter list` and `scoter remove`, over configurations.*
 
 Done: `scoter list-accepted` ([`main_list_accepted.py`](../../scripts/main_list_accepted.py)).
 

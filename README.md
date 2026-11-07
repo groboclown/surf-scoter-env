@@ -17,35 +17,39 @@ These are the things you need to do to keep Surf Scoter's protections working.  
 
 ### Review a project before you run it
 
-If you plan on running the Surf Scoter dev-environment from a unknown source, you need to review the files that decide what its container can do.  They define how the container can communicate outside its sandbox, which means it can do things you're not ready for.
+A project's files (`.surf-scoter.d`) only suggest what its container can do.  `scoter run` never uses them as they are: it runs *your* configuration, a copy you reviewed and approved with `scoter pull`, kept outside the project where it can't change behind your back.  The review is the moment that matters.  The files define how the container can communicate outside its sandbox, which means it can do things you're not ready for:
 
 - **The project configuration file** (`.surf-scoter.d/project.yaml`) lists the commands the container may run on your host.  You can read details on do's and don'ts with this file in the [documentation](docs/project-configuration-file.md), and in [Running commands on the host](#running-commands-on-the-host).
 - **The egress rules** (`egress` in `.surf-scoter.d/project.yaml`) say where the container may connect.
 - **The dev container's `Dockerfile` and `dev-env.yaml`** build and run the container.  Look for multi-line values in `dev-env.yaml`, a final `USER` other than an unprivileged user, and downloads in `RUN` steps.
 
-Review changes to these files whenever they come back from the workspace, too.  They change what the *next* environment may do.
+When the project's files change, the next run says so; `scoter pull` shows you what changed, and nothing changes what you run until you approve it.  Treat changes that come back from the project's clone the same way, before you commit them.
 
-### Don't run git or your IDE on the workspace from your host
+### Don't run git or your IDE on the project clone from your host
 
-Part of running Surf Scoter copies your project directory into a workspace directory.  This allows the dev container to make alterations to it without affecting your local copy.
+Part of running Surf Scoter clones your project into a directory of its own, the *project clone*, which the dev container works on.  This allows the dev container to make alterations to it without affecting your local copy.  The container's other files, such as its IDE server and caches, are kept in its *persistent store*: a container volume, not a directory on your host.
 
 While this helps keep a strong security setup, you need to bring those changes back into your local copy.  However, you need to take care here.  If an agent or malicious package modified the hooks in that directory, then running commands there could trigger them to run on your host computer.
 
-For strongest safety, treat the workspace as untrusted from the host side:
+For strongest safety, treat the project clone as untrusted from the host side:
 
-- Use your IDE through its remote connection to the container, not by opening the workspace folder on the host.
-- Bring changes back by fetching from the workspace into your own repository, then review them before merging or cherry-picking:
+- Use your IDE through its remote connection to the container, not by opening the project clone's folder on the host.
+- Bring changes back by fetching from the project clone into your own repository, then review them before merging or cherry-picking (or use `scoter kill --fetch BRANCH` for one branch):
 
   ```sh
   cd ~/src/my-project
-  git fetch /path/to/workspace/my-project my-branch
-  git log -p HEAD..FETCH_HEAD
+  # Once: the clone as a remote of your repository.
+  git remote add scoter ~/.config/surf-scoter.d/state/projects/my-project-3f9a0b1c2d4e/project-clone
+  git config remote.scoter.fetch '+refs/heads/*:refs/remotes/scoter/*'
+  # Each time: every branch the container made, as scoter/BRANCH.
+  git fetch --no-recurse-submodules scoter
+  git log -p HEAD..scoter/my-branch
   ```
 
-  Fetching reads the workspace repository's objects without running its hooks or configured commands.
+  Fetching reads the clone's objects without running its hooks or configured commands.  Never *push* into the clone: that runs its hooks on your computer.  `scoter run` gives the clone your newer commits as a bundle file, which the container fetches.
 - Review what you bring back as untrusted code, especially build scripts, before you build or run it on your host.
-- Never run programs from the workspace on your host.
-- If anything looks suspicious, start over from a fresh clone with `scoter run --clean-workspace`.
+- Never run programs from the project clone on your host.
+- If anything looks suspicious, start over from a fresh clone and an empty persistent store with `scoter run --clean-project-clone --clean-persistent-store`.
 - Keep secrets out of the repository and out of the dev container's build context.  Use `vcs: git`, so your untracked files stay behind.
 
 ### Keep the network tight
@@ -84,19 +88,23 @@ You only need to do this once.
 
 ### Starting a Developer Environment for a Project
 
-If you're working with an established Surf Scoter project, and you've run through the above user setup, you should **first ensure it's safe to run.**  A project can declare [host-to-environment pass-through commands](#running-commands-on-the-host), which can lead to security issues.
+If you're working with an established Surf Scoter project, and you've run through the above user setup, first **pull** its files into your own configuration:
 
-Only then should you start the project environment by running:
+```shell
+scoter pull
+```
+
+This copies the project's committed files, checks them against your setup, and shows them to you in the terminal: the commands the container may run on your host (a project can declare [host-to-environment pass-through commands](#running-commands-on-the-host), which can lead to security issues), where it may connect, and its container files.  Nothing is used until you approve it.  Then start the environment:
 
 ```shell
 scoter run
 ```
 
-This will process the project files and start up containers.  It will report the launched process hostname, which you use to [connect to it with a shell or IDE](#connecting-to-a-developer-environment).
+This builds from your configuration, never the project's live files, and starts up containers.  It will report the launched process hostname, which you use to [connect to it with a shell or IDE](#connecting-to-a-developer-environment).
 
-If you want to set up your project to define a Surf Scoter development environment, then [the fine documentation can help](docs/new-project-setup.md).
+To change your configuration, `scoter unlock` gives you a copy to edit and run, and `scoter lock` reviews and stores it again (`scoter lock --revert` throws the edits away).  `scoter review` looks at the configuration in use again, `scoter switch NAME` goes to another (a pull keeps the one it replaced as `default.previous`), `scoter list` and `scoter remove` manage them, and `scoter push` offers yours back to the project, if it's yours.  If you want to set up your project to define a Surf Scoter development environment, `scoter init` starts one from a template; [the fine documentation can help](docs/new-project-setup.md).
 
-When a run ends, it stops its containers, but keeps the project's workspace for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
+When a run ends, it stops its containers, but keeps the project's clone and the container's persistent store for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
 
 ## Connecting to a Developer Environment
 
@@ -147,8 +155,8 @@ Once you have the developer environment running, you can then:
 
 Some things to keep in mind:
 
-- **Be careful with recommended extensions.**  The workspace can list extensions for VS Code to recommend (`.vscode/extensions.json`), and anything in the container can edit that list.  Some extensions run on your computer rather than in the container, so only install ones you'd install anyway.
-- **Tasks and terminals run in the container.**  That's what keeps them contained, so don't work around it by opening the workspace folder on your computer (see [Security Notes](#security-notes)).
+- **Be careful with recommended extensions.**  The project can list extensions for VS Code to recommend (`.vscode/extensions.json`), and anything in the container can edit that list.  Some extensions run on your computer rather than in the container, so only install ones you'd install anyway.
+- **Tasks and terminals run in the container.**  That's what keeps them contained, so don't work around it by opening the project clone's folder on your computer (see [Security Notes](#security-notes)).
 
 ### Connecting through JetBrains
 
@@ -158,7 +166,7 @@ Some things to keep in mind:
 
 Some actions need privileges the container deliberately doesn't have, such as cloud credentials or access to the Docker daemon.  For these, the container can ask the host to run a command for it.  The host only runs the exact command forms you list in its configuration file, and refuses everything else.
 
-Because these commands run on your host with your privileges, every file they're given is restricted to the workspace (or a throwaway temporary directory).  A path argument is mapped from the container to the host and resolved, following symlinks, and it must still be inside the workspace.  The command's working directory follows the same rules.
+Because these commands run on your host with your privileges, every file they're given is restricted to the project clone (or a throwaway temporary directory).  A path argument must be a file in the project clone, reached without following any symlink.  The command never gets the clone's path: it gets a private copy of the file, under the same name, and a file it writes is put back into the clone when it exits (each path argument says which, with `access`), so nothing the container does to the clone meanwhile can point the command at another file.  The command's working directory follows the same rules, and the command starts in the directory that was checked.  Host commands can't reach the container's persistent store at all: it's a container volume, not a host directory.
 
 Some suggestions for what to allow running on the host:
 

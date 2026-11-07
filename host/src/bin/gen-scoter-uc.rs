@@ -2,12 +2,12 @@
 //! gathered from all its sources, as JSON.  See
 //! `docs/contributors/universal-configuration-file.md`.
 //!
-//! Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME]
-//!                      [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR]
+//! Usage: gen-scoter-uc [--project-dir DIR] [--config-dir DIR] [--vcs-root DIR]
+//!                      [--project-branch NAME]
+//!                      [--project-clone-dir DIR] [--dev-container-settings-dir DIR]
 //!                      [--distribution-dir DIR]
 //!                      [--universal UNIVERSAL.json] [--no-setup-search]
-//!                      [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml]
-//!                      [--previous-review REVIEW.yaml]
+//!                      [--host-file HOST.json]
 //!                      [--output FILE]
 //!
 //! The setup files are the user's (found through `SURF_SCOTER_HOME` or
@@ -20,6 +20,12 @@
 //!
 //! `--project-dir` gives the project: the directory holding the project
 //! files directory, with the project file in it (both named by the setup).
+//! `--config-dir` gives where the project file and the project's containers
+//! are read from instead: a copy of the project's files.  The generator
+//! searches it first for a container named in the project.  `--host-file`
+//! gives that configuration's host file, where each of its commands'
+//! programs is; `host-brokered` is built from it, and nothing is looked up
+//! on the `PATH`.
 //!
 //! `--universal` starts from a universal configuration file made earlier:
 //! its system setup is used without reading the setup files again, and its
@@ -42,11 +48,10 @@ const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--vcs-root DIR] [--project-branch NAME] \
-                     [--dev-container-workspace-dir DIR] [--dev-container-settings-dir DIR] \
+const USAGE: &str = "Usage: gen-scoter-uc [--project-dir DIR] [--config-dir DIR] [--vcs-root DIR] [--project-branch NAME] \
+                     [--project-clone-dir DIR] [--dev-container-settings-dir DIR] \
                      [--distribution-dir DIR] [--universal UNIVERSAL.json] [--no-setup-search] \
-                     [--accepted-settings ACCEPTED.json] [--review REVIEW.yaml] \
-                     [--previous-review REVIEW.yaml] \
+                     [--host-file HOST.json] \
                      [--output FILE]";
 
 fn main() {
@@ -65,13 +70,16 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
                 "--project-dir gives the project, if any: the directory holding the project files directory, with the project file in it."
             );
             println!(
+                "--config-dir gives where the project file and the project's containers are read from instead of the project files directory: a copy of them.  It needs --project-dir."
+            );
+            println!(
                 "--vcs-root gives the root of the repository holding the project, which must hold the project directory."
             );
             println!(
                 "--project-branch gives the project's branch, as its VCS names it; `${{scoter:project-branch}}` is it made safe as one path part."
             );
             println!(
-                "--dev-container-workspace-dir and --dev-container-settings-dir give the dev container's workspace and settings directories."
+                "--project-clone-dir and --dev-container-settings-dir give the host directories mounted in the dev container: the project's clone, and the settings."
             );
             println!(
                 "--distribution-dir gives where Surf Scoter is installed; the user's setup file comes from SURF_SCOTER_HOME or XDG_CONFIG_HOME (by default ~/.config)."
@@ -83,13 +91,7 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> i32 {
                 "--no-setup-search skips looking for the user's and the install directory's setup files."
             );
             println!(
-                "--accepted-settings gives the user's accepted settings for the project, from the verified store; host-brokered is built from them."
-            );
-            println!(
-                "--review gives the user's review file for the project; the file's `review` holds what it says, and the accepted settings it gives."
-            );
-            println!(
-                "--previous-review gives an earlier acceptance's review file, which a new review starts from; the file's `previous-review` holds its data as written.  It isn't checked against the run, and nothing is accepted from it."
+                "--host-file gives the host file of the configuration --config-dir names: each command's program, which host-brokered runs, with its egress rules; nothing runs on the host without one."
             );
             println!("--output gives the file to write; otherwise, the JSON goes to stdout.");
             return EXIT_OK;
@@ -148,15 +150,14 @@ struct Cli {
 /// Options take a value as `--name VALUE` or `--name=VALUE`.
 fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, String> {
     let mut project_dir: Option<OsString> = None;
+    let mut config_dir: Option<OsString> = None;
     let mut vcs_root: Option<OsString> = None;
     let mut project_branch: Option<OsString> = None;
-    let mut dev_container_workspace_dir: Option<OsString> = None;
+    let mut project_clone_dir: Option<OsString> = None;
     let mut dev_container_settings_dir: Option<OsString> = None;
     let mut distribution_dir: Option<OsString> = None;
     let mut universal: Option<OsString> = None;
-    let mut accepted_settings: Option<OsString> = None;
-    let mut review: Option<OsString> = None;
-    let mut previous_review: Option<OsString> = None;
+    let mut host_file: Option<OsString> = None;
     let mut no_setup_search = false;
     let mut output: Option<OsString> = None;
     let mut args = args.into_iter();
@@ -180,15 +181,14 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
         };
         let slot = match name {
             "--project-dir" => &mut project_dir,
+            "--config-dir" => &mut config_dir,
             "--vcs-root" => &mut vcs_root,
             "--project-branch" => &mut project_branch,
-            "--dev-container-workspace-dir" => &mut dev_container_workspace_dir,
+            "--project-clone-dir" => &mut project_clone_dir,
             "--dev-container-settings-dir" => &mut dev_container_settings_dir,
             "--distribution-dir" => &mut distribution_dir,
             "--universal" => &mut universal,
-            "--accepted-settings" => &mut accepted_settings,
-            "--review" => &mut review,
-            "--previous-review" => &mut previous_review,
+            "--host-file" => &mut host_file,
             "--output" => &mut output,
             _ => return Err(format!("unknown option '{s}'")),
         };
@@ -207,16 +207,15 @@ fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Cli>, 
     Ok(Some(Cli {
         options: LoadOptions {
             project_dir: project_dir.map(PathBuf::from),
+            config_dir: config_dir.map(PathBuf::from),
             vcs_root: vcs_root.map(PathBuf::from),
             project_branch: project_branch.map(|b| b.to_string_lossy().into_owned()),
-            dev_container_workspace_dir: dev_container_workspace_dir.map(PathBuf::from),
+            project_clone_dir: project_clone_dir.map(PathBuf::from),
             dev_container_settings_dir: dev_container_settings_dir.map(PathBuf::from),
             distribution_dir: distribution_dir.map(PathBuf::from),
             universal: universal.map(PathBuf::from),
             no_setup_search,
-            accepted_settings: accepted_settings.map(PathBuf::from),
-            review: review.map(PathBuf::from),
-            previous_review: previous_review.map(PathBuf::from),
+            host_file: host_file.map(PathBuf::from),
         },
         output: output.map(PathBuf::from),
     }))
@@ -251,19 +250,19 @@ mod tests {
         );
         let parsed = parse_args(os_args(&[
             "--project-dir=proj",
+            "--config-dir",
+            "/copy",
             "--vcs-root",
             "/repo",
             "--project-branch=feature/x",
-            "--dev-container-workspace-dir",
+            "--project-clone-dir",
             "/ws",
             "--dev-container-settings-dir=settings",
             "--distribution-dir",
             "/opt/scoter",
             "--universal=first.json",
             "--no-setup-search",
-            "--accepted-settings=/v/accepted.json",
-            "--previous-review",
-            "/v/review.yaml",
+            "--host-file=/c/host.json",
             "--output=out.json",
         ]));
         assert_eq!(
@@ -271,16 +270,15 @@ mod tests {
             Ok(Some(Cli {
                 options: LoadOptions {
                     project_dir: Some(PathBuf::from("proj")),
+                    config_dir: Some(PathBuf::from("/copy")),
                     vcs_root: Some(PathBuf::from("/repo")),
                     project_branch: Some("feature/x".to_string()),
-                    dev_container_workspace_dir: Some(PathBuf::from("/ws")),
+                    project_clone_dir: Some(PathBuf::from("/ws")),
                     dev_container_settings_dir: Some(PathBuf::from("settings")),
                     distribution_dir: Some(PathBuf::from("/opt/scoter")),
                     universal: Some(PathBuf::from("first.json")),
                     no_setup_search: true,
-                    accepted_settings: Some(PathBuf::from("/v/accepted.json")),
-                    review: None,
-                    previous_review: Some(PathBuf::from("/v/review.yaml")),
+                    host_file: Some(PathBuf::from("/c/host.json")),
                 },
                 output: Some(PathBuf::from("out.json")),
             })),
@@ -338,7 +336,7 @@ mod tests {
         fs::write(dir.join(".surf-scoter.d/env/Dockerfile"), "FROM scratch\n").unwrap();
         fs::write(
             dir.join(".surf-scoter.d/env/dev-env.yaml"),
-            "user: u\nmounts: {workspace: /w, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
+            "user: u\nmounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\nsshd-port: 22\n",
         )
         .unwrap();
         fs::write(

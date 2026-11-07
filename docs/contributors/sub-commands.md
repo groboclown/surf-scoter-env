@@ -21,8 +21,14 @@ This makes the general boilerplate for a sub-command:
 
 ```python
 #SPDX:your-license
-"""Surf Scoter Sub-command: my-command"""
-# That doc string is just convention.  Nothing requires it.
+"""Active voice summary of the command.
+
+A Surf Scoter sub-command.
+
+More details about the sub-command.
+"""
+# If provided, that doc string's first line becomes the `scoter help` output
+# text.  Everything else is convention.
 from collections.abc import Sequence
 import sys
 from surf_scoter_lib import log, gen_parser, BAD_EXECUTION_ARGS_CODE

@@ -18,9 +18,9 @@ import main_cleanup
 from surf_scoter_lib import cleanup, ssh_hosts
 from surf_scoter_lib.active_env import ActiveEnvironmentSet, EnvironmentDesc
 from surf_scoter_lib.user_config import UserConfig
-from surf_scoter_lib.verified import records, store
+from surf_scoter_lib.verified import remove, store
 
-from .test_main_revoke import POSIX, StoreTest
+from .test_main_remove import POSIX, StoreTest
 
 PREFIX = "local-surf-scoter/"
 
@@ -59,22 +59,24 @@ class CleanupTest(StoreTest):
             "#!/bin/sh\n"
             f"echo \"$@\" >> '{self.docker_log}'\n"
             f"[ \"$1\" = list ] && cat '{self.tmp / 'images'}'\n"
+            f"[ \"$1\" = volumes ] && cat '{self.tmp / 'volumes'}'\n"
             "exit 0\n",
             encoding="utf-8",
         )
         os.chmod(self.docker, 0o700)
         (self.tmp / "images").write_text("\n".join(self.images) + "\n", encoding="utf-8")
+        self.volumes = ["scoter-used-store", "scoter-unused-store", "someone-elses",
+                        f"scoter-{store.environment_id(self.project)}-store"]
+        (self.tmp / "volumes").write_text("\n".join(self.volumes) + "\n", encoding="utf-8")
         self.ssh = self.tmp / "ssh"
         self.ssh.mkdir(mode=0o700)
         (self.ssh / "key").write_text("", encoding="utf-8")
         (self.ssh / "config").write_text("", encoding="utf-8")
         self.ssh_mode = "ask"
 
-    def config(
-        self, project: Path | None = None, *, outside: bool = False, branch: str | None = None,
-    ) -> UserConfig:
+    def config(self, project: Path | None = None, *, outside: bool = False) -> UserConfig:
         """The store test's, with the run's state and images."""
-        suc = super().config(project, outside=outside, branch=branch).raw()
+        suc = super().config(project, outside=outside).raw()
         assert isinstance(suc, dict)  # nosec: B101  # narrowing for the type checker
         resolved = suc["resolved"]
         assert isinstance(resolved, dict)  # nosec: B101  # narrowing for the type checker
@@ -102,20 +104,26 @@ class CleanupTest(StoreTest):
             "list-images": [exe, "list", "{x:pattern}"],
             "remove-image": [exe, "rm", "{x:name}"],
             "prune-images": [exe, "prune"],
+            "list-volumes": [exe, "volumes", "{x:prefix}"],
+            "remove-volume": [exe, "volume-rm", "{x:name}"],
+        }}
+        resolved["project-state"] = {"values": {
+            "persistent-store-prefix": "scoter-",
+            "persistent-store-volume": "scoter-unused-store",
         }}
         return UserConfig(suc)
 
-    def record_run(self, suffix: str, pid: int, **fields: str) -> EnvironmentDesc:
+    def record_run(self, suffix: str, pid: int, suc: dict | None = None, **fields: str) -> EnvironmentDesc:
         """Record a run as `scoter-me-2000-SUFFIX`: a reservation, unless it's given its files."""
         values = {
             "dev_env_name": "", "firewall_router_name": "", "network_gateway_name": "",
-            "project_dir": "", "resources_dir": "", "workspace_dir": "", "setup_dir": "",
+            "project_dir": "", "resources_dir": "", "project_clone_dir": "", "setup_dir": "",
             "compose_file": "", "compose_env_file": "", **fields,
         }
         env = EnvironmentDesc(
             host=f"scoter-me-2000-{suffix}",
             dev_env_ssh_port="2000", dev_env_ssh_user="me",
-            created_at="2026-10-21T10:00:00", suc={}, pid=pid, **values,
+            created_at="2026-10-21T10:00:00", suc=suc or {}, pid=pid, **values,
         )
         with ActiveEnvironmentSet.locked(self.state / "running-env.json", self.state / "running-env.lock") as envs:
             envs.environs[env.host] = env
@@ -164,39 +172,55 @@ class CleanupTest(StoreTest):
         self.assertTrue((self.state / "exempt-new").exists())
 
     def test_gone_project(self) -> None:
-        """A project whose directory is gone: its acceptances are revoked; another's stay."""
-        kept = self.accept("FROM scratch\n", "main")
+        """A project whose directory is gone: its configurations are removed; another's stay."""
+        kept = self.configure("a: 1\n")
         other = self.new_project("other")
-        self.accept("FROM alpine\n", None, other)
+        self.configure("b: 1\n", project=other)
         shutil.rmtree(other)
         code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)
         self.assertEqual(code, 0, out)
-        self.assertIn(f"{other}  (1 acceptance)", out)
-        self.assertIn(f"Revoked 1 acceptance of {other}.", out)
+        self.assertIn(f"{other}  (1 configuration)", out)
+        self.assertIn(f"Removed 1 configuration of {other}.", out)
         verified_store = store.VerifiedStore.open(self.verified)
         self.assertEqual(verified_store.index(), {str(self.project): store.environment_id(self.project)})
         self.assertEqual(self.remaining(), [kept.id])
 
     def test_store_leftovers(self) -> None:
-        """What no record names goes: directories, blobs, temporary files; the rest stays."""
-        kept = self.accept("FROM scratch\n", "main")
+        """What nothing names goes: directories, what acceptances left, blobs, temporary files; the rest stays."""
+        kept = self.configure("a: 1\n")
         verified_store = store.VerifiedStore.open(self.verified)
         env_id = store.environment_id(self.project)
         with verified_store.locked():
-            verified_store.write_bytes(env_id, records.ACCEPTANCES_DIR, "orphan", "accepted.json", data=b"{}")
+            verified_store.write_bytes(env_id, "acceptances", "old", "accepted.json", data=b"{}")
+            verified_store.write_bytes(env_id, "environment.json", data=b"{}")
             verified_store.write_bytes("gone-0123456789ab", "environment.json", data=b"{}")
             verified_store.put_blob(b"nobody uses this")
         (self.verified / ".tmp-left").write_bytes(b"x")
         found = cleanup.find_store_leftovers(verified_store)
         self.assertEqual(found.environments, ["gone-0123456789ab"])
-        self.assertEqual(found.acceptances, [(env_id, "orphan")])
+        self.assertEqual(sorted(found.legacy), [(env_id, "acceptances"), (env_id, "environment.json")])
         self.assertEqual((found.unused_blobs, found.temp_files), (1, 1))
         code, out = self.run_cleanup(ask=lambda _: "y")
         self.assertEqual(code, 0, out)
-        self.assertIn("1 copied file no acceptance uses", out)
+        self.assertIn("1 copied file no configuration uses", out)
         self.assertFalse(cleanup.find_store_leftovers(verified_store))
-        self.assertEqual(self.remaining(self.project), [kept.id])
-        self.assertTrue(self.acceptance_dir(kept).is_dir())
+        self.assertEqual(self.remaining(), [kept.id])
+
+    def test_retired(self) -> None:
+        """A configuration removed while a run used it goes once nothing runs it (VER-40)."""
+        kept = self.configure("a: 1\n", "kept")
+        other = self.new_project("other")
+        theirs = self.configure("b: 1\n", project=other)
+        verified_store = store.VerifiedStore.open(self.verified)
+        env = remove.Environment(verified_store, str(other), store.environment_id(other))
+        remove.remove(env, [theirs.id], {theirs.id})
+        self.assertEqual(self.remaining(other), [theirs.id])
+        self.assertEqual(cleanup.remove_retired(verified_store, {theirs.id}), 0)
+        self.assertEqual(cleanup.remove_retired(verified_store, ()), 1)
+        self.assertEqual(self.remaining(other), [])
+        # With nothing left, that project is forgotten; this one isn't touched.
+        self.assertEqual(verified_store.index(), {str(self.project): store.environment_id(self.project)})
+        self.assertEqual(self.remaining(), [kept.id])
 
     def test_asked(self) -> None:
         """Anything but yes, and without a terminal, nothing goes."""
@@ -211,15 +235,15 @@ class CleanupTest(StoreTest):
         self.assertIn("give --force", out)
         self.assertEqual(self.hosts(), ["scoter-me-2000-b"])
 
-    def test_workspaces(self) -> None:
-        """Only with `Extras.WORKSPACES`: those no running environment uses, or is starting with."""
-        root = self.state / "workspaces"
+    def test_project_state(self) -> None:
+        """Only with `Extras.PROJECT_STATE`: those no running environment uses, or is starting with."""
+        root = self.state / "projects"
         for name in ("unused", "used", store.environment_id(self.project)):
-            (root / name / "workspace").mkdir(parents=True)
-        self.record_run("a", os.getpid(), workspace_dir=str(root / "used" / "workspace"))
+            (root / name / "project-clone").mkdir(parents=True)
+        self.record_run("a", os.getpid(), project_clone_dir=str(root / "used" / "project-clone"))
         self.record_run("c", os.getpid(), project_dir=str(self.project))
         self.assertEqual(self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)[1], "Nothing to clean up.\n")
-        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, extras=main_cleanup.Extras.WORKSPACES)
+        code, out = self.run_cleanup(confirm=main_cleanup.Confirm.FORCE, extras=main_cleanup.Extras.PROJECT_STATE)
         self.assertEqual(code, 0, out)
         self.assertIn(f"Removed {root / 'unused'}.", out)
         self.assertEqual(sorted(os.listdir(root)), sorted(["used", store.environment_id(self.project)]))
@@ -234,6 +258,21 @@ class CleanupTest(StoreTest):
         self.assertEqual(log, [
             f"list {PREFIX}*", f"rm {PREFIX}scoter-me-2000-z:latest", "prune",
         ])
+
+    def test_persistent_stores(self) -> None:
+        """Only with `Extras.PERSISTENT_STORES`: those with the prefix no run uses, or is starting with."""
+        used_suc = {"resolved": {"project-state": {"values": {"persistent-store-volume": "scoter-used-store"}}}}
+        self.record_run("a", os.getpid(), suc=used_suc)
+        self.record_run("c", os.getpid(), project_dir=str(self.project))
+        self.assertEqual(self.run_cleanup(confirm=main_cleanup.Confirm.FORCE)[1], "Nothing to clean up.\n")
+        code, out = self.run_cleanup(
+            confirm=main_cleanup.Confirm.FORCE, extras=main_cleanup.Extras.PERSISTENT_STORES,
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("Persistent stores no running environment uses:\n  scoter-unused-store\n", out)
+        self.assertIn("Removed scoter-unused-store.", out)
+        log = self.docker_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(log, ["volumes scoter-", "volume-rm scoter-unused-store"])
 
     def ssh_config(self) -> str:
         return (self.ssh / "config").read_text(encoding="utf-8")

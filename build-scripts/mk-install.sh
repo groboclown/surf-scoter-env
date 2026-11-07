@@ -48,6 +48,7 @@ cp -R "${base}/containers" "${workdir}/."
 cp -R "${base}/defaults" "${workdir}/."
 cp "${base}/defaults/setup.yaml" "${workdir}/setup.yaml"
 cp -R "${base}/examples" "${workdir}/."
+cp -R "${base}/templates" "${workdir}/."
 
 mkdir -p "${workdir}/docs"
 cp "${base}/docs"/* "${workdir}/docs/." || true

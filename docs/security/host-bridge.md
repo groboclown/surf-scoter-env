@@ -32,7 +32,7 @@ The command forms come from the `commands` section of the [project configuration
 
 `scoter-host` reaches *into* the container through the container runtime's exec channel.  Nothing listens on the host, so there's no port for the container, or anything on your network, to connect to.  When `scoter-host` stops, the bridge is gone.
 
-`scoter-host` reads its settings only from the universal configuration file that `scoter run` generates from your project directory's configuration.  The container's copy of the project configuration, in the workspace, has no effect.
+`scoter-host` reads its settings only from the universal configuration file that `scoter run` generates from your project directory's configuration.  The container's copy of the project configuration, in the project clone, has no effect.
 
 ### Every request is untrusted
 
@@ -51,15 +51,16 @@ A request runs only if an entry in `commands` matches it ([`analyze.rs`](../../h
 
 The container never picks the program.  The host runs the entry's `program`, or the command name found on the *host's* `PATH`.
 
-### Files stay in the workspace
+### Files stay in the project clone
 
 Path arguments (`path` placeholders) are the main defense against using a host command to reach host files:
 
-* A container path must be inside the workspace mount.  It's mapped to the host's workspace directory and resolved, following symlinks, and the result must still be inside the workspace and match the entry's `within` rule.  A symlink in the workspace pointing at `~/.ssh` is refused.
-* The host process gets the resolved host path, not the container's text.
+* A container path must be inside the project clone's mount.  It's mapped to names below the host's clone directory, with `.` and `..` worked out, and must match the entry's `within` rule.  No name on the way may be a symlink: a symlink in the clone pointing at `~/.ssh` is refused, and so is one pointing elsewhere in the clone.
+* The container's persistent store is a container volume, not a host directory, so there's nothing for a path in it to map to: it's refused like any other path outside the clone.  A host command can never read or write the store's files.
+* The host process never gets a path into the clone.  A file it reads is copied into a private temporary directory first, and a file it writes is written there and put back when it exits; `access` says which.  Each copy reaches the clone's file one name at a time from the clone's root, never following a symlink (`openat` with `O_NOFOLLOW`), and a file put back is a new file renamed over the old one, which replaces a symlink at that name rather than writing through it.  So the container can't redirect the program to a host file by changing the clone while it runs ([BRIDGE-3](host-bridge-attack-vectors.md#bridge-3-path-checks-race-the-host-program)).
 * `within: temp` gives the process a fresh file in a private temporary directory instead, which is deleted when the process exits.  The container picks at most the file's name, and only with `keep-name`, after checks for separators, `.`, `..` and Windows device names.
 
-The working directory follows the same rules.  Without a `cwd` rule the process runs in a new, empty temporary directory.  With one, the client's directory is resolved the same way and must match an `allowed-workspace-dirs` pattern.
+The working directory follows the same rules.  Without a `cwd` rule the process runs in a new, empty temporary directory.  With one, the client's directory is resolved the same way and must match an `allowed-project-clone-dirs` pattern; it's opened the same way, and the process starts in that open directory (`fchdir`), so the directory it starts in is the one checked.  What the program does inside it is up to the program: it reads the clone's files there by their paths, symlinks included, so a working directory in the clone is for programs that only use the files there as data ([BRIDGE-1](host-bridge-attack-vectors.md#bridge-1-allowed-commands-that-read-container-controlled-input)).
 
 ### An empty environment
 

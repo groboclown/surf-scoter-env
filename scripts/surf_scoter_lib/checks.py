@@ -74,7 +74,8 @@ class Resolved:
     name: str
     # The absolute executable, or None when it isn't on this host.
     executable: str | None
-    # `command-map` (the setup maps the name) or `path`.
+    # `command-map` (the setup maps the name), `path`, `review`, or the host file's:
+    # `host-file:resolved` or `host-file:user` (`host-file` when it doesn't name it).
     source: str
 
 
@@ -87,7 +88,7 @@ class Report:
 
     @property
     def refused(self) -> list[Finding]:
-        """The findings that stop the project from being accepted."""
+        """The findings that stop the configuration from being approved, or run."""
         return [f for f in self.findings if f.severity == Severity.REFUSE]
 
     def to_json(self) -> jdata.DictJsonData:
@@ -128,7 +129,7 @@ def _check_commands(check: jdata.DictJsonData) -> dict[str, str | None]:
 def _locations(config: UserConfig) -> dict[str, Path]:
     """The project's places, by name, with symlinks resolved."""
     ret: dict[str, Path] = {}
-    for name in ("project-dir", "vcs-root", "dev-container-workspace-dir"):
+    for name in ("project-dir", "vcs-root", "project-clone-dir"):
         location = config.active_location(name)
         if location is not None:
             ret[f"scoter:{name}"] = Path(os.path.realpath(location))
@@ -221,11 +222,6 @@ def _project_env_allow(config: UserConfig) -> EnvAllow:
     return allow
 
 
-def _plan_env_allow(command: jdata.DictJsonData, at: str) -> list[tuple[str, str]]:
-    """An accepted command's `allow` entries: its whole plan's."""
-    return [(f"{at}.env.allow", e) for e in jdata.find_str_list(command, "env", "allow")]
-
-
 @dataclass
 class _Hit:
     check_id: str
@@ -261,7 +257,10 @@ def check_host_commands(
                 Severity.REFUSE, f"{at}.program",
                 f"`{r.name}` isn't on this computer"
                 + (" (your setup's `command-map` names a program that isn't there)"
-                   if r.source == "command-map" else ""),
+                   if r.source == "command-map" else "")
+                + (" (your host file doesn't name it)" if r.source == "host-file" else "")
+                + (" (the program your host file names isn't there)"
+                   if r.source.startswith("host-file:") else ""),
             ))
             continue
         real = _real(r.executable)
@@ -557,8 +556,11 @@ _STAGE = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
 def _logical_lines(text: str) -> list[str]:
     lines: list[str] = []
     current = ""
-    for line in snapshot.canonical_dockerfile(text).splitlines():
-        if line.startswith("# "):
+    canonical = snapshot.canonical_dockerfile(text)
+    # Without a canonical form, Docker's own line breaks; comment lines are
+    # then skipped below, like the directives.
+    for line in (canonical if canonical is not None else text).split("\n"):
+        if line.lstrip(" \t").startswith("#"):
             continue
         if line.endswith("\\"):
             current += line[:-1] + " "
@@ -594,8 +596,20 @@ def from_images(text: str, local_tags: Iterable[str]) -> list[str]:
 
 
 def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Finding]:
-    """`FROM` lines without a digest: a tag can point at new content any time."""
+    """`FROM` lines without a digest: a tag can point at new content any time.
+
+    And a Dockerfile with no canonical form: one whose comments can't be
+    told from what Docker builds, so any change to it asks for a review.
+    """
     findings: list[Finding] = []
+    if snapshot.canonical_dockerfile(text) is None:
+        findings.append(Finding(
+            Severity.WARN, rel,
+            "Has a control character (such as a lone carriage return), or a heredoc "
+            "Surf Scoter can't follow, so its comments can't be told from what Docker "
+            "builds: read it as the review shows it, control characters included.  Any "
+            "change to it, even to a comment, asks for a review.",
+        ))
     for image in from_images(text, local_tags):
         if "@sha256:" in image:
             continue
@@ -610,7 +624,7 @@ def from_findings(rel: str, text: str, local_tags: Iterable[str]) -> list[Findin
     return findings
 
 
-def _file_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
+def file_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
     """The first of `patterns` the file (or directory) at `rel` matches, by its own name."""
     name = rel.rsplit("/", 1)[-1]
     for pattern in patterns:
@@ -623,13 +637,18 @@ def _file_like(rel: str, patterns: Sequence[str], is_dir: bool) -> str | None:
 
 
 def check_project_files(config: UserConfig) -> list[Finding]:
-    """The project file and its container directories (those in the project files directory)."""
+    """The project file and its container directories (those in the project files directory).
+
+    The files are read where the generator read them: the configuration
+    directory (`config-dir`, a copy), or, in a universal file from before
+    it, the project files directory.
+    """
     project = config.active_location("project-dir")
     files_name = config.optional_value("scoter", "project-files-dir")
     file_name = config.optional_value("scoter", "project-file-name")
     if project is None or files_name is None or file_name is None:
         return []
-    files_dir = Path(os.path.realpath(project / files_name))
+    files_dir = Path(os.path.realpath(config.active_location("config-dir") or project / files_name))
     file_checks = simple_checks(config, PROJECT_FILES)
     builds = config.dev_container_parent_builds() if config.has_dev_container() else []
     local_tags = [tag for tag, _ in builds]
@@ -669,7 +688,7 @@ def _container_findings(
         if not entry.is_symlink():
             findings.extend(simple_findings(
                 file_checks, child,
-                lambda check, child=child, is_dir=is_dir: _file_like(child, check.matches, is_dir),
+                lambda check, child=child, is_dir=is_dir: file_like(child, check.matches, is_dir),
                 lambda check, matched: f"{check.reason} (`{matched}`)",
             ))
         if entry.is_symlink():
@@ -715,104 +734,52 @@ def check_project(config: UserConfig, path_env: str | None = None) -> Report:
     if path_env is None:
         path_env = os.environ.get("PATH", "")
     try:
-        resolved = resolve_programs(config, path_env)
-        findings = check_host_commands(config, resolved)
-        findings.extend(check_program_paths(config, resolved, path_env))
-        findings.extend(check_egress(config))
-        findings.extend(check_project_files(config))
+        return check_resolved(config, resolve_programs(config, path_env), path_env)
     except (KeyError, TypeError, ValueError) as err:
         raise ConfigErr(f"bad universal configuration file: {err}") from err
-    return Report(resolved, findings)
 
 
-# ---------------------------------------------------------------------
-# A review's settings
+def check_with_host_file(config: UserConfig, path_env: str | None = None) -> Report:
+    """`check_project`, with each program the one the universal file's `host-file` names.
 
-
-def check_review(config: UserConfig, path_env: str | None = None) -> Report:
-    """Every check on the accepted settings a review file gives (the file's `review`).
-
-    The same checks as the project's, on what the user left in the review:
-    each command's program as given (an absolute path, nothing looked up),
-    its whole environment plan, the egress rules, and the project's
-    container directories when the review uses the project's container.
-    Then the review's `$override`s: a refusal from the setup's
-    checks that the override names, every one of them, is set aside, as a
-    note; a refusal for safety (the program's missing, in the project, or
-    writable by others; a container file that's a link) never is; and an
-    override naming a check that doesn't refuse the item is refused itself.
-    No review, or a rejected one, is an empty report.
+    Nothing is looked up: a program the host file doesn't name, or that
+    isn't an executable any more, is refused.  `path_env` is only checked
+    for relative entries.  Without a host file in the universal file, it's
+    a `ConfigErr`.
     """
     if path_env is None:
         path_env = os.environ.get("PATH", "")
-    accepted = config.review_accepted()
-    if accepted is None:
-        return Report()
+    programs = config.host_file_programs()
+    if programs is None:
+        raise ConfigErr("the universal configuration file has no `host-file`")
     try:
-        commands = [jdata.req_dict(accepted, *key) for key in jdata.find_list_keys(accepted, "commands")]
-        resolved = []
-        for i, command in enumerate(commands):
-            program = jdata.req_str(command, "program")
-            present = os.path.isfile(program) and os.access(program, os.X_OK)
-            resolved.append(Resolved(
-                i, jdata.req_str(command, "command"), _base_name(program),
-                program if present else None, "review",
-            ))
-        findings = check_host_commands(config, resolved, commands, _plan_env_allow)
-        findings.extend(check_program_paths(config, resolved, path_env))
-        egress = [jdata.req_dict(accepted, *key) for key in jdata.find_list_keys(accepted, "egress")]
-        findings.extend(check_egress(config, egress))
-        if jdata.find(accepted, "dev-container", "use") in (None, "project"):
-            findings.extend(check_project_files(config))
-        for kind in ("commands", "egress"):
-            overrides = {
-                jdata.req_int(accepted, *key, "index"): jdata.find_str_list(accepted, *key, "checks")
-                for key in jdata.find_list_keys(accepted, "overrides", kind)
-            }
-            findings = apply_overrides(findings, kind, overrides)
+        return check_resolved(config, resolve_from_host_file(config, programs), path_env)
     except (KeyError, TypeError, ValueError) as err:
-        raise ConfigErr(f"bad universal configuration file: review: {err}") from err
-    return Report(resolved, findings)
+        raise ConfigErr(f"bad universal configuration file: {err}") from err
 
 
-def apply_overrides(
-    findings: Sequence[Finding], kind: str, overrides: dict[int, list[str]],
-) -> list[Finding]:
-    """The findings once the user's `$override`s on `kind` (`commands` or `egress`) apply."""
-    ret = list(findings)
-    for index, names in sorted(overrides.items()):
-        at = f"{kind}[{index}]"
-
-        def on_item(finding: Finding, at: str = at) -> bool:
-            return finding.key == at or finding.key.startswith((at + ".", at + "["))
-
-        # Worked out before anything is added for this item.
-        refusals = [f for f in ret if on_item(f) and f.severity == Severity.REFUSE]
-        refusing = {check for f in refusals for check in f.checks}
-        safety = [f for f in refusals if not f.checks]
-        for name in names:
-            if name not in refusing:
-                ret.append(Finding(
-                    Severity.REFUSE, f"{at}.$override",
-                    f"`{name}` doesn't refuse this item; an override names only the setup "
-                    "checks that refuse it.",
-                ))
-        if safety:
-            ret.append(Finding(
-                Severity.REFUSE, f"{at}.$override",
-                "Can't be overridden: it's refused for a reason that isn't a check in your "
-                "setup (" + safety[0].message.rstrip(".") + ").",
-            ))
-            continue
-        ret = [
-            Finding(
-                Severity.NOTE, f.key,
-                "You overrode " + ", ".join(f"`{c}`" for c in f.checks) + f" here: {f.message}",
-                f.checks,
-            )
-            if on_item(f) and f.severity == Severity.REFUSE and f.checks
-            and set(f.checks) <= set(names)
-            else f
-            for f in ret
-        ]
+def resolve_from_host_file(
+    config: UserConfig, programs: dict[str, jdata.DictJsonData],
+) -> list[Resolved]:
+    """Each project command's program, as the host file `programs` gives it."""
+    ret: list[Resolved] = []
+    for i, command in enumerate(config.project_commands()):
+        cmd = jdata.req_str(command, "command")
+        name = jdata.find_str(command, "program") or cmd
+        entry = programs.get(name)
+        path = None if entry is None else jdata.req_str(entry, "path")
+        present = path is not None and os.path.isfile(path) and os.access(path, os.X_OK)
+        source = "host-file" if entry is None else "host-file:" + jdata.req_str(entry, "origin")
+        ret.append(Resolved(i, cmd, name, path if present else None, source))
     return ret
+
+
+def check_resolved(config: UserConfig, resolved: list[Resolved], path_env: str) -> Report:
+    """The checks on the project, with its programs as `resolved`: the
+    setup's `host-commands` checks, the path checks, the egress rules and
+    the container files."""
+    findings = check_host_commands(config, resolved)
+    findings.extend(check_program_paths(config, resolved, path_env))
+    findings.extend(check_egress(config))
+    findings.extend(check_project_files(config))
+    return Report(resolved, findings)
