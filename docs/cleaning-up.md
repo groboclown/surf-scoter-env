@@ -90,14 +90,6 @@ The dev container keeps its own files between runs, such as its IDE server, cach
 * `scoter cleanup --persistent-stores` removes every one no running environment uses.
 * By hand: `docker volume ls --filter name=^scoter-` lists them, and `docker volume rm NAME` removes one.
 
-## Upgrading From Workspaces
-
-Before the project clone and the persistent store, each project had a *workspace*, in `state/workspaces`, which held both the clone and the container's home directory.  The new version doesn't read the old running environment records, so:
-
-* **Stop every environment before you upgrade**, with `scoter kill` (or `scoter kill --fetch BRANCH` to bring back what's in its workspace first).
-* If you upgraded with one still running, stop its containers with your container tool (`docker ps` lists them, named `scoter-...`), then delete `~/.config/surf-scoter.d/state/running-env.json`.
-* Fetch anything you need from the old workspaces, then delete `~/.config/surf-scoter.d/state/workspaces`.  Nothing uses it any more, and `scoter cleanup` doesn't look there.
-
 ## Configurations
 
 Each project you pull keeps your configurations of it, with a copy of their files: the one in use, and, after a pull replaces it, the one before it (`default.previous`).  `scoter lock` and `scoter review` replace the one they start from, so they don't pile up.
