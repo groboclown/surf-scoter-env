@@ -1290,6 +1290,58 @@ mod tests {
     }
 
     #[test]
+    fn setup_limits_secrets_to_tls_ports() {
+        let dir = TempDir::new();
+        dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");
+        dir.write("proj/.surf-scoter.d/env/dev-env.yaml", DEV_ENV);
+        dir.write(
+            "proj/.surf-scoter.d/project.yaml",
+            "container:\n  dev-container-path: ./env\negress:\n  - {host: a.example.com, protocol: https, secrets: [A_TOKEN]}\n  - {host: b.example.com, protocol: https, port: 8443, secrets: [B_TOKEN]}\n  - {host: c.example.com, protocol: https, port: 8443}\n",
+        );
+        let with_ports = |ports: &str| {
+            dir.write(
+                "home/setup.yaml",
+                &format!(
+                    "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n{ports}"
+                ),
+            );
+            let options = LoadOptions {
+                project_dir: Some(dir.path().join("proj")),
+                ..LoadOptions::default()
+            };
+            let env = Env {
+                scoter_home: Some(dir.path().join("home")),
+                ..Env::default()
+            };
+            load_all_with_env(&options, env)
+        };
+        // Only a rule with secrets is held to the list; one without isn't.
+        assert_eq!(
+            error_texts(
+                with_ports("dev-env:\n  value-lists:\n    network-gateway-tls-ports: ['443']\n")
+                    .unwrap_err()
+            ),
+            [
+                "egress[1].port: a rule with `secrets` must be on a port in your setup's `dev-env: value-lists: network-gateway-tls-ports` (443), not 8443"
+            ]
+        );
+        assert!(
+            with_ports(
+                "dev-env:\n  value-lists:\n    network-gateway-tls-ports: ['443', '8443']\n"
+            )
+            .is_ok()
+        );
+        // No list: no port, so every rule with secrets is refused.
+        assert_eq!(
+            error_texts(with_ports("").unwrap_err()),
+            [
+                "egress[0].port: a rule with `secrets` must be on a port in your setup's `dev-env: value-lists: network-gateway-tls-ports` (none), not 443",
+                "egress[1].port: a rule with `secrets` must be on a port in your setup's `dev-env: value-lists: network-gateway-tls-ports` (none), not 8443",
+            ]
+        );
+    }
+
+    #[test]
     fn setup_refuses_egress_wildcard() {
         let dir = TempDir::new();
         dir.write("proj/.surf-scoter.d/env/Dockerfile", "FROM scratch\n");

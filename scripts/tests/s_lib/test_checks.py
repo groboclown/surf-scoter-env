@@ -300,6 +300,21 @@ class EgressTest(_Project):
         self.host_check("code-hosts", "warn", ["gist.github.com"])
         self.assertEqual([k for _, k, _ in self.found(Severity.WARN)], ["egress[0]", "egress[3]"])
 
+    def test_secrets(self) -> None:
+        """A rule with secrets warns, naming the host and each secret."""
+        self.egress = [
+            {"host": "api.github.com", "protocol": "https", "secrets": ["GITHUB_TOKEN", "OTHER"]},
+            {"host": "registry.npmjs.org", "protocol": "https"},
+        ]
+        found = [(key, message) for _, key, message in self.found(Severity.WARN)]
+        self.assertEqual(found, [(
+            "egress[0].secrets",
+            (
+                "`api.github.com` gets your GITHUB_TOKEN, OTHER: the gateway puts your values into "
+                "requests to it, so anything in the dev container can use them there, as you."
+            ),
+        )])
+
     def test_actions_and_overrides(self) -> None:
         """The action decides the severity; each check that counts is shown; an override
         takes the place of the checks it names, for the hosts it matches."""

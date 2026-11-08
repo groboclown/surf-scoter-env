@@ -19,6 +19,8 @@ Investigations into what the systems do and where potential weak points exist.
 
 * [Attack vector analysis](attack-vectors.md)
     * [Runtime network](network-attack-vectors.md)
+        * [The Squid gateway](network-gateway-squid-attack-vectors.md)
+        * [The seekrit gateway](network-gateway-seekrit-attack-vectors.md)
     * [The development container](dev-container-attack-vectors.md)
     * [File access](files-attack-vectors.md)
     * [The Host Bridge](host-bridge-attack-vectors.md)

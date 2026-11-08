@@ -97,7 +97,7 @@ class CleanupTest(StoreTest):
         resolved["dev-env"] = {"values": {
             "dev-env-image-prefix": PREFIX,
             "firewall-router-image": f"{PREFIX}firewall-router",
-            "network-gateway-image": f"{PREFIX}network-gateway",
+            "network-gateway-image": f"{PREFIX}network-gateway-squid",
         }}
         exe = str(self.docker)
         resolved["docker"] = {"runs": {

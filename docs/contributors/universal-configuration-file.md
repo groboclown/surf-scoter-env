@@ -260,10 +260,15 @@ The general layout:
     },
 
     // The configuration's egress rules, with the setup's gateway, which enforces them.
-    // 'null' without a host file.
+    // 'null' without a host file.  `secrets` are only the names a rule lets the
+    // gateway fill in; the values are in the user's secret store, which is never
+    // read into this file (only its path, `project-state: paths: secret-store`).
     "egress": {
         "gateway": "squid",
-        "rules": [{"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": []}]
+        "rules": [
+            {"host": "registry.npmjs.org", "protocol": "tls", "port": 443, "methods": [], "secrets": []},
+            {"host": "api.github.com", "protocol": "https", "port": 443, "methods": ["GET"], "secrets": ["GITHUB_TOKEN"]}
+        ]
     },
 
     // The commands `scoter-host` runs: the configuration's commands, each with the host

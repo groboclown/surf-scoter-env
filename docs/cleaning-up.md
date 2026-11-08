@@ -49,6 +49,7 @@ The locations below are the defaults; your [setup file](system-config-file.md) c
 | A running environment's record | `~/.config/surf-scoter.d/state/running-env.json` | The run ends, `scoter kill`, or `scoter cleanup` once its run is gone |
 | A running environment's configuration | `~/.config/surf-scoter.d/state/environments/HOST/` | The run ends, `scoter kill`, or `scoter cleanup` |
 | The project's state: its clone (`project-clone`), setup and resources directories | `~/.config/surf-scoter.d/state/projects/PROJECT-ID/` | `scoter run --clean-project-clone`, `scoter kill --clean-project-clone`, or `scoter cleanup --project-state` |
+| The network gateway's certificate authority for the run (its key signs certificates the dev container trusts) | The project's resources directory, `ca/` | The run ends, `scoter kill`, or `scoter cleanup` |
 | The dev container's persistent store | A volume in your container tool, `scoter-PROJECT-ID-store` | `scoter run --clean-persistent-store`, `scoter kill --clean-persistent-store`, or `scoter cleanup --persistent-stores` |
 | Your configurations, with a copy of their files | `~/.config/surf-scoter.d/verified/` | `scoter remove`, or `scoter cleanup` once the project's directory is gone |
 | An unlocked configuration, for you to edit | `~/.config/surf-scoter.d/unlocked/ENV-ID/` | `scoter lock`, or `scoter lock --revert` |

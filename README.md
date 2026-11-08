@@ -104,6 +104,8 @@ This builds from your configuration, never the project's live files, and starts 
 
 To change your configuration, `scoter unlock` gives you a copy to edit and run, and `scoter lock` reviews and stores it again (`scoter lock --revert` throws the edits away).  `scoter review` looks at the configuration in use again, `scoter switch NAME` goes to another (a pull keeps the one it replaced as `default.previous`), `scoter list` and `scoter remove` manage them, and `scoter push` offers yours back to the project, if it's yours.  If you want to set up your project to define a Surf Scoter development environment, `scoter init` starts one from a template; [the fine documentation can help](docs/new-project-setup.md).
 
+While it runs, `scoter netlog` shows what the container did through the network gateway: the hosts it reached and was refused, and, with a gateway that reads requests (seekrit), the requests and the secrets put into them, by name.  For each refused host it suggests the egress rule that would allow it, to add to the project and pull; it never changes your configuration.  `scoter netlog --follow` shows each event as it happens, and `--json` gives them as data.
+
 When a run ends, it stops its containers, but keeps the project's clone and the container's persistent store for the next run.  If a run was stopped some other way, `scoter kill` stops what it left running, and `scoter cleanup` sweeps up what every stopped run, and every deleted project, left behind.  [Cleaning up after Surf Scoter](docs/cleaning-up.md) covers what's kept, and how to clear it out.
 
 ## Connecting to a Developer Environment

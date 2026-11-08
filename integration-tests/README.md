@@ -14,7 +14,7 @@ It prints each step, and ends with `PASS` or `FAIL`.
 
 * The debug build of the host tools: `cd host && cargo build`.
 * `python3`, `git`, and `script` (from util-linux, to give the pull's reviewer a terminal).
-* For the test that runs containers (`03`): the container tool, with `compose`, and the network.
+* For the tests that run containers (`03`, `07`): the container tool, with `compose`, and the network.
 
 ## The sandbox
 
@@ -28,16 +28,17 @@ The sandbox is removed when the test ends, unless it fails (it says where it is,
 |---|---|---|
 | `KEEP_SANDBOX` | (unset) | Set to keep the sandbox after a passing test. |
 | `IT_CONTAINER_TOOL` | `docker` | The container tool to run: `docker`, `podman`, or anything that takes their commands. |
-| `IT_RUN_TIMEOUT` | `1800` | How long `03` waits for the environment to start, in seconds.  The first run builds the images. |
+| `IT_RUN_TIMEOUT` | `1800` | How long `03` and `07` wait for the environment to start, in seconds.  The first run builds the images. |
 
 ## The tests
 
 * **`01-pull-and-remove`**: the run refuses a project with no configuration; `scoter pull` without a terminal approves nothing; then the pull's plumbing: `seed` (a working directory of `files/` and `host.json`), `analyze` (the setup refuses the project's shell), `approve` refused, the copy edited, `changed` naming the file, the old analysis refused, a new one approved; `scoter list`; `scoter remove $(scoter list -q)`.  No containers.
 * **`02-re-pull`**: pulls a project (as committed), and changes it.  A run still builds the configuration in use, and says the project's files changed since the last pull; a pull of the committed files finds nothing new; `--working-tree` pulls the change, flagging what isn't committed, and keeps the old configuration as `default.previous`, which `scoter switch` goes back to.  No containers: the container tool is a stand-in that keeps what a build was given, and fails it.
-* **`03-run-and-kill`**: `scoter user-setup`, pulling a project that uses the distribution's `dev-env` container, then a real `scoter run`.  Once the environment is up, it checks that the gateway lets out the allowed host (`registry.npmjs.org`) and not another (`example.com`).  Then it kills the run as a crash would, leaving its containers running, and checks that `scoter kill` stops them and forgets the environment.
+* **`03-run-and-kill`**: `scoter user-setup`, pulling a project that uses the distribution's `dev-env` container, then a real `scoter run`.  Once the environment is up, it checks that the gateway lets out the allowed host (`registry.npmjs.org`) and not another (`example.com`), and that `scoter netlog` reads both from Squid's log, suggesting a rule for the refused one.  It checks the run's gateway CA: private while it runs, trusted by an ssh session, never given to Squid, and gone after the kill.  Then it kills the run as a crash would, leaving its containers running, and checks that `scoter kill` stops them and forgets the environment.
 * **`04-lock-and-unlock`**: pulls 02's sample project, unlocks it, edits the copy, and runs it (with the unlocked warning); a pull and a push refuse while unlocked; `scoter lock --revert` asks, then throws the edit away; an edit is locked, replacing the configuration it came from; `scoter push --yes` writes it into the project (not the host file), and the next run doesn't take it for a change; `scoter review` approves it again.  No containers, as in 02.
 * **`05-cleanup`**: pulls 02's sample project, then moves it and pulls it again, and leaves a run's files, a project state directory, a persistent store and an image behind.  `scoter cleanup --dry-run` lists them; without a terminal or `--force`, and answering no, nothing goes; `--force` removes the run's files and the gone directory's configuration, but not the project state, store or image; `--project-state --persistent-stores --images` removes those too.  No containers: the container tool is a stand-in that lists one image and one volume, and records what it's asked.
 * **`06-init`**: `scoter init` refuses a project with its own files; for one without, it starts a configuration from the distribution's template without writing into the project; a run uses the unlocked copy; `scoter lock` stores it, finding the project by its configuration; the first `scoter push` creates the project's files directory.  No containers: the container tool's builds fail.
+* **`07-seekrit-gateway`**: `03`'s run with the seekrit gateway in place of Squid, chosen by the user's setup, for a project that passes `pypi.org` through untouched and lets the gateway read `api.github.com`, filling in `GITHUB_TOKEN` from the user's secret store.  From an ssh session in the dev container: the session has the placeholder, never the value; `pypi.org` works with no CA involved; the GitHub request gets the secret (the gateway's access log says so; GitHub answers 401 for the made-up value), a `POST` is refused by the rule's methods, and `example.com` is refused.  The container tool's `inspect` and `logs`, the run's log and the gateway's configuration never show the value.  `scoter netlog` shows the requests and the secret put in (by name), suggests a rule for the refused host, and `--follow` (reading the log again) shows a new connection.  After `restart`, a placeholder gets 503 until `scoter gateway-post-start` gives the secret again; a second one finds the gateway already has it.  `scoter kill` removes the run's CA.  Needs the container tool and the network, as `03` does.
 
 ## Adding a test
 

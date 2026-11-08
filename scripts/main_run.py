@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess  # nosec: B404  #  We know the issues around running subprocesses.
 import sys
 import tempfile
@@ -23,6 +24,8 @@ from surf_scoter_lib import (
     checks,
     defaults,
     fileutil,
+    gateway,
+    gateway_start,
     gen_parser,
     generator,
     jdata,
@@ -152,7 +155,7 @@ def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
                 f"Your ssh key pair ({key_file} and {pub_key_file}) don't exist.  "
                 f"Make sure you ran user setup first."
             )
-        pub_key_file.copy(setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME)
+        shutil.copyfile(pub_key_file, setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME)
         fileutil.touch(setup_dir / defaults.AUTHORIZED_KEYS_FILE_NAME, MODE_SETTINGS_FILE)
 
         # Create the host key.
@@ -177,19 +180,27 @@ def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
         resources_dir.mkdir(parents=True, exist_ok=True)
         _ignore_directory(config, vcs_section, resources_dir)
 
-        # The network gateway's configuration, from the egress rules.
-        gateway_config = _write_gateway_config(config, resources_dir / GATEWAY_CONFIG_FILE)
+        # A new CA for the gateway, whatever it is, then its configuration,
+        # from the egress rules.
+        reads_tls = gateway_start.reads_tls(config)
+        ca_cert, ca_key = gateway_start.make_ca(config, resources_dir, shared=reads_tls)
+        gateway_config = _write_gateway_config(
+            config, resources_dir / GATEWAY_CONFIG_FILE, ca_cert=ca_cert, ca_key=ca_key,
+        )
 
         # Setup the .env file in the resources directory.
         _write_compose_env_file(
             config=config, file=resources_dir / defaults.COMPOSE_ENV_FILENAME,
             host=host, clone_dir=clone_dir, volume=volume,
             settings_dir=setup_dir, gateway_config=gateway_config,
+            gateway_ca_dir=gateway_start.gateway_ca_dir(resources_dir, reads_tls),
+            ca_cert=ca_cert, secret_names=_secret_names(config),
         )
 
         # Setup the docker-compose file in the resources directory.
-        config.require_path("dev-env", "docker-compose").copy(
-            resources_dir / defaults.DOCKER_COMPOSE_FILENAME
+        shutil.copyfile(
+            config.require_path("dev-env", "docker-compose"),
+            resources_dir / defaults.DOCKER_COMPOSE_FILENAME,
         )
 
         # scoter-host's copy of the configuration: it decides what runs on
@@ -223,6 +234,9 @@ def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
             ))
     except BaseException:
         print("Aborting execution.", file=sys.stderr)
+        resources = config.optional_path("project-state", "resources-dir")
+        if resources is not None:
+            gateway_start.remove_ca(resources)
         _release(config, host)
         fileutil.rm(staged)
         raise
@@ -241,6 +255,9 @@ def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
 
     failed = False
     try:
+        # What the gateway needs once it's running, such as its secrets.
+        if not gateway_start.post_start(config, universal_config_file, f"{host}-ng"):
+            raise SurfScoterErr("the network gateway's post-start failed")
         # Tell the user the setup for the container (host name).
         print("==========================================")
         print(f"dev-container running as {host}")
@@ -281,6 +298,8 @@ def run_env_runner(found_config: UserConfig, args: argparse.Namespace) -> int:
             "compose-file": str(resources_dir / defaults.DOCKER_COMPOSE_FILENAME),
         },
     )
+    # The gateway's CA: its key signs certificates the dev container trusted.
+    gateway_start.remove_ca(resources_dir)
 
     # Remove from active mode.
     with _active_envs(config) as active_envs:
@@ -716,9 +735,10 @@ def _add_known_host(config: UserConfig, host: str, host_key_file: Path) -> None:
     known_hosts_file.write_text(known_hosts, encoding="utf-8")
 
 
-def _write_gateway_config(config: UserConfig, output: Path) -> Path:
+def _write_gateway_config(config: UserConfig, output: Path, *, ca_cert: Path, ca_key: Path) -> Path:
     """Write the network gateway's configuration from the egress rules, with the setup's
-    `network-gateway: runs: write-config`; the file written.
+    `network-gateway: runs: write-config`; the file written.  The run's CA
+    (`ca_cert`, `ca_key`) is there for a gateway that needs it.
 
     The gateway enforces what it can of each rule.  When it can't enforce one,
     it writes nothing, and the environment doesn't start: a rule is never
@@ -732,7 +752,10 @@ def _write_gateway_config(config: UserConfig, output: Path) -> Path:
         res = config.run_command(
             "dev-env", "network-gateway-write-config",
             on_error=OnError.RETURN,
-            template={"universal": str(universal), "output": str(output)},
+            template={
+                "universal": str(universal), "output": str(output),
+                "ca-cert": str(ca_cert), "ca-key": str(ca_key),
+            },
         )
     try:
         report = json.loads(res.stdout or b"{}")
@@ -761,6 +784,7 @@ def _write_compose_env_file(
     *,
     config: UserConfig, file: Path,
     host: str, clone_dir: Path, volume: str, settings_dir: Path, gateway_config: Path,
+    gateway_ca_dir: Path, ca_cert: Path, secret_names: Sequence[str],
 ) -> None:
     """Write the settings the docker-compose file uses to its `.env` file.
 
@@ -793,6 +817,8 @@ def _write_compose_env_file(
         "PROJECT_CLONE_HOST": str(clone_dir),
         "SETTINGS_HOST": str(settings_dir),
         "GATEWAY_CONFIG_HOST": str(gateway_config),
+        "GATEWAY_CA_HOST": str(gateway_ca_dir),
+        "GATEWAY_CA_CERT_HOST": str(ca_cert),
         "PERSISTENT_STORE_VOLUME": volume,
 
         # Mount points
@@ -810,8 +836,19 @@ def _write_compose_env_file(
         # Environment variables
         "SSHD_PORT_ENV": (config.dev_container_sshd_port_env() or "SSHD_PORT_ENV_UNSET"),
         "SSHD_PORT": (config.dev_container_sshd_port() or "not set"),
+        # Names only, each checked (see `gateway.Rule`): the dev container
+        # makes each one's `{{seekrit:NAME}}` placeholder.
+        "SECRET_NAMES": " ".join(secret_names),
     }
     file.write_text("".join(env_line(k, v) for k, v in lines.items()), encoding="utf-8")
+
+
+def _secret_names(config: UserConfig) -> list[str]:
+    """The secrets the configuration's egress rules name, each once."""
+    names: list[str] = []
+    for rule in gateway.rules_from(config):
+        names.extend(name for name in rule.secrets if name not in names)
+    return names
 
 
 def env_line(key: str, value: str) -> str:

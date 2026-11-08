@@ -1,6 +1,6 @@
 # Network Attack Vectors
 
-The weak points of the [runtime network](network.md), measured against its [required properties](network.md#required-properties) (N1 to N8).  Contributors should treat changes to the code listed here as security-sensitive, and the red team can use each vector as a starting point.  See the [attack vector overview](attack-vectors.md) for how to read the severity and status labels.
+The weak points of the [runtime network](network.md), measured against its [required properties](network.md#required-properties) (N1 to N8), whichever gateway it runs.  Each gateway's own weak points are on its page: the [Squid gateway](network-gateway-squid-attack-vectors.md) (`SQUID`, the default) and the [seekrit gateway](network-gateway-seekrit-attack-vectors.md) (`SEEKRIT`).  Contributors should treat changes to the code listed here as security-sensitive, and the red team can use each vector as a starting point.  See the [attack vector overview](attack-vectors.md) for how to read the severity and status labels.
 
 
 ## Attacker goals
@@ -16,9 +16,9 @@ Code in the dev container wants to:
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules | The project file's `egress`, as pulled into your configuration | [`gateway_squid.py`](../../scripts/gateway_squid.py) turns them into the gateway's host list; [`squid.conf`](../../containers/network-gateway/squid.conf) enforces it |
-| `CONNECT` requests, hostnames | Code in the dev container | [`squid.conf`](../../containers/network-gateway/squid.conf) |
-| DNS answers for allowed domains | Whoever runs those domains' DNS | [`blocked-destinations.txt`](../../containers/network-gateway/blocked-destinations.txt), [`egress.nft`](../../containers/firewall-router/egress.nft) |
+| Egress rules | The project file's `egress`, as pulled into your configuration | The generator's checks ([`egress.rs`](../../host/src/config/egress.rs)), then the gateway's script and container: see its page |
+| Requests to the gateway, hostnames | Code in the dev container | The gateway: see its page |
+| DNS answers for allowed domains | Whoever runs those domains' DNS | The gateway's address checks, and [`egress.nft`](../../containers/firewall-router/egress.nft) |
 | DNS queries from the dev container | Code in the dev container | The container runtime's resolver |
 | Network topology and start order | Your settings | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), [firewall `entrypoint.sh`](../../containers/firewall-router/entrypoint.sh) |
 | Forwarded ports | You, through the IDE | [`sshd_config`](../../containers/dev-env/sshd_config), IDE settings |
@@ -32,12 +32,12 @@ Code in the dev container wants to:
 | [NET-2](#net-2-the-project-controls-the-allowlist) | The project controls the allowlist | High | Mitigated |
 | [NET-3](#net-3-dns-from-the-dev-container) | DNS from the dev container | High | Unverified |
 | [NET-4](#net-4-proxy-bypass) | Proxy bypass | High | Mitigated |
-| [NET-5](#net-5-allowed-names-resolving-to-forbidden-addresses) | Allowed names resolving to forbidden addresses | Medium | Mitigated |
+| [NET-5](#net-5-moved) | Moved to [SQUID-1](network-gateway-squid-attack-vectors.md#squid-1-allowed-names-resolving-to-forbidden-addresses) and [SEEKRIT-8](network-gateway-seekrit-attack-vectors.md#seekrit-8-allowed-names-resolving-to-forbidden-addresses) | | Moved |
 | [NET-6](#net-6-environments-sharing-a-network) | Environments sharing a network | Medium | Unverified |
 | [NET-7](#net-7-traffic-without-firewall-rules) | Traffic without firewall rules | Medium | Unverified |
 | [NET-8](#net-8-reaching-the-host-through-the-runtime) | Reaching the host through the runtime | Medium | Unverified |
 | [NET-9](#net-9-forwarded-ports) | Forwarded ports | Medium | By design |
-| [NET-10](#net-10-a-subverted-gateway) | A subverted gateway | Medium | Mitigated |
+| [NET-10](#net-10-moved) | Moved to [SQUID-2](network-gateway-squid-attack-vectors.md#squid-2-a-subverted-squid) and [SEEKRIT-5](network-gateway-seekrit-attack-vectors.md#seekrit-5-a-subverted-gateway) | | Moved |
 
 Image builds also have open network access; see [DEV-3](dev-container-attack-vectors.md#dev-3-image-builds-run-outside-the-isolation).
 
@@ -47,20 +47,20 @@ Image builds also have open network access; see [DEV-3](dev-container-attack-vec
 ### NET-1: Allowed domains are open channels
 
 **Severity:** High.  **Status:** By design.
-**Where:** [`squid.conf`](../../containers/network-gateway/squid.conf), the project's allowed domain list.
+**Where:** your configuration's egress rules; the gateway that enforces them.
 
-Once a domain is on the list, anything in the container can send it anything.  There's no TLS interception, so the gateway sees the hostname but not the content.  Allowing `.github.com` lets code push source to any repository it has credentials for, or post it as a gist.  Wildcards widen this: an entry starting with `.` covers every subdomain, including hosts that serve user content.
+Once a host is allowed, anything in the container can send it anything the rule lets through.  For a `tls` rule (the only kind Squid takes), the gateway sees the hostname but not the content.  Allowing `github.com` lets code push source to any repository it has credentials for, or post it as a gist.  Wildcards (`*.example.com`, Squid only) widen this to every subdomain, including hosts that serve user content.  An `https` rule (the seekrit gateway) narrows it to the rule's methods, but `GET` still carries data in its path and headers.  A rule with `secrets` adds your credentials to what the container can use ([SEEKRIT-1](network-gateway-seekrit-attack-vectors.md#seekrit-1-a-secret-used-through-the-host-its-rule-allows)).
 
-**Red team:** exfiltrate through each domain in a typical allowlist (repository pushes, gists, package uploads, issue comments).  Look for allowed wildcards that cover user-controlled hosts.
+**Red team:** exfiltrate through each host in a typical set of rules (repository pushes, gists, package uploads, issue comments).  Look for allowed wildcards that cover user-controlled hosts, and for `https` rules whose methods still let data out.
 
-**When changing this code:** the default list should stay minimal.  Adding content inspection changes the trust model (a private certificate authority in the container, plaintext in Squid) and needs its own analysis.
+**When changing this code:** the default rules should stay minimal.  A gateway that reads content changes the trust model (a CA the container trusts, plaintext in the gateway); the [seekrit gateway's page](network-gateway-seekrit-attack-vectors.md) is that analysis.
 
 ### NET-2: The project controls the allowlist
 
 **Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
-**Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../host/src/config/egress.rs), [`public_suffix.rs`](../../host/src/config/public_suffix.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py); [`gateway_squid.py`](../../scripts/gateway_squid.py); `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../host/src/config/egress.rs), [`public_suffix.rs`](../../host/src/config/public_suffix.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py); the gateway's script ([`gateway_squid.py`](../../scripts/gateway_squid.py), [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py)); `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).
 
-The project suggests the rules, but the gateway gets only your configuration's rules, which you approved with `scoter pull`, from the verified store.  Without a configuration, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), and wildcards over a public suffix.  `gateway_squid.py` escapes each host into Squid's pattern, and stops the launch on a rule the gateway can't enforce.
+The project suggests the rules, but the gateway gets only your configuration's rules, which you approved with `scoter pull`, from the verified store.  Without a configuration, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), wildcards over a public suffix, and `secrets` anywhere but on an `https` rule for an exact host, on a port in the setup's `network-gateway-tls-ports`.  The gateway's script writes each host into its own configuration (escaped into Squid's pattern, or quoted in seekrit-proxy's), only on the ports in the setup's `network-gateway-ports`, and stops the launch on a rule the gateway can't enforce.
 
 What's left:
 
@@ -94,16 +94,9 @@ The dev container has no route out except the gateway.  The proxy environment va
 
 **When changing this code:** never add a second network to `dev`, `network_mode: host`, or published ports.
 
-### NET-5: Allowed names resolving to forbidden addresses
+### NET-5: Moved
 
-**Severity:** Medium.  **Status:** Mitigated (N3, N4).
-**Where:** the rule order in [`squid.conf`](../../containers/network-gateway/squid.conf); [`blocked-destinations.txt`](../../containers/network-gateway/blocked-destinations.txt); the `blocked_v4` set in [`egress.nft`](../../containers/firewall-router/egress.nft).
-
-The gateway checks the hostname, then resolves it itself.  An allowed domain whose DNS an attacker controls can point anywhere.  Squid's blocked destination list and the firewall's blocked set keep it off private and special-purpose addresses.  The two lists are maintained separately and have already drifted: the gateway blocks `192.88.99.0/24`, and the firewall doesn't.
-
-**Red team:** point an allowed name at private, loopback, link-local and metadata addresses, and at IPv6 addresses (`AAAA` records).  Try DNS rebinding between Squid's check and its connection.  Look for public-looking ranges that reach the host or LAN in your setup, such as a runtime that uses public address pools.
-
-**When changing this code:** keep the domain check before the address check in `squid.conf`, so unlisted names are never resolved.  Keep the two blocked lists in sync.
+**Status:** Moved.  Allowed names resolving to forbidden addresses depends on how the gateway resolves them: it's [SQUID-1](network-gateway-squid-attack-vectors.md#squid-1-allowed-names-resolving-to-forbidden-addresses) and [SEEKRIT-8](network-gateway-seekrit-attack-vectors.md#seekrit-8-allowed-names-resolving-to-forbidden-addresses).  The ID isn't reused.
 
 ### NET-6: Environments sharing a network
 
@@ -149,16 +142,9 @@ A forwarded port lets the container serve content to the host's `localhost`, and
 
 **When changing this code:** keep `PermitListen none`, and consider `AllowTcpForwarding local`.
 
-### NET-10: A subverted gateway
+### NET-10: Moved
 
-**Severity:** Medium.  **Status:** Mitigated (N4).
-**Where:** [`network-gateway/Dockerfile`](../../containers/network-gateway/Dockerfile), [`egress.nft`](../../containers/firewall-router/egress.nft).
-
-Squid parses hostile input.  If it's subverted, the firewall still limits it to TCP 443 on public IPv4 addresses, but not to the allowed domains.
-
-**Red team:** check the Squid version for known issues, and try malformed `CONNECT` requests.  From inside the gateway's namespace, confirm what the firewall actually allows.
-
-**When changing this code:** keep Squid unprivileged and without capabilities, and never give it `NET_ADMIN`.
+**Status:** Moved.  What a subverted gateway holds, and so what it costs, depends on the gateway: it's [SQUID-2](network-gateway-squid-attack-vectors.md#squid-2-a-subverted-squid) and [SEEKRIT-5](network-gateway-seekrit-attack-vectors.md#seekrit-5-a-subverted-gateway).  Either way, the firewall limits it to TCP 443 on public IPv4 addresses (N4).  The ID isn't reused.
 
 
 ## Sensitive code
@@ -167,6 +153,6 @@ Changes to these files can weaken the network properties, and need a security re
 
 * [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml): networks, capabilities, start order.
 * [`containers/firewall-router/`](../../containers/firewall-router/): the firewall rules and their start-up checks.
-* [`containers/network-gateway/`](../../containers/network-gateway/): the proxy rules and the blocked destinations.
+* Each gateway's container and script: see the [Squid](network-gateway-squid-attack-vectors.md#sensitive-code) and [seekrit](network-gateway-seekrit-attack-vectors.md#sensitive-code) pages.
 * [`containers/dev-env/sshd_config`](../../containers/dev-env/sshd_config): forwarding settings.
-* The allowed domain handling in [`scripts/main_run.py`](../../scripts/main_run.py).
+* The egress checks in [`host/src/config/egress.rs`](../../host/src/config/egress.rs) and [`scripts/surf_scoter_lib/gateway.py`](../../scripts/surf_scoter_lib/gateway.py), and the gateway handling in [`scripts/main_run.py`](../../scripts/main_run.py).

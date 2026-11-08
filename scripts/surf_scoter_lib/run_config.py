@@ -81,10 +81,13 @@ def _days(value: int | None) -> int:
 
 def _listing(run: UserConfig) -> list[str]:
     """The egress rules and host commands the configuration allows, cleaned, one per line."""
-    lines = [
-        "  egress: " + review.clean(jdata.find_str(rule, "host") or "?")
-        for rule in run.project_egress()
-    ]
+    lines = []
+    for rule in run.project_egress():
+        line = "  egress: " + review.clean(jdata.find_str(rule, "host") or "?")
+        secrets = jdata.find_str_list(rule, "secrets")
+        if secrets:
+            line += " (gets your " + review.clean(", ".join(secrets)) + ")"
+        lines.append(line)
     programs = run.host_file_programs() or {}
     for command in run.project_commands():
         name = jdata.find_str(command, "program") or jdata.req_str(command, "command")

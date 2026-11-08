@@ -7,7 +7,9 @@ These pages list the places where Surf Scoter could be weak.  They're written fo
 
 Each area has its own page:
 
-* [Runtime network](network-attack-vectors.md) (`NET`)
+* [Runtime network](network-attack-vectors.md) (`NET`), whichever gateway it runs, and each gateway's own:
+    * [The Squid gateway](network-gateway-squid-attack-vectors.md) (`SQUID`), the default
+    * [The seekrit gateway](network-gateway-seekrit-attack-vectors.md) (`SEEKRIT`), which reads TLS and fills in secrets
 * [The development container](dev-container-attack-vectors.md) (`DEV`)
 * [File access](files-attack-vectors.md) (`FILE`)
 * [The host bridge](host-bridge-attack-vectors.md) (`BRIDGE`)
@@ -28,7 +30,7 @@ Each page has the same parts:
 
 ### IDs
 
-Each vector has an ID made from the area's prefix and a number, such as `FILE-2`.  IDs are stable: when a vector is fixed or no longer applies, change its status rather than renumbering, so issues and red team reports keep pointing at the right thing.
+Each vector has an ID made from the area's prefix and a number, such as `FILE-2`.  IDs are stable: when a vector is fixed or no longer applies, change its status rather than renumbering, so issues and red team reports keep pointing at the right thing.  When a vector moves to another page, its old entry stays, marked Moved, pointing at its new IDs, and the old ID isn't reused (NET-5 and NET-10 moved to the gateway pages).
 
 ### Severity
 
@@ -49,6 +51,7 @@ The severity is an initial estimate of the worst realistic outcome:
 | **Unverified** | It may or may not be exploitable; it needs testing, often on several runtimes. |
 | **By design** | An accepted risk that the design leaves to the developer or the configuration.  Changes that make it easier to get wrong still matter. |
 | **Mitigated** | Controls exist.  It's listed because changes to that code could undo them, and the red team should keep testing them. |
+| **Moved** | The vector now lives under other IDs, on another page; the entry points there. |
 
 
 ## Highest priority
@@ -77,6 +80,7 @@ A few patterns show up across the areas, and are worth watching for in any new c
 * **Found, then copied.**  The project's files are read once, defensively, into a copy, and nothing parses or runs them in place.  Any new lookup, setting or default that reaches the live project brings back what the pull removed (VER-23, VER-24).
 * **The review must show everything it approves.**  A value that reaches the host but isn't in the review is approved unseen (VER-3, DEV-2, FILE-10).
 * **State that outlives a session.**  Anything the container can leave in the project clone (its `.git`) or its persistent store is input to the next session, and the clone is input to the host (DEV-16, FILE-1).
+* **Secrets the container can use but not read.**  The seekrit gateway keeps your secrets out of the container, but anything there can still use one toward the host its rule names, put it where that host stores it, or get it echoed back.  Bind each secret to exact hosts and narrow methods, and never let a value reach a file, a command line, an environment or a log (SEEKRIT-1, SEEKRIT-2, SEEKRIT-4, SEEKRIT-10).
 * **Differences between runtimes.**  Rootful and rootless runtimes, Docker and Podman, and VM-based runtimes on macOS and Windows behave differently, so tests on one don't cover the others (NET-3, NET-8, DEV-4, BRIDGE-12).
 
 

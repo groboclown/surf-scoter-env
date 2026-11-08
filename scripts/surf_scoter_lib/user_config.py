@@ -252,14 +252,18 @@ class UserConfig:
         capture: Capture = Capture.STDOUT,
         template: dict[str, str] | None = None,
         echo: Echo = Echo.SHOW,
+        extra_args: Sequence[str] = (),
+        stdin_data: bytes | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run the given command.
 
         This will return the completed process with the `capture` streams
         captured (by default, stdout); the others go to the user.  With
-        `Echo.QUIET`, it doesn't say what it runs.
+        `Echo.QUIET`, it doesn't say what it runs.  `extra_args` go after the
+        command's own; `stdin_data` is its standard input, which is never
+        shown (secrets go that way, never on the command line).
         """
-        cmd = self.require_run(section, run, template)
+        cmd = self.require_run(section, run, template) + list(extra_args)
         if echo == Echo.SHOW:
             print(f"Running {cmd[0]}")
             print(f"DEBUG {cmd}")
@@ -271,6 +275,7 @@ class UserConfig:
             cwd=cwd,
             shell=False,
             env=self.command_env(section),
+            input=stdin_data,
         )
 
     def dev_container_sshd_port_env(self) -> str | None:

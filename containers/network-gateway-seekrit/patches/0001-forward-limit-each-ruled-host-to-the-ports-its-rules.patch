@@ -1,0 +1,593 @@
+From 026055118a668f4a46b746879fa6717684b8ab4e Mon Sep 17 00:00:00 2001
+From: Groboclown <groboclown@gmail.com>
+Date: Sat, 7 Nov 2026 17:44:12 -0600
+Subject: [PATCH 1/5] forward: limit each ruled host to the ports its rules
+ give
+
+Add `ports = [...]` to `[[forward.host]]`. A host whose rules give ports
+is reachable only on those ports, for CONNECT and for absolute-form
+http:// (port 80 when none is written). Absent `ports` keeps the old
+behavior: any port.
+
+What it prevents:
+
+- Reaching an allowed host on any port. Before, a rule for a host
+  covered every port, so `CONNECT allowed-host:8080` was intercepted like
+  port 443.
+- Stepping around a host's rules by changing port. A ruled host on a
+  port its rules don't give is refused with 403 whatever the unmatched
+  policy.
+- Ambiguous port lists. Ports are checked at CONNECT time, before any
+  request is known, so every rule naming one host must give the same
+  `ports` (or none); an empty list, 0, or a value outside 1-65535 is a
+  config error rather than a rule that silently matches nothing.
+
+Ports are kept per host in `ForwardConfig::host_ports`, outside the
+policy `RuleSet`. Server-mode policy carries no ports and is unaffected.
+Refusals log `reason = "port_not_allowed"` and count under that outcome.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ seekrit-proxy.example.toml |   5 +
+ src/config.rs              |  77 ++++++++-
+ src/forward.rs             |  40 +++++
+ tests/ports.rs             | 333 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 454 insertions(+), 1 deletion(-)
+ create mode 100644 tests/ports.rs
+
+diff --git a/seekrit-proxy.example.toml b/seekrit-proxy.example.toml
+index 4ab5603..ec2e661 100644
+--- a/seekrit-proxy.example.toml
++++ b/seekrit-proxy.example.toml
+@@ -93,6 +93,11 @@ allow = ["EXAMPLE_API_KEY"]
+ # allow = ["EXAMPLE_API_KEY"]         # secrets injectable toward this host
+ # methods = ["POST"]                  # optional; absent = any method
+ # paths = ["/v1/**"]                  # optional; absent = any path
++# ports = [443]                       # optional; absent = any port. Applies to
++#                                     # CONNECT and plain http:// alike, and every
++#                                     # rule naming this host must give the same
++#                                     # list. A ruled host on another port is
++#                                     # refused, never treated as unmatched.
+ #
+ # # Several rules may name one host — they are checked in order, first match
+ # # wins, so a narrow rule belongs above a broad one:
+diff --git a/src/config.rs b/src/config.rs
+index 2397982..a2d43f8 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -35,7 +35,7 @@
+ //! ceiling — while the churny part (rules and credentials) moves to the UI. See
+ //! `docs/agent-access-governance.md`.
+ 
+-use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet};
+ use std::net::SocketAddr;
+ use std::time::Duration;
+ 
+@@ -124,6 +124,10 @@ struct RawHostRule {
+     paths: Vec<String>,
+     #[serde(default)]
+     label: Option<String>,
++    /// The ports this host may be reached on, for `CONNECT` and plain HTTP
++    /// alike. Absent = any port.
++    #[serde(default)]
++    ports: Option<Vec<i64>>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+@@ -482,6 +486,25 @@ pub struct ForwardConfig {
+     /// there the intercepted hosts come from the published policy, which is the
+     /// whole point: adding an upstream must not mean editing local TOML.
+     pub rules: Option<RuleSet>,
++    /// The ports each host's rules allow, for hosts whose rules say `ports`.
++    /// A host absent here may be reached on any port. Every rule naming one
++    /// host must agree, so this is per host rather than per rule.
++    pub host_ports: BTreeMap<String, BTreeSet<u16>>,
++}
++
++impl ForwardConfig {
++    /// True if the rules for `host` allow `port`: always, for a host whose
++    /// rules do not say `ports` (or that has no rule here at all).
++    pub fn permits_port(&self, host: &str, port: u16) -> bool {
++        self.host_ports
++            .get(&host.trim().to_ascii_lowercase())
++            .is_none_or(|ports| ports.contains(&port))
++    }
++
++    /// The ports `host` is limited to, if its rules say `ports`.
++    pub fn ports_of(&self, host: &str) -> Option<&BTreeSet<u16>> {
++        self.host_ports.get(&host.trim().to_ascii_lowercase())
++    }
+ }
+ 
+ /// One `prefix → upstream` mapping.
+@@ -1287,6 +1310,33 @@ impl SecretsConfig {
+     }
+ }
+ 
++/// Validate a host rule's `ports`: absent means any; present must be a non-empty
++/// list of real TCP ports.
++fn validate_ports(
++    host: &str,
++    ports: Option<Vec<i64>>,
++) -> Result<Option<BTreeSet<u16>>, ConfigError> {
++    let Some(ports) = ports else {
++        return Ok(None);
++    };
++    if ports.is_empty() {
++        // An empty list reads like "no ports", which would make the rule
++        // useless; leave `ports` out to mean "any".
++        return Err(ConfigError::Forward(format!(
++            "host {host:?} has an empty `ports` list; to allow any port, leave it out"
++        )));
++    }
++    ports
++        .into_iter()
++        .map(|p| {
++            u16::try_from(p).ok().filter(|p| *p != 0).ok_or_else(|| {
++                ConfigError::Forward(format!("host {host:?}: {p} is not a TCP port (1-65535)"))
++            })
++        })
++        .collect::<Result<BTreeSet<u16>, _>>()
++        .map(Some)
++}
++
+ /// Validate the `methods`/`paths` pair shared by routes and host rules.
+ fn operation(
+     methods: Vec<String>,
+@@ -1350,6 +1400,9 @@ impl ForwardConfig {
+         }
+ 
+         let mut rules = Vec::with_capacity(raw.host.len());
++        // Each host's `ports`, as the first rule naming it gave them; later
++        // rules for the same host must say the same.
++        let mut declared_ports: BTreeMap<String, Option<BTreeSet<u16>>> = BTreeMap::new();
+         for h in raw.host {
+             let host = h.host.trim().to_ascii_lowercase();
+             if host.is_empty() {
+@@ -1362,12 +1415,33 @@ impl ForwardConfig {
+                     "host {host:?} must be a bare hostname (no scheme, port, or path)"
+                 )));
+             }
++            let ports = validate_ports(&host, h.ports)?;
++            match declared_ports.get(&host) {
++                // Ports are checked when the connection is made, before any
++                // request (and so any rule's methods or paths) is known. Rules
++                // that disagreed would have no well-defined answer there.
++                Some(first) if *first != ports => {
++                    return Err(ConfigError::Forward(format!(
++                        "the rules for host {host:?} give different ports; every rule naming a \
++                         host must give the same `ports` (or none)"
++                    )))
++                }
++                Some(_) => {}
++                None => {
++                    declared_ports.insert(host.clone(), ports);
++                }
++            }
+             let (methods, paths) = operation(h.methods, h.paths, ConfigError::Forward)?;
+             let mut rule = Rule::new(&host, methods, paths, h.allow.into_iter().collect());
+             rule.label = h.label;
+             rules.push(rule);
+         }
+ 
++        let host_ports = declared_ports
++            .into_iter()
++            .filter_map(|(host, ports)| ports.map(|p| (host, p)))
++            .collect();
++
+         Ok(ForwardConfig {
+             listen,
+             unmatched,
+@@ -1378,6 +1452,7 @@ impl ForwardConfig {
+             } else {
+                 Some(RuleSet::new(rules))
+             },
++            host_ports,
+         })
+     }
+ }
+diff --git a/src/forward.rs b/src/forward.rs
+index 688c782..29fdfef 100644
+--- a/src/forward.rs
++++ b/src/forward.rs
+@@ -323,6 +323,13 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+         return text(StatusCode::FORBIDDEN, &e.to_string());
+     }
+ 
++    // A host the rules name is reachable only on the ports they give. Refused
++    // whatever the unmatched policy: blind-tunnelling a ruled host on another
++    // port would step around that host's rules entirely.
++    if let Some(refusal) = refuse_port(&state, &host, port) {
++        return refusal;
++    }
++
+     let is_ruled = state.intercepts(&host);
+     if is_ruled {
+         // MITM: on upgrade, terminate TLS with a minted cert and serve.
+@@ -366,6 +373,36 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+     }
+ }
+ 
++/// The refusal for a ruled host on a port its rules do not give, if it is one.
++///
++/// Only hosts with a rule in this file are limited; an unruled host is left to
++/// `unmatched_host_policy`, and server policy carries no ports.
++fn refuse_port(state: &ForwardState, host: &str, port: u16) -> Option<Response<Body>> {
++    let fwd = state.fwd();
++    let ruled = fwd.rules.as_ref().is_some_and(|r| r.covers_host(host));
++    if !ruled || fwd.permits_port(host, port) {
++        return None;
++    }
++    let allowed = fwd
++        .ports_of(host)
++        .map(|ports| {
++            ports
++                .iter()
++                .map(u16::to_string)
++                .collect::<Vec<_>>()
++                .join(", ")
++        })
++        .unwrap_or_default();
++    warn!(reason = "port_not_allowed", %host, port, "denied: port not allowed for this host");
++    state
++        .metrics
++        .record_request(PLANE_FORWARD, "port_not_allowed");
++    Some(text(
++        StatusCode::FORBIDDEN,
++        &format!("host {host:?} is not allowed on port {port}; its rules allow {allowed}"),
++    ))
++}
++
+ /// After the CONNECT tunnel is up: TLS-accept with the host's minted cert, then
+ /// serve HTTP over the decrypted stream, injecting into each request.
+ async fn mitm_serve(
+@@ -487,6 +524,9 @@ async fn handle_absolute_http(req: Request<Incoming>, state: ForwardState) -> Re
+             .record_request(PLANE_FORWARD, "egress_blocked");
+         return text(StatusCode::FORBIDDEN, &e.to_string());
+     }
++    if let Some(refusal) = refuse_port(&state, &host, uri.port_u16().unwrap_or(80)) {
++        return refusal;
++    }
+     let authority = match uri.port_u16() {
+         Some(p) => format!("{host}:{p}"),
+         None => host.clone(),
+diff --git a/tests/ports.rs b/tests/ports.rs
+new file mode 100644
+index 0000000..81f023c
+--- /dev/null
++++ b/tests/ports.rs
+@@ -0,0 +1,333 @@
++//! Per-host `ports` on `[[forward.host]]`.
++//!
++//! Proves:
++//!   1. `CONNECT` to a ruled host is refused on a port its rules do not give, and
++//!      intercepted on one they do;
++//!   2. the same for plain `http://` (default port 80 when none is written);
++//!   3. a ruled host on another port is refused even under
++//!      `unmatched_host_policy = "tunnel"` — tunnelling it would step around the
++//!      host's rules;
++//!   4. a rule without `ports` still allows any port;
++//!   5. the config refuses empty lists, non-ports, and rules for one host that
++//!      disagree.
++
++use std::convert::Infallible;
++use std::net::SocketAddr;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::Arc;
++
++use arc_swap::ArcSwap;
++use axum::routing::any;
++use axum::Router;
++use bytes::Bytes;
++use http_body_util::Full;
++use hyper::body::Incoming;
++use hyper::server::conn::http1;
++use hyper::service::service_fn;
++use hyper::{Request, Response};
++use hyper_util::rt::TokioIo;
++use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
++use seekrit_proxy::ca::Ca;
++use seekrit_proxy::config::Config;
++use seekrit_proxy::egress::Egress;
++use seekrit_proxy::forward::{self, ForwardState};
++use seekrit_proxy::secrets::SecretStore;
++use seekrit_proxy::tasks::SessionResolver;
++use tokio::net::TcpListener;
++use tokio_rustls::TlsAcceptor;
++
++fn temp_ca() -> Ca {
++    static SEQ: AtomicUsize = AtomicUsize::new(0);
++    let dir = std::env::temp_dir().join(format!(
++        "seekrit-proxy-ports-{}-{}",
++        std::process::id(),
++        SEQ.fetch_add(1, Ordering::SeqCst)
++    ));
++    std::fs::create_dir_all(&dir).unwrap();
++    Ca::load_or_generate(
++        dir.join("ca.pem").to_str().unwrap(),
++        dir.join("ca-key.pem").to_str().unwrap(),
++    )
++    .unwrap()
++}
++
++/// A TLS upstream for `localhost`, counting hits. Returns its address and cert.
++async fn tls_upstream(hits: Arc<AtomicUsize>) -> (SocketAddr, String) {
++    let key = rcgen::KeyPair::generate().unwrap();
++    let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
++        .unwrap()
++        .self_signed(&key)
++        .unwrap();
++    let pem = cert.pem();
++    let der: CertificateDer<'static> = cert.der().clone();
++    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
++    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
++        rustls::crypto::ring::default_provider(),
++    ))
++    .with_safe_default_protocol_versions()
++    .unwrap()
++    .with_no_client_auth()
++    .with_single_cert(vec![der], key_der)
++    .unwrap();
++    let acceptor = TlsAcceptor::from(Arc::new(server));
++
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(async move {
++        while let Ok((tcp, _)) = listener.accept().await {
++            let acceptor = acceptor.clone();
++            let hits = hits.clone();
++            tokio::spawn(async move {
++                if let Ok(tls) = acceptor.accept(tcp).await {
++                    let svc = service_fn(move |_req: Request<Incoming>| {
++                        hits.fetch_add(1, Ordering::SeqCst);
++                        async {
++                            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"ok"))))
++                        }
++                    });
++                    let _ = http1::Builder::new()
++                        .serve_connection(TokioIo::new(tls), svc)
++                        .await;
++                }
++            });
++        }
++    });
++    (addr, pem)
++}
++
++/// A plain HTTP upstream, counting hits.
++async fn http_upstream(hits: Arc<AtomicUsize>) -> SocketAddr {
++    let app = Router::new().fallback(any(move || {
++        let hits = hits.clone();
++        async move {
++            hits.fetch_add(1, Ordering::SeqCst);
++            "ok"
++        }
++    }));
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(async move {
++        axum::serve(listener, app).await.unwrap();
++    });
++    addr
++}
++
++/// A forward proxy for `cfg`, wired as `main.rs` wires it. Returns its URL and
++/// its CA. With `upstream_pem`, the proxy's own client trusts that certificate
++/// too, so it can re-originate TLS to a self-signed test upstream.
++async fn forward_proxy(cfg: &str, upstream_pem: Option<&str>) -> (String, String) {
++    let config = Config::from_toml(cfg).unwrap();
++    let egress = Arc::new(Egress::from_config(&config));
++    let client = match upstream_pem {
++        Some(pem) => reqwest::Client::builder()
++            .add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).unwrap())
++            .build()
++            .unwrap(),
++        None => seekrit_proxy::upstream_client(egress.clone()).unwrap(),
++    };
++    let ca = temp_ca();
++    let ca_pem = ca.cert_pem().to_string();
++    let state = ForwardState {
++        client,
++        egress,
++        config: Arc::new(config),
++        store: Arc::new(ArcSwap::from_pointee(SecretStore::from_values([]))),
++        ca: Arc::new(ca),
++        metrics: Arc::new(seekrit_proxy::telemetry::Metrics::new()),
++        policy: None,
++        sessions: Arc::new(SessionResolver::new(None, None)),
++        ratchet: None,
++        activity: None,
++        approvals: None,
++    };
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(
++        async move { forward::serve(listener, state, std::future::pending::<()>()).await },
++    );
++    (format!("http://{addr}"), ca_pem)
++}
++
++/// An agent that proxies through `proxy`, trusting `pem` (the proxy's CA, when
++/// the proxy intercepts) if given.
++fn agent(proxy: &str, pem: Option<&str>) -> reqwest::Client {
++    let mut b = reqwest::Client::builder()
++        .proxy(reqwest::Proxy::http(proxy).unwrap())
++        .proxy(reqwest::Proxy::https(proxy).unwrap());
++    if let Some(pem) = pem {
++        b = b.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).unwrap());
++    }
++    b.build().unwrap()
++}
++
++/// The upstreams live on loopback; open that range to the egress gate.
++fn base(unmatched: &str) -> String {
++    format!(
++        "[egress]\nallow_cidr=['127.0.0.0/8']\n\
++         [forward]\nlisten='127.0.0.1:0'\nunmatched_host_policy='{unmatched}'\n"
++    )
++}
++
++#[tokio::test]
++async fn connect_follows_the_ports_an_intercepting_rule_gives() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    let url = format!("https://localhost:{}/x", upstream.port());
++
++    let (wrong, ca) = forward_proxy(
++        &format!(
++            "{}[[forward.host]]\nmatch='localhost'\nports=[443]\n",
++            base("deny")
++        ),
++        Some(&pem),
++    )
++    .await;
++    assert!(agent(&wrong, Some(&ca)).get(&url).send().await.is_err());
++    assert_eq!(hits.load(Ordering::SeqCst), 0, "never intercepted");
++
++    let (right, ca) = forward_proxy(
++        &format!(
++            "{}[[forward.host]]\nmatch='localhost'\nports=[443, {}]\n",
++            base("deny"),
++            upstream.port()
++        ),
++        Some(&pem),
++    )
++    .await;
++    let resp = agent(&right, Some(&ca)).get(&url).send().await.unwrap();
++    assert_eq!(resp.status(), 200);
++    assert_eq!(hits.load(Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn plain_http_follows_the_ports_an_intercepting_rule_gives() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let upstream = http_upstream(hits.clone()).await;
++    let url = format!("http://localhost:{}/x", upstream.port());
++
++    let (wrong, _) = forward_proxy(
++        &format!(
++            "{}[[forward.host]]\nmatch='localhost'\nports=[80]\n",
++            base("deny")
++        ),
++        None,
++    )
++    .await;
++    let resp = agent(&wrong, None).get(&url).send().await.unwrap();
++    assert_eq!(resp.status(), 403);
++    let body = resp.text().await.unwrap();
++    assert!(
++        body.contains(&format!("not allowed on port {}", upstream.port())) && body.contains("80"),
++        "{body}"
++    );
++    assert_eq!(hits.load(Ordering::SeqCst), 0);
++
++    let (right, _) = forward_proxy(
++        &format!(
++            "{}[[forward.host]]\nmatch='localhost'\nports=[{}]\n",
++            base("deny"),
++            upstream.port()
++        ),
++        None,
++    )
++    .await;
++    let resp = agent(&right, None).get(&url).send().await.unwrap();
++    assert_eq!(resp.status(), 200);
++    assert_eq!(hits.load(Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn a_ruled_host_on_another_port_is_not_tunnelled_as_unmatched() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    // Unmatched hosts are tunnelled here, but `localhost` is not unmatched: its
++    // rule says port 443, so another port is refused rather than tunnelled
++    // around the rule's methods.
++    let (proxy, _) = forward_proxy(
++        &format!(
++            "{}[[forward.host]]\nmatch='localhost'\nmethods=['GET']\nports=[443]\n",
++            base("tunnel")
++        ),
++        None,
++    )
++    .await;
++    let result = agent(&proxy, Some(&pem))
++        .post(format!("https://localhost:{}/x", upstream.port()))
++        .send()
++        .await;
++    assert!(result.is_err());
++    assert_eq!(hits.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn a_rule_without_ports_allows_any_port() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let upstream = http_upstream(hits.clone()).await;
++    let (proxy, _) = forward_proxy(
++        &format!("{}[[forward.host]]\nmatch='localhost'\n", base("deny")),
++        None,
++    )
++    .await;
++    let resp = agent(&proxy, None)
++        .get(format!("http://localhost:{}/x", upstream.port()))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), 200);
++    assert_eq!(hits.load(Ordering::SeqCst), 1);
++}
++
++#[test]
++fn the_config_records_ports_per_host() {
++    let config = Config::from_toml(
++        "[forward]\n\
++         [[forward.host]]\nmatch='api.test'\nmethods=['GET']\nports=[443, 8443]\n\
++         [[forward.host]]\nmatch='api.test'\nmethods=['POST']\nports=[8443, 443]\n\
++         [[forward.host]]\nmatch='any.test'\n",
++    )
++    .unwrap();
++    let fwd = config.forward.unwrap();
++    assert!(fwd.permits_port("api.test", 443) && fwd.permits_port("API.test", 8443));
++    assert!(!fwd.permits_port("api.test", 80));
++    assert!(fwd.permits_port("any.test", 80) && fwd.permits_port("any.test", 1));
++}
++
++#[test]
++fn the_config_refuses_bad_ports() {
++    for (rules, expect) in [
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[]\n",
++            "empty `ports`",
++        ),
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[0]\n",
++            "not a TCP port",
++        ),
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[65536]\n",
++            "not a TCP port",
++        ),
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[-1]\n",
++            "not a TCP port",
++        ),
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[443]\n\
++             [[forward.host]]\nmatch='a.test'\nmethods=['GET']\n",
++            "different ports",
++        ),
++        (
++            "[[forward.host]]\nmatch='a.test'\nports=[443]\n\
++             [[forward.host]]\nmatch='a.test'\nports=[8443]\n",
++            "different ports",
++        ),
++    ] {
++        let err = Config::from_toml(&format!("[forward]\n{rules}"))
++            .err()
++            .map(|e| e.to_string());
++        assert!(
++            err.as_deref().is_some_and(|e| e.contains(expect)),
++            "expected {expect:?} for:\n{rules}\ngot {err:?}"
++        );
++    }
++}

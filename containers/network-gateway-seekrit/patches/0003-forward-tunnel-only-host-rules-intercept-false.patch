@@ -1,0 +1,584 @@
+From c1a72cf1a6d8794472347af039b7c43eabebc414 Mon Sep 17 00:00:00 2001
+From: Groboclown <groboclown@gmail.com>
+Date: Sat, 7 Nov 2026 17:32:47 -0600
+Subject: [PATCH 3/5] forward: tunnel-only host rules (intercept = false)
+
+Add `intercept = false` to `[[forward.host]]`. A CONNECT to such a host
+is spliced straight through by the existing blind tunnel: no leaf
+certificate is minted and the proxy never sees the plaintext. Tunnel
+hosts are kept in `ForwardConfig::tunnel_hosts`, apart from the
+intercepting `RuleSet`, so the policy engine never treats them as hosts
+it may read.
+
+What it prevents:
+
+- Intercepting every allowed host. Under `unmatched_host_policy = "deny"`
+  a host was only reachable by giving it a rule, and every rule meant
+  TLS interception: the workload had to trust the proxy's CA for hosts
+  that need no secrets or operation constraints, clients that pin
+  certificates or use mTLS broke, and the proxy held plaintext it had no
+  reason to see. Now only hosts that need inspection are intercepted,
+  while unlisted hosts stay denied.
+- Rules that pretend to see inside a tunnel. A tunnel rule with `allow`,
+  `methods`, or `paths` is a config error, since none could be enforced.
+- Ambiguous hosts. A host with both an intercepting rule and a tunnel
+  rule is a config error; a tunnel would otherwise bypass the intercept
+  rule's constraints depending on which path a client took.
+- Plaintext forwarding under a tunnel rule. Absolute-form `http://`
+  requests to a tunnel-only host are refused with 403, whatever the
+  unmatched policy: the rule allows an opaque tunnel, not a request the
+  proxy would have to read.
+
+The egress gate still checks the addresses a tunnel host resolves to,
+and a tunnel rule's `ports` limit it like any other rule's.
+Startup logs the number of tunnel hosts; the example config documents
+the option.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ seekrit-proxy.example.toml |  10 ++
+ src/config.rs              |  40 +++++
+ src/forward.rs             |  58 ++++---
+ src/main.rs                |   2 +-
+ tests/tunnel.rs            | 312 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 400 insertions(+), 22 deletions(-)
+ create mode 100644 tests/tunnel.rs
+
+diff --git a/seekrit-proxy.example.toml b/seekrit-proxy.example.toml
+index ec2e661..46c606f 100644
+--- a/seekrit-proxy.example.toml
++++ b/seekrit-proxy.example.toml
+@@ -104,6 +104,16 @@ allow = ["EXAMPLE_API_KEY"]
+ # [[forward.host]]
+ # match = "api.example.com"
+ # methods = ["GET"]                   # reads are fine, but carry no credential
++#
++# # A tunnel-only rule allows a host without intercepting it: CONNECT is spliced
++# # straight through, so no certificate is minted, the workload needs no CA trust
++# # for it, and the proxy never sees its plaintext. This is how to allow a host
++# # under unmatched_host_policy = "deny" when it needs no secrets and no
++# # operation constraints. It cannot have allow, methods, or paths, and a host
++# # cannot be both tunnelled and intercepted. Plain http:// to it is refused.
++# [[forward.host]]
++# match = "registry.example.com"
++# intercept = false
+ 
+ # ---------------------------------------------------------------------------
+ # Where the rules come from.
+diff --git a/src/config.rs b/src/config.rs
+index 5d4d09e..51b4b6c 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -124,6 +124,10 @@ struct RawHostRule {
+     paths: Vec<String>,
+     #[serde(default)]
+     label: Option<String>,
++    /// `false` makes this a tunnel-only rule: the host is reachable through
++    /// `CONNECT`, spliced through without TLS interception. Absent = `true`.
++    #[serde(default)]
++    intercept: Option<bool>,
+     /// The ports this host may be reached on, for `CONNECT` and plain HTTP
+     /// alike. Absent = any port.
+     #[serde(default)]
+@@ -522,6 +526,11 @@ pub struct ForwardConfig {
+     /// there the intercepted hosts come from the published policy, which is the
+     /// whole point: adding an upstream must not mean editing local TOML.
+     pub rules: Option<RuleSet>,
++    /// Hosts allowed through a blind `CONNECT` tunnel without interception
++    /// (`intercept = false`). Kept apart from `rules` on purpose: those are what
++    /// the proxy decrypts, and the policy engine must never mistake a tunnel
++    /// host for one it may read. Empty in server mode.
++    pub tunnel_hosts: BTreeSet<String>,
+     /// The ports each host's rules allow, for hosts whose rules say `ports`.
+     /// A host absent here may be reached on any port. Every rule naming one
+     /// host must agree, so this is per host rather than per rule.
+@@ -529,6 +538,12 @@ pub struct ForwardConfig {
+ }
+ 
+ impl ForwardConfig {
++    /// True if `host` has a tunnel-only rule.
++    pub fn tunnels(&self, host: &str) -> bool {
++        self.tunnel_hosts
++            .contains(&host.trim().to_ascii_lowercase())
++    }
++
+     /// True if the rules for `host` allow `port`: always, for a host whose
+     /// rules do not say `ports` (or that has no rule here at all).
+     pub fn permits_port(&self, host: &str, port: u16) -> bool {
+@@ -1522,6 +1537,7 @@ impl ForwardConfig {
+         }
+ 
+         let mut rules = Vec::with_capacity(raw.host.len());
++        let mut tunnel_hosts = BTreeSet::new();
+         // Each host's `ports`, as the first rule naming it gave them; later
+         // rules for the same host must say the same.
+         let mut declared_ports: BTreeMap<String, Option<BTreeSet<u16>>> = BTreeMap::new();
+@@ -1553,12 +1569,35 @@ impl ForwardConfig {
+                     declared_ports.insert(host.clone(), ports);
+                 }
+             }
++            if h.intercept == Some(false) {
++                // A tunnel is opaque: there is no request to match a method or
++                // path against, and nowhere to put a credential. Saying so is
++                // better than silently ignoring the fields.
++                if !h.allow.is_empty() || !h.methods.is_empty() || !h.paths.is_empty() {
++                    return Err(ConfigError::Forward(format!(
++                        "host {host:?} has intercept = false, so it cannot have allow, methods, \
++                         or paths: the proxy never sees inside a tunnel"
++                    )));
++                }
++                tunnel_hosts.insert(host);
++                continue;
++            }
+             let (methods, paths) = operation(h.methods, h.paths, ConfigError::Forward)?;
+             let mut rule = Rule::new(&host, methods, paths, h.allow.into_iter().collect());
+             rule.label = h.label;
+             rules.push(rule);
+         }
+ 
++        // A host is either read or not. Intercepting some requests to it and
++        // tunnelling others would depend on which rule a client happened to hit,
++        // and a tunnel would quietly bypass the intercept rule's constraints.
++        if let Some(both) = rules.iter().find(|r| tunnel_hosts.contains(&r.host)) {
++            return Err(ConfigError::Forward(format!(
++                "host {:?} has both an intercepting rule and an intercept = false rule; a host \
++                 is either intercepted or tunnelled",
++                both.host
++            )));
++        }
+         let host_ports = declared_ports
+             .into_iter()
+             .filter_map(|(host, ports)| ports.map(|p| (host, p)))
+@@ -1574,6 +1613,7 @@ impl ForwardConfig {
+             } else {
+                 Some(RuleSet::new(rules))
+             },
++            tunnel_hosts,
+             host_ports,
+         })
+     }
+diff --git a/src/forward.rs b/src/forward.rs
+index 5073589..dc7d31d 100644
+--- a/src/forward.rs
++++ b/src/forward.rs
+@@ -302,7 +302,8 @@ async fn outer(req: Request<Incoming>, state: ForwardState) -> Result<Response<B
+ }
+ 
+ /// Handle `CONNECT host:port`: establish the tunnel, then either MITM (ruled
+-/// host), blind-tunnel (unmatched + tunnel policy), or refuse (deny policy).
++/// host), blind-tunnel (a tunnel-only rule, or unmatched + tunnel policy), or
++/// refuse (unmatched + deny policy).
+ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body> {
+     let Some(authority) = req.uri().authority().cloned() else {
+         return text(StatusCode::BAD_REQUEST, "CONNECT requires an authority");
+@@ -348,29 +349,33 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+         return established();
+     }
+ 
+-    match state.fwd().unmatched {
+-        UnmatchedPolicy::Deny => text(
++    // A tunnel-only rule (`intercept = false`) allows the host without reading
++    // it, so `unmatched_host_policy = deny` can still name hosts that need no
++    // inspection: no minted cert, no CA trust in the workload, no plaintext here.
++    let tunnel = state.fwd().tunnels(&host) || state.fwd().unmatched == UnmatchedPolicy::Tunnel;
++    if !tunnel {
++        return text(
+             StatusCode::FORBIDDEN,
+             &format!("host {host:?} has no rule and unmatched_host_policy = deny"),
+-        ),
+-        UnmatchedPolicy::Tunnel => {
+-            // Blind-tunnel: never decrypt, just splice bytes to the real host.
+-            // Never decrypted is not never checked — an unruled host is exactly
+-            // where an agent would point a tunnel at something internal.
+-            let egress = state.egress.clone();
+-            tokio::spawn(async move {
+-                match hyper::upgrade::on(req).await {
+-                    Ok(upgraded) => {
+-                        if let Err(e) = blind_tunnel(upgraded, host, port, egress).await {
+-                            debug!("tunnel ended: {e}");
+-                        }
+-                    }
+-                    Err(e) => debug!("CONNECT upgrade failed: {e}"),
++        );
++    }
++
++    // Blind-tunnel: never decrypt, just splice bytes to the real host.
++    // Never decrypted is not never checked — an unruled host is exactly
++    // where an agent would point a tunnel at something internal, and a
++    // tunnel-only rule names a host, not the addresses it resolves to.
++    let egress = state.egress.clone();
++    tokio::spawn(async move {
++        match hyper::upgrade::on(req).await {
++            Ok(upgraded) => {
++                if let Err(e) = blind_tunnel(upgraded, host, port, egress).await {
++                    debug!("tunnel ended: {e}");
+                 }
+-            });
+-            established()
++            }
++            Err(e) => debug!("CONNECT upgrade failed: {e}"),
+         }
+-    }
++    });
++    established()
+ }
+ 
+ /// The refusal for a ruled host on a port its rules do not give, if it is one.
+@@ -379,7 +384,7 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+ /// `unmatched_host_policy`, and server policy carries no ports.
+ fn refuse_port(state: &ForwardState, host: &str, port: u16) -> Option<Response<Body>> {
+     let fwd = state.fwd();
+-    let ruled = fwd.rules.as_ref().is_some_and(|r| r.covers_host(host));
++    let ruled = fwd.tunnels(host) || fwd.rules.as_ref().is_some_and(|r| r.covers_host(host));
+     if !ruled || fwd.permits_port(host, port) {
+         return None;
+     }
+@@ -547,6 +552,17 @@ async fn handle_absolute_http(req: Request<Incoming>, state: ForwardState) -> Re
+             Ok(gate) => Some(gate),
+             Err(rej) => return rej.into_response(&state),
+         }
++    } else if state.fwd().tunnels(&host) {
++        // A tunnel-only rule allows an opaque `CONNECT`, not a plaintext request
++        // the proxy would have to read and forward. Whatever the unmatched
++        // policy, the rule says what this host is for.
++        return text(
++            StatusCode::FORBIDDEN,
++            &format!(
++                "host {host:?} is allowed only as a TLS tunnel (intercept = false); \
++                 plain http:// is not forwarded to it"
++            ),
++        );
+     } else {
+         match state.fwd().unmatched {
+             UnmatchedPolicy::Deny => {
+diff --git a/src/main.rs b/src/main.rs
+index f1186fc..d9b3162 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -672,7 +672,7 @@ async fn serve() -> i32 {
+                 .unwrap_or(0),
+             (None, None) => 0,
+         };
+-        info!(secrets = store.load().len(), hosts = ruled_hosts, listen = %fc.listen, "forward proxy (MITM) listening");
++        info!(secrets = store.load().len(), hosts = ruled_hosts, tunnels = fc.tunnel_hosts.len(), listen = %fc.listen, "forward proxy (MITM) listening");
+         info!(
+             "trust the CA at {} in the workload, then set HTTPS_PROXY=http://{}",
+             fc.ca_cert_path, fc.listen
+diff --git a/tests/tunnel.rs b/tests/tunnel.rs
+new file mode 100644
+index 0000000..49f5aed
+--- /dev/null
++++ b/tests/tunnel.rs
+@@ -0,0 +1,312 @@
++//! Tunnel-only host rules (`[[forward.host]] intercept = false`).
++//!
++//! Proves:
++//!   1. under `unmatched_host_policy = deny`, a tunnel-only host is reachable by
++//!      `CONNECT` and spliced through *without* interception: the agent trusts
++//!      only the upstream's own certificate, not the proxy's CA, and still
++//!      connects;
++//!      (and, as a control, the same agent fails against an intercepting rule);
++//!   2. a host with no rule is still refused;
++//!   3. plain `http://` to a tunnel-only host is refused — the rule allows an
++//!      opaque tunnel, not a request the proxy would have to read;
++//!   4. the egress gate still applies to a tunnel-only host's addresses;
++//!   5. a tunnel rule's `ports` limit the tunnel like any other rule's;
++//!   6. the config refuses tunnel rules that pretend to constrain or inject, and
++//!      a host that is both tunnelled and intercepted.
++
++use std::convert::Infallible;
++use std::net::SocketAddr;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::Arc;
++
++use arc_swap::ArcSwap;
++use bytes::Bytes;
++use http_body_util::Full;
++use hyper::body::Incoming;
++use hyper::server::conn::http1;
++use hyper::service::service_fn;
++use hyper::{Request, Response};
++use hyper_util::rt::TokioIo;
++use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
++use seekrit_proxy::ca::Ca;
++use seekrit_proxy::config::Config;
++use seekrit_proxy::egress::Egress;
++use seekrit_proxy::forward::{self, ForwardState};
++use seekrit_proxy::secrets::SecretStore;
++use seekrit_proxy::tasks::SessionResolver;
++use tokio::net::TcpListener;
++use tokio_rustls::TlsAcceptor;
++
++fn temp_ca() -> Ca {
++    static SEQ: AtomicUsize = AtomicUsize::new(0);
++    let dir = std::env::temp_dir().join(format!(
++        "seekrit-proxy-tunnel-{}-{}",
++        std::process::id(),
++        SEQ.fetch_add(1, Ordering::SeqCst)
++    ));
++    std::fs::create_dir_all(&dir).unwrap();
++    Ca::load_or_generate(
++        dir.join("ca.pem").to_str().unwrap(),
++        dir.join("ca-key.pem").to_str().unwrap(),
++    )
++    .unwrap()
++}
++
++/// A TLS upstream for `localhost` that answers `tunnelled` and counts hits.
++/// Returns its address and its self-signed certificate.
++async fn tls_upstream(hits: Arc<AtomicUsize>) -> (SocketAddr, String) {
++    let key = rcgen::KeyPair::generate().unwrap();
++    let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
++        .unwrap()
++        .self_signed(&key)
++        .unwrap();
++    let pem = cert.pem();
++    let der: CertificateDer<'static> = cert.der().clone();
++    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
++    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
++        rustls::crypto::ring::default_provider(),
++    ))
++    .with_safe_default_protocol_versions()
++    .unwrap()
++    .with_no_client_auth()
++    .with_single_cert(vec![der], key_der)
++    .unwrap();
++    let acceptor = TlsAcceptor::from(Arc::new(server));
++
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(async move {
++        while let Ok((tcp, _)) = listener.accept().await {
++            let acceptor = acceptor.clone();
++            let hits = hits.clone();
++            tokio::spawn(async move {
++                if let Ok(tls) = acceptor.accept(tcp).await {
++                    let svc = service_fn(move |_req: Request<Incoming>| {
++                        hits.fetch_add(1, Ordering::SeqCst);
++                        async {
++                            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
++                                b"tunnelled",
++                            ))))
++                        }
++                    });
++                    let _ = http1::Builder::new()
++                        .serve_connection(TokioIo::new(tls), svc)
++                        .await;
++                }
++            });
++        }
++    });
++    (addr, pem)
++}
++
++/// A forward proxy for `cfg`, wired as `main.rs` wires it.
++async fn forward_proxy(cfg: &str) -> String {
++    let config = Config::from_toml(cfg).unwrap();
++    let egress = Arc::new(Egress::from_config(&config));
++    let state = ForwardState {
++        client: seekrit_proxy::upstream_client(egress.clone()).unwrap(),
++        egress,
++        config: Arc::new(config),
++        store: Arc::new(ArcSwap::from_pointee(SecretStore::from_values([]))),
++        ca: Arc::new(temp_ca()),
++        metrics: Arc::new(seekrit_proxy::telemetry::Metrics::new()),
++        policy: None,
++        sessions: Arc::new(SessionResolver::new(None, None)),
++        ratchet: None,
++        activity: None,
++        approvals: None,
++    };
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(
++        async move { forward::serve(listener, state, std::future::pending::<()>()).await },
++    );
++    format!("http://{addr}")
++}
++
++/// An agent that proxies through `proxy` and trusts only `upstream_pem` — not
++/// the proxy's CA. If the proxy intercepted, the handshake would fail.
++fn agent(proxy: &str, upstream_pem: &str) -> reqwest::Client {
++    reqwest::Client::builder()
++        .proxy(reqwest::Proxy::http(proxy).unwrap())
++        .proxy(reqwest::Proxy::https(proxy).unwrap())
++        .tls_built_in_root_certs(false)
++        .add_root_certificate(reqwest::Certificate::from_pem(upstream_pem.as_bytes()).unwrap())
++        .build()
++        .unwrap()
++}
++
++/// Deny everything unlisted; the upstream lives on loopback, so open that range
++/// to the egress gate (a real deployment's hosts are public).
++const DENY: &str = "[egress]\nallow_cidr=['127.0.0.0/8']\n\
++                    [forward]\nlisten='127.0.0.1:0'\nunmatched_host_policy='deny'\n";
++
++#[tokio::test]
++async fn a_tunnel_only_host_is_spliced_through_without_interception() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    let proxy = forward_proxy(&format!(
++        "{DENY}[[forward.host]]\nmatch='localhost'\nintercept=false\n"
++    ))
++    .await;
++
++    let resp = agent(&proxy, &pem)
++        .get(format!("https://localhost:{}/x", upstream.port()))
++        .send()
++        .await
++        .expect("a tunnel-only host connects end to end with the upstream's own certificate");
++    assert_eq!(resp.status(), 200);
++    assert_eq!(resp.text().await.unwrap(), "tunnelled");
++    assert_eq!(hits.load(Ordering::SeqCst), 1);
++}
++
++/// The control for the test above: the same agent, the same upstream, but an
++/// intercepting rule. The proxy presents its own minted certificate, which this
++/// agent does not trust — so the tunnel test's success is not an accident of a
++/// lenient client.
++#[tokio::test]
++async fn the_same_agent_fails_against_an_intercepting_rule() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    let proxy = forward_proxy(&format!("{DENY}[[forward.host]]\nmatch='localhost'\n")).await;
++
++    let result = agent(&proxy, &pem)
++        .get(format!("https://localhost:{}/x", upstream.port()))
++        .send()
++        .await;
++    assert!(
++        result.is_err(),
++        "an intercepted host presents the proxy's certificate"
++    );
++    assert_eq!(hits.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn a_host_without_a_rule_is_still_refused() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    let proxy = forward_proxy(&format!(
++        "{DENY}[[forward.host]]\nmatch='elsewhere.test'\nintercept=false\n"
++    ))
++    .await;
++
++    let result = agent(&proxy, &pem)
++        .get(format!("https://localhost:{}/x", upstream.port()))
++        .send()
++        .await;
++    assert!(result.is_err(), "CONNECT to an unlisted host must fail");
++    assert_eq!(hits.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn plain_http_to_a_tunnel_only_host_is_refused() {
++    let proxy = forward_proxy(&format!(
++        "{DENY}[[forward.host]]\nmatch='localhost'\nintercept=false\n"
++    ))
++    .await;
++    let resp = agent(&proxy, &tls_upstream(Arc::default()).await.1)
++        .get("http://localhost:9/x")
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), 403);
++    assert!(resp.text().await.unwrap().contains("only as a TLS tunnel"));
++}
++
++#[tokio::test]
++async fn the_egress_gate_still_applies_to_a_tunnel_only_host() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    // No allow_cidr: `localhost` resolves to loopback, which the gate refuses
++    // even though a rule names the host.
++    let proxy = forward_proxy(
++        "[forward]\nlisten='127.0.0.1:0'\nunmatched_host_policy='deny'\n\
++         [[forward.host]]\nmatch='localhost'\nintercept=false\n",
++    )
++    .await;
++    let result = agent(&proxy, &pem)
++        .get(format!("https://localhost:{}/x", upstream.port()))
++        .send()
++        .await;
++    assert!(
++        result.is_err(),
++        "a tunnel must not reach a loopback address"
++    );
++    assert_eq!(hits.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn a_tunnel_rule_follows_its_ports() {
++    let hits = Arc::new(AtomicUsize::new(0));
++    let (upstream, pem) = tls_upstream(hits.clone()).await;
++    let url = format!("https://localhost:{}/x", upstream.port());
++
++    let wrong = forward_proxy(&format!(
++        "{DENY}[[forward.host]]\nmatch='localhost'\nintercept=false\nports=[443]\n"
++    ))
++    .await;
++    assert!(agent(&wrong, &pem).get(&url).send().await.is_err());
++    assert_eq!(hits.load(Ordering::SeqCst), 0, "never spliced");
++
++    let right = forward_proxy(&format!(
++        "{DENY}[[forward.host]]\nmatch='localhost'\nintercept=false\nports=[443, {}]\n",
++        upstream.port()
++    ))
++    .await;
++    let resp = agent(&right, &pem).get(&url).send().await.unwrap();
++    assert_eq!(resp.status(), 200);
++    assert_eq!(hits.load(Ordering::SeqCst), 1);
++}
++
++#[test]
++fn the_config_parses_tunnel_rules_apart_from_intercept_rules() {
++    let config = Config::from_toml(
++        "[forward]\n\
++         [[forward.host]]\nmatch='Tunnel.Test'\nintercept=false\n\
++         [[forward.host]]\nmatch='read.test'\n\
++         [[forward.host]]\nmatch='also-read.test'\nintercept=true\n",
++    )
++    .unwrap();
++    let fwd = config.forward.unwrap();
++    assert!(fwd.tunnels("tunnel.test"), "matched case-insensitively");
++    assert!(!fwd.tunnels("read.test"));
++    let rules = fwd.rules.unwrap();
++    assert!(rules.covers_host("read.test") && rules.covers_host("also-read.test"));
++    assert!(
++        !rules.covers_host("tunnel.test"),
++        "a tunnel host must never reach the intercepting rule set"
++    );
++}
++
++#[test]
++fn the_config_refuses_tunnel_rules_that_claim_to_see_inside() {
++    for (extra, why) in [
++        ("allow=['K']", "allow"),
++        ("methods=['GET']", "methods"),
++        ("paths=['/x']", "paths"),
++    ] {
++        let err = Config::from_toml(&format!(
++            "[forward]\n[[forward.host]]\nmatch='t.test'\nintercept=false\n{extra}\n"
++        ))
++        .err()
++        .map(|e| e.to_string());
++        assert!(
++            err.as_deref()
++                .is_some_and(|e| e.contains("intercept = false")),
++            "{why}: {err:?}"
++        );
++    }
++
++    let err = Config::from_toml(
++        "[forward]\n\
++         [[forward.host]]\nmatch='both.test'\n\
++         [[forward.host]]\nmatch='both.test'\nintercept=false\n",
++    )
++    .err()
++    .map(|e| e.to_string());
++    assert!(
++        err.as_deref()
++            .is_some_and(|e| e.contains("either intercepted or tunnelled")),
++        "{err:?}"
++    );
++}

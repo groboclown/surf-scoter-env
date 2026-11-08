@@ -22,8 +22,9 @@ from surf_scoter_lib import UserConfig, fileutil, gateway
 from surf_scoter_lib.err import SurfScoterErr
 
 MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
-# The only port the gateway's firewall lets out.
-FIREWALL_PORT = 443
+# The ports Squid's own configuration lets CONNECT reach (`SSL_ports` in
+# containers/network-gateway-squid/squid.conf).
+SQUID_PORTS = frozenset({443})
 # The host list's mode: the gateway runs as its own user, which must read it.
 MODE_HOST_LIST = 0o644
 EXIT_REFUSED = 1
@@ -36,13 +37,19 @@ EXIT_ERROR = 2
 SQUID = "squid"
 
 
-def refusal(rule: gateway.Rule) -> str | None:
+def refusal(rule: gateway.Rule, ports: frozenset[int]) -> str | None:
     """Why the Squid gateway can't enforce `rule`, if it can't.
 
-    It sees only `CONNECT host:port` for TLS (it doesn't look inside), and its
-    firewall lets only TCP 443 out (N2, N4).  So it enforces `tls` rules on
-    port 443, and nothing else yet.
+    It sees only `CONNECT host:port` for TLS (it doesn't look inside).  Its
+    firewall lets out only `ports`, the setup's `network-gateway-ports` (N2,
+    N4), and its own configuration CONNECTs only to 443.  So it enforces
+    `tls` rules on a port in both, and nothing else yet.
     """
+    if rule.secrets:
+        return (
+            "the Squid gateway can't fill in secrets: it never sees inside TLS "
+            f"(`secrets: {', '.join(rule.secrets)}` needs the seekrit gateway)"
+        )
     if rule.protocol == "https":
         return (
             "`https` needs a gateway that looks inside TLS to check the request; "
@@ -53,8 +60,13 @@ def refusal(rule: gateway.Rule) -> str | None:
             "plain `http` needs port 80 through the gateway's firewall and Squid's HTTP "
             "handling, which the Squid gateway doesn't have yet (use `tls` on 443 if the host has it)"
         )
-    if rule.port != FIREWALL_PORT:
-        return f"the gateway's firewall only lets TCP port {FIREWALL_PORT} out, not {rule.port}"
+    if rule.port not in ports:
+        return (
+            f"the gateway's firewall only lets TCP {gateway.ports_text(ports)} out, not {rule.port} "
+            f"(the setup's `dev-env: value-lists: {gateway.GATEWAY_PORTS}`)"
+        )
+    if rule.port not in SQUID_PORTS:
+        return f"the Squid gateway only lets CONNECT reach TCP {gateway.ports_text(SQUID_PORTS)}, not {rule.port}"
     if rule.methods:
         return "the gateway can't see the methods inside `tls`"
     return None
@@ -71,17 +83,20 @@ def pattern(host: str) -> str:
     return "^" + re.escape(host) + "$"
 
 
-def translate(rules: list[gateway.Rule]) -> tuple[gateway.Report, str]:
-    """The Squid gateway's report, and its host list (for `dstdom_regex -i`)."""
+def translate(rules: list[gateway.Rule], ports: frozenset[int]) -> tuple[gateway.Report, str]:
+    """The Squid gateway's report, and its host list (for `dstdom_regex -i`).
+
+    `ports` are the ports the gateway's firewall lets out.
+    """
     report = gateway.Report(SQUID)
     for rule in rules:
-        reason = refusal(rule)
+        reason = refusal(rule, ports)
         if reason is None:
             report.enforced.append(rule)
         else:
             report.refused.append((rule, reason))
     lines = [
-        "# The hosts the dev container may reach, on TCP 443: one pattern per line,",
+        "# The hosts the dev container may reach, through CONNECT: one pattern per line,",
         "# for Squid's `dstdom_regex`.  Made by Surf Scoter from your configuration's egress rules.",
     ]
     lines.extend(sorted({pattern(rule.host) for rule in report.enforced}))
@@ -105,11 +120,13 @@ def main(argv: Sequence[str]) -> int:
         suc = json.loads(data)
         if not isinstance(suc, dict):
             raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        rules = gateway.rules_from(UserConfig(suc))
+        config = UserConfig(suc)
+        rules = gateway.rules_from(config)
+        ports = gateway.setup_ports(config, gateway.GATEWAY_PORTS)
     except (OSError, ValueError, SurfScoterErr) as err:
         print(f"{argv[0]}: {err}", file=sys.stderr)
         return EXIT_ERROR
-    report, text = translate(rules)
+    report, text = translate(rules, ports)
     print(json.dumps(report.to_json()))
     if report.refused:
         return EXIT_REFUSED

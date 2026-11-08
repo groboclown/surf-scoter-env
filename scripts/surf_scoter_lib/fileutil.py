@@ -2,6 +2,7 @@
 """File helper utilities."""
 import contextlib
 import enum
+import errno
 import os
 import platform
 import shutil
@@ -30,7 +31,8 @@ def backup(file: Path, backup_ext: str) -> bool:
         rm(to_file)
     # Refresh metadata in the check.
     if not os.path.exists(to_file):
-        file.copy(to_file, preserve_metadata=True)
+        # The contents, and the mode and times, as the file had them.
+        shutil.copy2(file, to_file)
         return True
     return False
 
@@ -63,10 +65,26 @@ def restore(
             return False
         return True
     try:
-        from_file.move(file)
+        _move(from_file, file)
     except OSError:
         return False
     return True
+
+
+def _move(source: Path, target: Path) -> None:
+    """Move `source` onto `target`, replacing it, as `Path.move` (Python 3.14) does.
+
+    A rename where it can be one.  Across file systems (`EXDEV`: the target
+    can be a mount of its own, even beside the source), copy the contents,
+    mode and times over the target, then remove the source.
+    """
+    try:
+        os.replace(source, target)
+    except OSError as err:
+        if err.errno != errno.EXDEV:
+            raise
+        shutil.copy2(source, target)
+        source.unlink()
 
 
 MODE_USER_RW = 0o600

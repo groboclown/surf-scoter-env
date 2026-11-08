@@ -182,6 +182,16 @@ def clean_of(value: jdata.JsonData) -> str:
     return "" if value is None else review.clean(str(value))
 
 
+def egress_line(rule: jdata.DictJsonData) -> str:
+    """An egress rule in the report as one line: `host (protocol port, METHODS)`."""
+    what = " ".join(str(part) for part in (rule.get("protocol"), rule.get("port")) if part is not None)
+    methods = [clean_of(m) for m in _list(rule, "methods")]
+    if methods:
+        what += ", " + " ".join(methods)
+    host = clean_of(rule["host"])
+    return f"{host} ({review.clean(what)})" if what else host
+
+
 # ---------------------------------------------------------------------
 # The explorer
 
@@ -359,7 +369,10 @@ class Reviewer:
 
     def show_egress(self) -> None:
         for rule in _list(self.report, "egress"):
-            self.say(f"  {rule.get('index')}. {clean_of(rule['host'])}")
+            self.say(f"  {rule.get('index')}. {egress_line(rule)}")
+            secrets = [clean_of(name) for name in _list(rule, "secrets")]
+            if secrets:
+                self.say(f"     sends your {', '.join(secrets)} to it")
             for finding in self.findings_by_id(jdata.find_str_list(rule, "findings")):
                 self.say("    " + self.finding_line(finding))
         self.pause()

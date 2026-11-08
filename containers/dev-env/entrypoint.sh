@@ -57,10 +57,45 @@ if [ -d "${SCOTER_PROJECT_CLONE}/.git" ] && [ -f /opt/surf-scoter-setup/project.
         || echo "Couldn't fetch your project's newer commits into ${SCOTER_PROJECT_CLONE}" >&2
 fi
 
+# The trusted CAs: the system's, and the network gateway's (a new one each
+# run), which signs the certificates of the hosts it looks inside.  Tools
+# find it through SSL_CERT_FILE and the like (the compose file's).
+case "${SCOTER_GATEWAY_CA}" in
+    *[!A-Za-z0-9/._-]*) echo "SCOTER_GATEWAY_CA isn't a plain path: ${SCOTER_GATEWAY_CA}" >&2 ; exit 1 ;;
+esac
+ca_bundle=/run/scoter-ca/ca-bundle.pem
+cat /etc/ssl/certs/ca-certificates.crt > "${ca_bundle}"
+if [ -n "${SCOTER_GATEWAY_CA}" ] && [ -s "${SCOTER_GATEWAY_CA}" ] ; then
+    cat "${SCOTER_GATEWAY_CA}" >> "${ca_bundle}"
+fi
+chmod 0644 "${ca_bundle}"
+
+# What each ssh session gets beyond the template's: the CA settings, and a
+# placeholder for each secret the egress rules name.  The names are checked,
+# and the values made here, so nothing else gets into sshd's configuration.
+SCOTER_SSH_ENV="SCOTER_GATEWAY_CA=${SCOTER_GATEWAY_CA} NODE_EXTRA_CA_CERTS=${SCOTER_GATEWAY_CA}"
+for var in SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO ; do
+    SCOTER_SSH_ENV="${SCOTER_SSH_ENV} ${var}=${ca_bundle}"
+done
+# The names are split on spaces, never expanded as file names.
+set -f
+for name in ${SCOTER_SECRET_NAMES} ; do
+    case "${name}" in
+        [A-Z]*) ;;
+        *) echo "Skipping the secret name '${name}'" >&2 ; continue ;;
+    esac
+    case "${name}" in
+        *[!A-Z0-9_]*) echo "Skipping the secret name '${name}'" >&2 ; continue ;;
+    esac
+    SCOTER_SSH_ENV="${SCOTER_SSH_ENV} ${name}={{seekrit:${name}}}"
+done
+set +f
+export SCOTER_SSH_ENV
+
 # The SSH server's configuration, host key and authorized keys, fresh from
 # the image and the read-only setup directory on every start.
 sshd_dir=/run/scoter-sshd
-envsubst '${SCOTER_SSHD_PORT}' \
+envsubst '${SCOTER_SSHD_PORT} ${SCOTER_SSH_ENV}' \
     < /etc/scoter/sshd_config.template \
     > "${sshd_dir}/sshd_config"
 cp /opt/surf-scoter-setup/authorized_keys "${sshd_dir}/authorized_keys"

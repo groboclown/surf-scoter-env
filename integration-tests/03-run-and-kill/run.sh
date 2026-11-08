@@ -94,6 +94,7 @@ start_run "${IT_SANDBOX}/run.log"
 it_say "running as ${host}"
 clone=$( running_field project_clone_dir )
 setup=$( running_field setup_dir )
+resources=$( running_field resources_dir )
 case "${host}" in
     scoter-project-*) ;;
     *) it_fail "the environment isn't named by its project: ${host}" ;;
@@ -106,12 +107,21 @@ it_expect "${HOME}/.ssh/config" "# Surf Scoter environment"
     && it_fail "a second run of the project started"
 it_expect "${IT_SANDBOX}/second.log" "${host} is already running for this project"
 
+it_say "the run has its own gateway CA, its key readable only by you"
+[ -f "${resources}/ca/gateway-ca.pem" ] || it_fail "there's no gateway CA certificate in ${resources}/ca"
+[ "$( stat -c %a "${resources}/ca/gateway-ca-key.pem" )" = 600 ] || it_fail "the gateway CA's key isn't private"
+
 it_say "the gateway lets out the allowed host, and nothing else"
 "${tool}" exec "${host}" curl -sS -o /dev/null --max-time 30 https://registry.npmjs.org/ \
     || it_fail "the allowed host (registry.npmjs.org) wasn't reachable"
 if "${tool}" exec "${host}" curl -sS -o /dev/null --max-time 30 https://example.com/ 2> /dev/null; then
     it_fail "a host that wasn't allowed (example.com) was reachable"
 fi
+
+it_say "scoter netlog reads Squid's log: the host it reached, and the one it refused"
+scoter netlog < /dev/null > "${IT_SANDBOX}/netlog.log" 2>&1 || { cat "${IT_SANDBOX}/netlog.log" >&2; it_fail "netlog failed"; }
+it_expect "${IT_SANDBOX}/netlog.log" "registry.npmjs.org:443"
+it_expect "${IT_SANDBOX}/netlog.log" "{host: example.com, protocol: tls}"
 
 it_say "an ssh session finds the host command's bridge first"
 # ssh finds ~ from the password database, not HOME: give it the sandbox's files.
@@ -125,6 +135,18 @@ until ssh -F "${HOME}/.ssh/config" -o "UserKnownHostsFile=${HOME}/.ssh/known_hos
     sleep 5
 done
 it_expect "${IT_SANDBOX}/ssh.log" "/usr/local/scoter-bridge/ls"
+
+it_say "an ssh session trusts the run's gateway CA, with the system's"
+ssh -F "${HOME}/.ssh/config" -o "UserKnownHostsFile=${HOME}/.ssh/known_hosts" -o BatchMode=yes \
+    "${host}" 'printenv SSL_CERT_FILE; tail -c 2000 "${SSL_CERT_FILE}" | grep -c "BEGIN CERTIFICATE"' \
+    > "${IT_SANDBOX}/ssh-ca.log" 2>&1 || { cat "${IT_SANDBOX}/ssh-ca.log" >&2; it_fail "couldn't check the CA bundle"; }
+it_expect "${IT_SANDBOX}/ssh-ca.log" "/run/scoter-ca/ca-bundle.pem"
+"${tool}" exec -i "${host}" sh -c 'cmp -s /etc/scoter/gateway-ca.pem /dev/stdin' < "${resources}/ca/gateway-ca.pem" \
+    || it_fail "the dev container's gateway CA isn't the run's"
+"${tool}" exec "${host}-ng" ls /user-space/ca 2> /dev/null | grep -q . \
+    && it_fail "the Squid gateway was given the CA's directory"
+[ "$( "${tool}" exec "${host}-ng" stat -c %a /run/seekrit )" = 1777 ] \
+    || it_fail "the gateway's socket directory isn't sticky and open"
 
 it_say "the clone's origin is the bundle, and the container fetched the project's branch from it"
 [ -f "${setup}/project.bundle" ] || it_fail "there's no bundle in ${setup}"
@@ -149,6 +171,7 @@ for name in "${host}" "${host}-fr" "${host}-ng"; do
 done
 [ -z "$( running_host )" ] || it_fail "the environment is still listed"
 [ ! -e "${HOME}/.config/surf-scoter.d/state/environments/${host}" ] || it_fail "its state directory is still there"
+[ ! -e "${resources}/ca" ] || it_fail "the run's gateway CA is still there"
 it_expect "${IT_SANDBOX}/kill.log" "The project clone is kept"
 "${tool}" volume inspect "${host}-store" > /dev/null 2>&1 || it_fail "the persistent store went with the kill"
 
