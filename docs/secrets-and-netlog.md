@@ -115,7 +115,7 @@ Refused hosts.  If the container needs one, its rule goes in the project's `egre
   - {host: example.com, protocol: tls}
 ```
 
-With Squid, it shows the hosts reached and refused; with the seekrit gateway, also the requests it read, what they got, and the secrets put in, by name only.  For each refused host, it suggests the rule that would allow it; it never changes your configuration.
+With Squid, it shows the hosts reached and refused; with Envoy, also how much each tunnel carried, and the requests it read and what they got; with the seekrit gateway, also the requests it read, what they got, and the secrets put in, by name only.  For each refused host, it suggests the rule that would allow it; it never changes your configuration.
 
 * `scoter netlog --follow` shows each event as it happens, until you stop it.  Where your container tool can't follow a log (Podman on WSL2), it reads the log again every few seconds; to follow it directly, set the setup's `docker: runs: logs-follow` to `${exec} logs --follow {x:name}`.
 * `scoter netlog --json` gives the events as data.

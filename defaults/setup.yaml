@@ -326,10 +326,11 @@ dev-env:
     programs:
         openssl: openssl
     # The network gateway is Squid (`containers/network-gateway-squid`).  The
-    # other is seekrit-proxy (`containers/network-gateway-seekrit`), which can
-    # also look inside TLS to check a request and fill in secrets; it isn't
-    # wired into `scoter run` yet.  A gateway is chosen by these settings
-    # together: `paths: network-gateway`, `values: network-gateway-image`,
+    # others are seekrit-proxy (`containers/network-gateway-seekrit`), which can
+    # also look inside TLS to check a request and fill in secrets, and Envoy
+    # (`containers/network-gateway-envoy`), which passes `tls` rules through
+    # and reads `https` rules, checking their methods, without secrets.  A
+    # gateway is chosen by these settings together: `paths: network-gateway`, `values: network-gateway-image`,
     # `network-gateway-name` and `network-gateway-config-mount`, and
     # `runs: network-gateway-write-config`.
     paths:
@@ -408,6 +409,41 @@ dev-env:
             - basicConstraints=critical,CA:TRUE
             - -addext
             - keyUsage=critical,keyCertSign,cRLSign
+        # For a gateway that reads TLS without the CA's key (Envoy): a
+        # certificate for one host (`{x:subject}`, `/CN=HOST`, and `{x:san}`,
+        # `subjectAltName=DNS:HOST`), signed by the run's CA (`{x:ca-cert}`,
+        # `{x:ca-key}`), written with its key to `{x:leaf-cert}` and
+        # `{x:leaf-key}`.  The gateway's `network-gateway-write-config` runs it,
+        # once for each host it reads.  Needs OpenSSL 3.0 or later.
+        network-gateway-mk-leaf:
+            - ${openssl}
+            - req
+            - -x509
+            - -CA
+            - '{x:ca-cert}'
+            - -CAkey
+            - '{x:ca-key}'
+            - -newkey
+            - ec
+            - -pkeyopt
+            - ec_paramgen_curve:P-256
+            - -nodes
+            - -keyout
+            - '{x:leaf-key}'
+            - -out
+            - '{x:leaf-cert}'
+            - -days
+            - '30'
+            - -subj
+            - '{x:subject}'
+            - -addext
+            - '{x:san}'
+            - -addext
+            - basicConstraints=critical,CA:FALSE
+            - -addext
+            - keyUsage=critical,digitalSignature
+            - -addext
+            - extendedKeyUsage=serverAuth
         # Given the universal configuration file (`{x:universal}`) and where to
         # write (`{x:output}`), writes the gateway's configuration from the egress
         # rules, and prints JSON saying what it enforces and what it refuses.  It
@@ -446,6 +482,28 @@ dev-env:
     #         - ${scoter:distribution-bin-dir}/gateway_postrun_seekrit.py
     #         - '{x:universal}'
     #         - '{x:gateway-container}'
+
+    # The Envoy gateway, in place of Squid: copy these into your setup to
+    # replace the settings above.  It passes `tls` rules through, and reads
+    # `https` rules for exact hosts, with a certificate for each from
+    # `network-gateway-mk-leaf`; it never holds the CA's key, so
+    # `network-gateway-reads-tls` stays 'no'.
+    #
+    # paths:
+    #     network-gateway: ${scoter:distribution-dir}/containers/network-gateway-envoy
+    # values:
+    #     network-gateway-image: ${dev-env-image-prefix}network-gateway-envoy
+    #     network-gateway-name: envoy
+    #     network-gateway-config-mount: /user-space/gateway/envoy.json
+    #     network-gateway-reads-tls: 'no'
+    # runs:
+    #     network-gateway-write-config:
+    #         - ${python:script}
+    #         - ${scoter:distribution-bin-dir}/gateway_envoy.py
+    #         - '{x:universal}'
+    #         - '{x:output}'
+    #         - '{x:ca-cert}'
+    #         - '{x:ca-key}'
 
 
 # What the checks on a configuration look for (`scoter pull`, `scoter lock`,
@@ -926,6 +984,7 @@ verification:
             - dev-env:value-lists:network-gateway-tls-ports
             - dev-env:runs:network-gateway-write-config
             - dev-env:runs:network-gateway-mk-ca
+            - dev-env:runs:network-gateway-mk-leaf
             - dev-env:runs:network-gateway-post-start
             - docker:runs:exec-stdin
             - dev-env:paths:docker-compose

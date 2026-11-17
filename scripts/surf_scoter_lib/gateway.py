@@ -7,7 +7,8 @@ project file's own (`current-project-setup`).
 
 Each gateway enforces what it can.  A rule it can't enforce is refused, with
 the reason; it's never dropped, or loosened into something broader.  Each
-gateway's own translation is in its script (`gateway_squid.py` for Squid),
+gateway's own translation is in its script (`gateway_squid.py` for Squid,
+`gateway_seekrit.py` for seekrit-proxy, `gateway_envoy.py` for Envoy),
 which the setup's `network-gateway: runs: write-config` runs.
 """
 import re

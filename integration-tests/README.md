@@ -14,7 +14,7 @@ It prints each step, and ends with `PASS` or `FAIL`.
 
 * The debug build of the host tools: `cd host && cargo build`.
 * `python3`, `git`, and `script` (from util-linux, to give the pull's reviewer a terminal).
-* For the tests that run containers (`03`, `07`): the container tool, with `compose`, and the network.
+* For the tests that run containers (`03`, `07`, `08`): the container tool, with `compose`, and the network.
 
 ## The sandbox
 
@@ -28,7 +28,7 @@ The sandbox is removed when the test ends, unless it fails (it says where it is,
 |---|---|---|
 | `KEEP_SANDBOX` | (unset) | Set to keep the sandbox after a passing test. |
 | `IT_CONTAINER_TOOL` | `docker` | The container tool to run: `docker`, `podman`, or anything that takes their commands. |
-| `IT_RUN_TIMEOUT` | `1800` | How long `03` and `07` wait for the environment to start, in seconds.  The first run builds the images. |
+| `IT_RUN_TIMEOUT` | `1800` | How long `03`, `07` and `08` wait for the environment to start, in seconds.  The first run builds the images. |
 
 ## The tests
 
@@ -39,6 +39,7 @@ The sandbox is removed when the test ends, unless it fails (it says where it is,
 * **`05-cleanup`**: pulls 02's sample project, then moves it and pulls it again, and leaves a run's files, a project state directory, a persistent store and an image behind.  `scoter cleanup --dry-run` lists them; without a terminal or `--force`, and answering no, nothing goes; `--force` removes the run's files and the gone directory's configuration, but not the project state, store or image; `--project-state --persistent-stores --images` removes those too.  No containers: the container tool is a stand-in that lists one image and one volume, and records what it's asked.
 * **`06-init`**: `scoter init` refuses a project with its own files; for one without, it starts a configuration from the distribution's template without writing into the project; a run uses the unlocked copy; `scoter lock` stores it, finding the project by its configuration; the first `scoter push` creates the project's files directory.  No containers: the container tool's builds fail.
 * **`07-seekrit-gateway`**: `03`'s run with the seekrit gateway in place of Squid, chosen by the user's setup, for a project that passes `pypi.org` through untouched and lets the gateway read `api.github.com`, filling in `GITHUB_TOKEN` from the user's secret store.  From an ssh session in the dev container: the session has the placeholder, never the value; `pypi.org` works with no CA involved; the GitHub request gets the secret (the gateway's access log says so; GitHub answers 401 for the made-up value), a `POST` is refused by the rule's methods, and `example.com` is refused.  The container tool's `inspect` and `logs`, the run's log and the gateway's configuration never show the value.  `scoter netlog` shows the requests and the secret put in (by name), suggests a rule for the refused host, and `--follow` (reading the log again) shows a new connection.  After `restart`, a placeholder gets 503 until `scoter gateway-post-start` gives the secret again; a second one finds the gateway already has it.  `scoter kill` removes the run's CA.  Needs the container tool and the network, as `03` does.
+* **`08-envoy-gateway`**: `03`'s run with the Envoy gateway in place of Squid, chosen by the user's setup, for a project that reads `registry.npmjs.org` (`https`, `GET` only) and passes `*.github.com` through.  The gateway's configuration has a certificate for the read host, never the CA's key, and its `/user-space/ca` is empty.  From an ssh session in the dev container: the read host works through the gateway's certificate; a `POST`, or a request naming another host on its connection, gets the gateway's 403; `api.github.com` is passed through; `github.com`, `example.com`, `registry.npmjs.org:8443`, and plain HTTP to `registry.npmjs.org` are refused by Envoy's routes (404, `NR`), with no upstream (Envoy never resolved them); a slow download outlives Envoy's default route timeout.  `scoter netlog` reads Envoy's log: the requests it read, and a rule for each refused host.  `scoter kill` stops it all.  Needs the container tool and the network, as `03` does.
 
 ## Adding a test
 

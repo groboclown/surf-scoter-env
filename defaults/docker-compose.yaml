@@ -36,7 +36,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 128
-    mem_limit: 256m     # squid with caching off
+    mem_limit: 256m     # a proxy with no cache (Squid, Envoy, seekrit)
     logging:
       options:
         max-size: 10m   # the access log goes to stdout
@@ -145,5 +145,10 @@ networks:
   isolated:
     # Docker assigns the subnet per environment; the firewall finds it at startup.
     internal: true
+    # Experimental
+    #driver: bridge
+    #driver_opts:
+    #  com.docker.network.bridge.gateway_mode_ipv4: isolated
+    #  com.docker.network.bridge.gateway_mode_ipv6: isolated    
   uplink:
     driver: bridge

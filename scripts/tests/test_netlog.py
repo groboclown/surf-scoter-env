@@ -37,6 +37,87 @@ not json at all
 """
 
 
+# The Envoy gateway's access log lines (gateway_envoy.py's format), as Envoy
+# v1.36 wrote them: a tunnel, opened and ended; refusals of an unlisted host,
+# a port no rule has, and a plain request; a malformed request; a host that
+# didn't resolve; and a line of Envoy's own.
+ENVOY_LOG = """\
+[2026-11-17 02:16:21.805][1][warning][main] [source/server/server.cc:900] some message of Envoy's own
+{"authority":"registry.npmjs.org:443","bytes_down":0,"bytes_up":0,"code":200,"flags":"-","method":"CONNECT","path":null,"route":"registry.npmjs.org:443","time":"2026-11-17T02:16:45.331Z","type":"DownstreamTunnelSuccessfullyEstablished","upstream":"104.16.4.34:443"}
+{"authority":"registry.npmjs.org:443","bytes_down":3300,"bytes_up":863,"code":200,"flags":"DC","method":"CONNECT","path":null,"route":"registry.npmjs.org:443","time":"2026-11-17T02:16:45.331Z","type":"DownstreamEnd","upstream":"104.16.4.34:443"}
+{"authority":"example.org:443","bytes_down":0,"bytes_up":0,"code":404,"flags":"NR","method":"CONNECT","path":null,"route":null,"time":"2026-11-17T02:16:47.615Z","type":"DownstreamEnd","upstream":null}
+{"authority":"registry.npmjs.org:8443","bytes_down":0,"bytes_up":0,"code":404,"flags":"NR","method":"CONNECT","path":null,"route":null,"time":"2026-11-17T02:16:48.100Z","type":"DownstreamEnd","upstream":null}
+{"authority":"Example.org","bytes_down":0,"bytes_up":0,"code":404,"flags":"NR","method":"GET","path":"/x","route":null,"time":"2026-11-17T02:16:48.676Z","type":"DownstreamEnd","upstream":null}
+{"authority":null,"bytes_down":11,"bytes_up":0,"code":400,"flags":"DPE","method":null,"path":null,"route":null,"time":"2026-11-17T02:17:09.058Z","type":"DownstreamEnd","upstream":null}
+{"authority":"gone.pkg.dev:443","bytes_down":0,"bytes_up":0,"code":503,"flags":"DF","method":"CONNECT","path":null,"route":"*.pkg.dev:443","time":"2026-11-17T02:17:10.000Z","type":"DownstreamEnd","upstream":null}
+"""
+
+
+class EnvoyTest(unittest.TestCase):
+    """Test reading the Envoy gateway's JSON access log."""
+
+    def test_events(self) -> None:
+        """Tunnels opened and closed, with their bytes; refusals; nothing else."""
+        events = netlog.parse(ENVOY_LOG.splitlines(), netlog.parse_envoy)
+        self.assertEqual(
+            [(e.action, e.host, e.port, e.method, e.reason) for e in events],
+            [
+                ("tunnel", "registry.npmjs.org", 443, None, None),
+                ("closed", "registry.npmjs.org", 443, None, None),
+                ("deny", "example.org", 443, None, "no_rule"),
+                ("deny", "registry.npmjs.org", 8443, None, "no_rule"),
+                ("deny", "example.org", 80, "GET", "no_rule"),
+                ("closed", "gone.pkg.dev", 443, None, "DF"),
+            ],
+        )
+        self.assertEqual((events[1].bytes_up, events[1].bytes_down), (863, 3300))
+        self.assertEqual(events[4].path, "/x")
+        self.assertEqual(events[0].time, datetime.datetime(2026, 11, 17, 2, 16, 45, 331000, datetime.UTC))
+
+    def test_summary(self) -> None:
+        """Hosts reached and refused; a rule suggested for each refused host, as for Squid."""
+        summary = netlog.summarize(netlog.parse(ENVOY_LOG.splitlines(), netlog.parse_envoy))
+        self.assertEqual(summary.suggestions(), [
+            "{host: example.org, protocol: http}",
+            "{host: example.org, protocol: tls}",
+            "{host: registry.npmjs.org, protocol: tls, port: 8443}",
+        ])
+        self.assertIn("registry.npmjs.org:443", "\n".join(summary.lines()))
+
+    def test_registered(self) -> None:
+        self.assertIs(netlog.PARSERS["envoy"], netlog.parse_envoy)
+
+    def test_read_host(self) -> None:
+        """A read host: its `CONNECT` is an intercept; each request, what it got, or its refusal.
+        The host and port come from the gateway's own fields, not the request's `:authority`."""
+        events = netlog.parse(ENVOY_READ_LOG.splitlines(), netlog.parse_envoy)
+        self.assertEqual(
+            [(e.action, e.host, e.port, e.method, e.path, e.status, e.reason) for e in events],
+            [
+                ("intercept", "api.github.com", 443, None, None, 200, None),
+                ("request", "api.github.com", 443, "GET", "/user", 401, None),
+                ("request", "api.github.com", 443, "POST", "/user", 403, "no_rule"),
+                ("request", "api.github.com", 443, "GET", "/", 403, "no_rule"),
+                ("closed", "api.github.com", 443, None, None, 200, None),
+            ],
+        )
+        text = "\n".join(netlog.summarize(events).lines())
+        self.assertIn("GET api.github.com/user -> 401", text)
+        self.assertIn("POST api.github.com/user -> 403", text)
+        self.assertIn("intercept", text)
+
+
+# Envoy reading api.github.com (GET only): a GET, a POST refused, and a
+# request naming another host on the same connection, refused.
+ENVOY_READ_LOG = """\
+{"authority":"api.github.com:443","bytes_down":0,"bytes_up":0,"code":200,"flags":"-","method":"CONNECT","path":null,"plane":"connect","route":"intercept api.github.com:443","time":"2026-11-17T02:35:02.000Z","type":"DownstreamTunnelSuccessfullyEstablished","upstream":"envoy://intercept api.github.com:443/"}
+{"authority":"api.github.com","bytes_down":2396,"bytes_up":0,"code":401,"flags":"-","host":"api.github.com","method":"GET","path":"/user","plane":"request","port":"443","route":"api.github.com:443","time":"2026-11-17T02:35:02.102Z","type":"DownstreamEnd","upstream":"140.82.112.5:443"}
+{"authority":"api.github.com","bytes_down":70,"bytes_up":0,"code":403,"flags":"-","host":"api.github.com","method":"POST","path":"/user","plane":"request","port":"443","route":"refused","time":"2026-11-17T02:35:03.105Z","type":"DownstreamEnd","upstream":null}
+{"authority":"evil.example.com","bytes_down":70,"bytes_up":0,"code":403,"flags":"-","host":"api.github.com","method":"GET","path":"/","plane":"request","port":"443","route":"refused","time":"2026-11-17T02:35:03.508Z","type":"DownstreamEnd","upstream":null}
+{"authority":"api.github.com:443","bytes_down":9000,"bytes_up":800,"code":200,"flags":"DC","method":"CONNECT","path":null,"plane":"connect","route":"intercept api.github.com:443","time":"2026-11-17T02:35:02.000Z","type":"DownstreamEnd","upstream":"envoy://intercept api.github.com:443/"}
+"""
+
+
 class SquidTest(unittest.TestCase):
     """Test reading Squid's access log."""
 

@@ -40,6 +40,7 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `dev-env: values: network-gateway-name` | The gateway the egress rules are enforced by | Part of the setup a pull records; a gateway that enforces less than its name suggests weakens N2. |
 | `dev-env: values: network-gateway-reads-tls` | Whether the gateway is given the run's CA key | `'yes'` only for a gateway that looks inside TLS: any gateway given the key can intercept the dev container's TLS to any host.  With it, the key is readable by others, so keep the resources directory inside one only you can use. |
 | `dev-env: runs: network-gateway-mk-ca` | Makes each run's CA, which the dev container trusts | A CA that's reused, or whose key others can read, lets anyone with it intercept the dev container's TLS to any host.  Keep it new for each run, with its key readable only by you. |
+| `dev-env: runs: network-gateway-mk-leaf` | Makes a certificate for each host the Envoy gateway reads, signed by the run's CA | A certificate for a host the rules don't name, or for a wildcard or a CA, lets the gateway's holder intercept more than the rules say.  Keep it to the one host it's given (`{x:subject}`, `{x:san}`), a server certificate, not a CA. |
 | `dev-env: runs: network-gateway-post-start`, `docker: runs: exec-stdin` | Give the gateway what it needs once running: the seekrit gateway's secrets | They handle your secret values.  `exec-stdin` must pass them on standard input, without a TTY, and to the gateway's container only. |
 | `dev-env: value-lists: network-gateway-ports`, `network-gateway-tls-ports` | The ports egress rules may use, and of those, where `https` rules (and their secrets) are allowed | Keep `network-gateway-ports` the same as the firewall's: a port the firewall drops gives a rule that fails, and opening a port in the firewall without listing it here leaves it unused.  A port in `network-gateway-tls-ports` lets the gateway read, and inject secrets into, traffic on it, so list only ports where the upstream speaks TLS.  Both are guarded. |
 | `dev-env: paths: docker-compose`, `firewall-router`, `network-gateway` | Which compose file and network containers to use | Replacing these replaces the network.  Recheck every property. |
@@ -114,7 +115,7 @@ When changing it, keep these properties:
 
 ## The gateway container
 
-The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: network-gateway-image`, `network-gateway-name`, `network-gateway-config-mount` and `network-gateway-reads-tls`, and `runs: network-gateway-write-config` and `network-gateway-post-start`, together.  The distribution's [`setup.yaml`](../../defaults/setup.yaml) has Squid's, and the seekrit gateway's to copy into your setup.  Either way, the setup's `dev-env: value-lists: network-gateway-ports` must match the ports the firewall lets out.
+The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: network-gateway-image`, `network-gateway-name`, `network-gateway-config-mount` and `network-gateway-reads-tls`, and `runs: network-gateway-write-config` and `network-gateway-post-start`, together.  The distribution's [`setup.yaml`](../../defaults/setup.yaml) has Squid's, and the seekrit and Envoy gateways' to copy into your setup.  Either way, the setup's `dev-env: value-lists: network-gateway-ports` must match the ports the firewall lets out.
 
 ### Gateway: Squid
 
@@ -166,6 +167,28 @@ When changing it, keep these properties:
 * `network-gateway-reads-tls: 'yes'` for it, and the resources directory inside one only you can use.
 
 Its own weak points are on the [seekrit gateway attack vectors](network-gateway-seekrit-attack-vectors.md) page.
+
+### Gateway: Envoy
+
+[`containers/network-gateway-envoy`](../../containers/network-gateway-envoy/) runs [Envoy](https://www.envoyproxy.io)'s distroless image, pinned by digest: no shell, no package manager.  It runs as an unprivileged user (65532), with no capabilities, two worker threads, and its access log as JSON on standard output (`scoter netlog` reads it).  It provides N2, and backs up N3.  It passes `tls` rules through, on any port in `network-gateway-ports`, each rule on its own port, and reads `https` rules for exact hosts, on the ports in `network-gateway-tls-ports`, to check their methods.  It never fills in secrets.
+
+For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/v1.36.12/configuration/http/http_filters/dynamic_forward_proxy_filter), which resolves the requested host and connects to it.  Envoy's documentation warns that such a proxy is open to confused deputy attacks.  [`gateway_envoy.py`](../../scripts/gateway_envoy.py) writes its configuration (`/user-space/gateway/envoy.json`) so that:
+
+1. Only `CONNECT` is routed, over HTTP/1 only.
+2. Each rule is a route matching the request's whole `:authority`, port included: `host:port` exactly, or, for `*.domain`, a regular expression for its subdomains, at any depth, on that port (not the domain itself).  Case is ignored.  Anything else matches no route, and gets a 404.
+3. The host the route matched is the host that's resolved and dialled: nothing rewrites it, and nothing can hand the proxy another one (no host rewrites, no host from filter state, no port stripping, no other filters).
+4. A host is only resolved for a route that matched, so an unlisted name never reaches DNS.
+5. A `tls` tunnel is plain TCP: the proxy's cluster has no TLS of its own.
+6. A read host's `CONNECT` goes to an internal listener for that host and port alone, never through the dynamic forward proxy.  It ends the TLS connection with a certificate for that host, made for the run by `network-gateway-mk-leaf` and signed by the run's CA, and sends on only the requests whose `:authority` is that host, with the rules' methods; anything else gets a 403.  It sends them to a cluster that names the host, fixed, over TLS that checks the server's certificate against the system's CAs and the host's name.
+7. There's no admin interface, and only IPv4 addresses are looked up.
+
+When changing it, keep these properties, the [tests](../../scripts/tests/test_gateway_envoy.py) that check them, and:
+
+* Envoy stays unprivileged and without capabilities, its image pinned by digest.
+* Its `network-gateway-reads-tls` stays `'no'`: it's never given the run's CA key, only a certificate for each host it reads.  Those keys are in its configuration, which is readable by others, so the resources directory stays inside one only you can use.
+* A read host's HTTP/2 windows stay small, so a slow reader can't fill the gateway's memory.
+
+Its own weak points are on the [Envoy gateway attack vectors](network-gateway-envoy-attack-vectors.md) page.
 
 
 ## What this doesn't protect

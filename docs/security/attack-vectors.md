@@ -10,6 +10,7 @@ Each area has its own page:
 * [Runtime network](network-attack-vectors.md) (`NET`), whichever gateway it runs, and each gateway's own:
     * [The Squid gateway](network-gateway-squid-attack-vectors.md) (`SQUID`), the default
     * [The seekrit gateway](network-gateway-seekrit-attack-vectors.md) (`SEEKRIT`), which reads TLS and fills in secrets
+    * [The Envoy gateway](network-gateway-envoy-attack-vectors.md) (`ENVOY`), which passes `tls` rules through and reads `https` rules
 * [The development container](dev-container-attack-vectors.md) (`DEV`)
 * [File access](files-attack-vectors.md) (`FILE`)
 * [The host bridge](host-bridge-attack-vectors.md) (`BRIDGE`)
