@@ -114,9 +114,18 @@ impl RefusedWildcards {
     }
 }
 
-/// The project's egress wildcards on a domain the setup refuses them on.
-fn egress_problems(project: &ProjectConfig, refused: &RefusedWildcards) -> Vec<ConfigError> {
-    project.wildcard_problems(&|domain| refused.reason(domain))
+/// The project's egress rules the setup refuses: wildcards on a domain it
+/// refuses them on, and secrets on a port it doesn't let a gateway read TLS on.
+fn egress_problems(
+    project: &ProjectConfig,
+    refused: &RefusedWildcards,
+    system: &SystemConfig,
+) -> Vec<ConfigError> {
+    let mut errors = project.wildcard_problems(&|domain| refused.reason(domain));
+    let tls_ports =
+        egress::ports_of(&system.value_list(egress::GATEWAY_SECTION, egress::GATEWAY_TLS_PORTS));
+    errors.extend(project.secret_port_problems(&tls_ports));
+    errors
 }
 
 /// The `scoter` section's `values` key naming the project files directory.
@@ -452,8 +461,8 @@ pub fn load_universal_with_env(path: &Path, mut env: Env) -> Result<FullConfig, 
         errors.extend(problems);
         refused
     });
-    if let (Some(refused), Some(project)) = (&refused, &project) {
-        errors.extend(egress_problems(project, refused));
+    if let (Some(refused), Some(project), Some(system)) = (&refused, &project, &system) {
+        errors.extend(egress_problems(project, refused, system));
     }
     let host_file = universal.host_file.and_then(|input| {
         host_file::parse(input.contents, &input.file)
@@ -658,8 +667,8 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
             errors.extend(live_files_problems(project, system));
         }
     }
-    if let (Some(refused), Some(project)) = (&refused, &project) {
-        errors.extend(egress_problems(project, refused));
+    if let (Some(refused), Some(project), Some(system)) = (&refused, &project, &system) {
+        errors.extend(egress_problems(project, refused, system));
     }
     // Checked against the configuration's commands and this computer.
     if options.host_file.is_some() && config_dir.is_none() {

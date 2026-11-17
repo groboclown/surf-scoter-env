@@ -12,6 +12,10 @@
 //!     port: 8080
 //!     protocol: http
 //!     methods: [GET, HEAD]
+//!   - host: api.github.com            # a gateway that looks inside TLS
+//!     protocol: https                 # fills in `{{seekrit:GITHUB_TOKEN}}`
+//!     methods: [GET]
+//!     secrets: [GITHUB_TOKEN]
 //! ```
 //!
 //! A gateway enforces what it can of a rule; these checks are only about the
@@ -30,6 +34,8 @@ const MAX_LABEL_CHARS: usize = 63;
 const HTTPS_PORT: u16 = 443;
 /// The default port for plain HTTP.
 const HTTP_PORT: u16 = 80;
+/// The longest secret name.
+const MAX_SECRET_NAME_CHARS: usize = 64;
 
 /// How the dev container talks to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -76,22 +82,39 @@ pub struct EgressRule {
     pub port: u16,
     /// For `http` and `https`: the methods allowed; empty for any.
     pub methods: Vec<String>,
+    /// For `https`: the names of the secrets the gateway may put into requests
+    /// to this host (`{{seekrit:NAME}}` in a request becomes the user's value
+    /// for `NAME`).  The values are the user's, never the project's.
+    pub secrets: Vec<String>,
 }
 
 /// The setup section and `values` key naming the network gateway, which the
 /// egress rules are enforced by.
 pub const GATEWAY_SECTION: &str = "dev-env";
 pub const GATEWAY_NAME: &str = "network-gateway-name";
+/// The setup's `value-lists` key, in `GATEWAY_SECTION`, listing the ports
+/// where the gateway may look inside TLS: a rule with `secrets` must be on one.
+pub const GATEWAY_TLS_PORTS: &str = "network-gateway-tls-ports";
+
+/// The ports a setup `value-lists` entry names; an entry that isn't a port
+/// names none, so it can only refuse more.
+pub fn ports_of(entries: &[String]) -> Vec<u16> {
+    entries
+        .iter()
+        .filter_map(|entry| entry.parse::<u16>().ok().filter(|port| *port != 0))
+        .collect()
+}
 
 impl EgressRule {
     /// The rule as the universal configuration file's `egress` holds it:
-    /// `host`, `protocol`, `port` and `methods`, every one given.
+    /// `host`, `protocol`, `port`, `methods` and `secrets`, every one given.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "host": self.host,
             "protocol": self.protocol.name(),
             "port": self.port,
             "methods": self.methods,
+            "secrets": self.secrets,
         })
     }
 
@@ -112,6 +135,8 @@ struct RuleRecord {
     port: Option<u16>,
     #[serde(default)]
     methods: Option<Vec<String>>,
+    #[serde(default)]
+    secrets: Option<Vec<String>>,
 }
 
 /// The `egress` list; problems are (key, message).
@@ -157,16 +182,73 @@ pub fn parse(value: Value, problems: &mut Vec<(String, String)>) -> Vec<EgressRu
                 ));
             }
         }
+        let secrets = record.secrets.unwrap_or_default();
+        secrets_problems(&key, &record.host, record.protocol, &secrets, problems);
         if problems.len() == before {
             rules.push(EgressRule {
                 host: record.host,
                 port: record.port.unwrap_or(record.protocol.default_port()),
                 protocol: record.protocol,
                 methods,
+                secrets,
             });
         }
     }
     rules
+}
+
+/// The problems with a rule's `secrets`, added to `problems`.
+///
+/// Only an `https` rule, which the gateway looks inside of, can carry a
+/// secret: in `tls` the gateway never sees the request, and plain `http`
+/// would send the value where anyone in between can read it.  Only an exact
+/// host: a wildcard would hand the secret to every name under a domain.
+fn secrets_problems(
+    key: &str,
+    host: &str,
+    protocol: Protocol,
+    secrets: &[String],
+    problems: &mut Vec<(String, String)>,
+) {
+    if secrets.is_empty() {
+        return;
+    }
+    let key = format!("{key}.secrets");
+    if protocol != Protocol::Https {
+        problems.push((
+            key.clone(),
+            "only goes with `protocol: https`: the gateway puts a secret only into a request it reads, and sends it only over TLS".to_string(),
+        ));
+    }
+    if host.starts_with("*.") {
+        problems.push((
+            key.clone(),
+            format!("'{host}' is a wildcard; a secret goes only to a host named exactly"),
+        ));
+    }
+    for (j, name) in secrets.iter().enumerate() {
+        if let Some(problem) = secret_name_problem(name) {
+            problems.push((index_key(&key, j), problem));
+        } else if secrets[..j].contains(name) {
+            problems.push((index_key(&key, j), format!("'{name}' is listed twice")));
+        }
+    }
+}
+
+/// Why `name` can't be a secret's name, if it can't: an upper-case letter,
+/// then upper-case letters, digits and `_`, as an environment variable is
+/// usually named.
+pub fn secret_name_problem(name: &str) -> Option<String> {
+    let valid = name.len() <= MAX_SECRET_NAME_CHARS
+        && name.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    (!valid).then(|| {
+        format!(
+            "'{name}' must be an upper-case letter, then upper-case letters, digits and `_`, at most {MAX_SECRET_NAME_CHARS} in all, such as GITHUB_TOKEN"
+        )
+    })
 }
 
 /// Why `host` can't be an egress rule's host, if it can't.
@@ -261,6 +343,7 @@ mod tests {
                 protocol: Protocol::Tls,
                 port: 443,
                 methods: vec![],
+                secrets: vec![],
             }
         );
         assert_eq!(rules[1].port, 443);
@@ -298,6 +381,43 @@ mod tests {
             rules("egress: no\n").unwrap_err(),
             ["egress: must be a list of rules"]
         );
+    }
+
+    #[test]
+    fn secrets() {
+        let parsed = rules(
+            "- {host: api.github.com, protocol: https, methods: [GET], secrets: [GITHUB_TOKEN, NPM_TOKEN_2]}\n",
+        )
+        .unwrap();
+        assert_eq!(parsed[0].secrets, ["GITHUB_TOKEN", "NPM_TOKEN_2"]);
+        assert_eq!(
+            parsed[0].to_json()["secrets"],
+            serde_json::json!(["GITHUB_TOKEN", "NPM_TOKEN_2"])
+        );
+        assert_eq!(
+            rules(concat!(
+                "- {host: a.example.com, protocol: tls, secrets: [A]}\n",
+                "- {host: b.example.com, protocol: http, secrets: [B]}\n",
+                "- {host: '*.example.com', protocol: https, secrets: [C]}\n",
+                "- {host: d.example.com, protocol: https, secrets: [lower, _X, 9X, A-B, '', D, D]}\n",
+            ))
+            .unwrap_err(),
+            [
+                "egress[0].secrets: only goes with `protocol: https`: the gateway puts a secret only into a request it reads, and sends it only over TLS",
+                "egress[1].secrets: only goes with `protocol: https`: the gateway puts a secret only into a request it reads, and sends it only over TLS",
+                "egress[2].secrets: '*.example.com' is a wildcard; a secret goes only to a host named exactly",
+                "egress[3].secrets[0]: 'lower' must be an upper-case letter, then upper-case letters, digits and `_`, at most 64 in all, such as GITHUB_TOKEN",
+                "egress[3].secrets[1]: '_X' must be an upper-case letter, then upper-case letters, digits and `_`, at most 64 in all, such as GITHUB_TOKEN",
+                "egress[3].secrets[2]: '9X' must be an upper-case letter, then upper-case letters, digits and `_`, at most 64 in all, such as GITHUB_TOKEN",
+                "egress[3].secrets[3]: 'A-B' must be an upper-case letter, then upper-case letters, digits and `_`, at most 64 in all, such as GITHUB_TOKEN",
+                "egress[3].secrets[4]: '' must be an upper-case letter, then upper-case letters, digits and `_`, at most 64 in all, such as GITHUB_TOKEN",
+                "egress[3].secrets[6]: 'D' is listed twice",
+            ]
+        );
+        assert!(secret_name_problem(&"A".repeat(64)).is_none());
+        assert!(secret_name_problem(&"A".repeat(65)).is_some());
+        // An empty list is no secrets, as leaving it out is.
+        assert!(rules("- {host: a.example.com, protocol: tls, secrets: []}\n").is_ok());
     }
 
     #[test]

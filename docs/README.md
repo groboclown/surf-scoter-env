@@ -6,6 +6,7 @@ For details on specific features, see the subsections:
 * [Setting up a project to work with Surf Scoter](new-project-setup.md)
     * [The per-project configuration file](project-configuration-file.md)
     * [Making a custom project container](project-dockerfile.md)
+* [Secrets, and seeing the network](secrets-and-netlog.md): the seekrit gateway, which fills in your credentials without the container holding them, and `scoter netlog`
 * [Cleaning up after Surf Scoter](cleaning-up.md): old runs, project clones, persistent stores, configurations and images
 
 Here's some guides on working with different environments:

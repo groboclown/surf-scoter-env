@@ -82,7 +82,7 @@ The `dev-env.yaml` file says how to run the container, including where the broke
 
 ## Egress
 
-`egress` lists the network destinations the development container needs.  The rules say what's needed, not how a gateway provides it; the gateway enforces what it can of each rule, and refuses to start with a rule it can't enforce.  The standard gateway (Squid) enforces `tls` rules on port 443; it refuses `http`, `https` and other ports for now.  Each rule has:
+`egress` lists the network destinations the development container needs.  The rules say what's needed, not how a gateway provides it; the gateway enforces what it can of each rule, and refuses to start with a rule it can't enforce.  The standard gateway (Squid) enforces `tls` rules on port 443; it refuses `http`, `https`, `secrets` and other ports for now.  The Envoy gateway enforces `tls` rules on any port the setup lets out, and `https` rules, with their methods, for hosts named exactly; it refuses `http` and `secrets`.  Each rule has:
 
 * `host` (required): a host name, such as `registry.npmjs.org`, or `*.` and a host name for its subdomains (`*.pkg.dev` allows `us.pkg.dev`, not `pkg.dev` itself).  Lower-case letters, digits and `-`, in at least two parts.  No IP addresses.  Write a name with non-ASCII letters in its `xn--` form, so the file says exactly what the review shows (a Cyrillic `a`, `\u0430`, in `github.com` can't hide).  A bare `*` is refused, and so is `*.` on a top-level domain (`*.com`), or on a domain where anyone can have a name (`*.github.io`, `*.co.uk`; the system configuration's `verification: value-lists: egress-refused-wildcards`).
 * `protocol` (required):
@@ -91,6 +91,7 @@ The `dev-env.yaml` file says how to run the container, including where the broke
     * `http`: plain HTTP.  Anyone between you and the host can read and change it, downloads included, so prefer `tls`.
 * `port` (optional): 443 for `tls` and `https`, 80 for `http`, by default.
 * `methods` (optional, `http` and `https` only): the HTTP methods allowed, in upper case, such as `[GET, HEAD]`.  A `GET` still carries data in its address and headers, so this limits what the container can do (no uploads, say); it doesn't stop it sending data out.
+* `secrets` (optional, `https` only, on a host named exactly): the names of the secrets the gateway may put into requests to this host, such as `[GITHUB_TOKEN]`.  Each is an upper-case letter, then upper-case letters, digits and `_`.  Inside the container, a tool sends the placeholder `{{seekrit:GITHUB_TOKEN}}` where the value goes (in a header, say), and the gateway replaces it with your value on the way out, only toward this host.  The container never holds the value.  The values are yours: they come from your secret store (the system configuration's `project-state: paths: secret-store`), never from the project, so a project can ask for a secret but gets one only if you've put it there.  The rule must be on a port in the system configuration's `dev-env: value-lists: network-gateway-tls-ports` (443 by default).  The review shows which secrets go to which host, and it's a change to review when that changes.  It needs a gateway that looks inside TLS: the standard one (Squid) refuses a rule with `secrets`.
 
 ## Host commands
 

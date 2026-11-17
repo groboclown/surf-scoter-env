@@ -1,9 +1,11 @@
 #SPDX:MIT
 """Test the fileutil module."""
+import errno
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ...surf_scoter_lib import err, fileutil
 
@@ -85,3 +87,58 @@ class WritePrivateTest(unittest.TestCase):
         with self.assertRaises(err.SurfScoterErr):
             fileutil.write_private(Path("relative"), ("f",), b"x")
 
+
+
+class BackupRestoreTest(unittest.TestCase):
+    """Test fileutil.backup and fileutil.restore."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.file = Path(os.path.realpath(self._dir.name)) / "config"
+        self.backup = Path(str(self.file) + ".bak")
+
+    @unittest.skipUnless(POSIX, "file modes")
+    def test_backup_keeps_mode(self) -> None:
+        """The backup has the file's contents and mode."""
+        self.file.write_text("original", encoding="utf-8")
+        os.chmod(self.file, 0o640)
+        self.assertTrue(fileutil.backup(self.file, ".bak"))
+        self.assertEqual(self.backup.read_text(encoding="utf-8"), "original")
+        self.assertEqual(os.stat(self.backup).st_mode & 0o777, 0o640)
+
+    def test_restore_replaces(self) -> None:
+        """The backup replaces the changed file, and is gone."""
+        self.file.write_text("original", encoding="utf-8")
+        fileutil.backup(self.file, ".bak")
+        self.file.write_text("changed", encoding="utf-8")
+        self.assertTrue(fileutil.restore(self.file, ".bak"))
+        self.assertEqual(self.file.read_text(encoding="utf-8"), "original")
+        self.assertFalse(self.backup.exists())
+
+    def test_restore_across_file_systems(self) -> None:
+        """Where a rename can't cross file systems (EXDEV), it copies, then removes the backup."""
+        self.file.write_text("changed", encoding="utf-8")
+        self.backup.write_text("original", encoding="utf-8")
+        cross = OSError(errno.EXDEV, "Invalid cross-device link")
+        with mock.patch.object(fileutil.os, "replace", side_effect=cross):
+            self.assertTrue(fileutil.restore(self.file, ".bak"))
+        self.assertEqual(self.file.read_text(encoding="utf-8"), "original")
+        self.assertFalse(self.backup.exists())
+
+    def test_restore_fails_otherwise(self) -> None:
+        """Any other failure: not restored, and the backup kept."""
+        self.file.write_text("changed", encoding="utf-8")
+        self.backup.write_text("original", encoding="utf-8")
+        with mock.patch.object(fileutil.os, "replace", side_effect=PermissionError(errno.EACCES, "denied")):
+            self.assertFalse(fileutil.restore(self.file, ".bak"))
+        self.assertEqual(self.file.read_text(encoding="utf-8"), "changed")
+        self.assertTrue(self.backup.exists())
+
+    def test_no_backup(self) -> None:
+        """No backup: the file is kept, or removed when asked."""
+        self.file.write_text("changed", encoding="utf-8")
+        self.assertTrue(fileutil.restore(self.file, ".bak"))
+        self.assertTrue(self.file.exists())
+        self.assertTrue(fileutil.restore(self.file, ".bak", fileutil.WithoutBackup.DELETE))
+        self.assertFalse(self.file.exists())

@@ -21,6 +21,7 @@ from surf_scoter_lib import (
     UserConfig,
     cleanup,
     fileutil,
+    gateway_start,
     gen_parser,
     persistent_store,
     run_config,
@@ -75,7 +76,7 @@ def run_kill(
     try:
         file = config.require_path("scoter", "running-envs")
         lock_file = config.require_path("scoter", "running-envs-lock")
-        env = _choose(config, ActiveEnvironmentSet.read(file), host)
+        env = choose_environment(config, ActiveEnvironmentSet.read(file), host)
     except SurfScoterErr as err:
         print(err, file=sys.stderr)
         return 1
@@ -103,6 +104,9 @@ def run_kill(
                 return 1
     else:
         print("It was only reserved: its run stopped before it started any containers.")
+    # The gateway's CA: its key signs certificates the dev container trusted.
+    if env.resources_dir:
+        gateway_start.remove_ca(Path(env.resources_dir))
 
     if fetch_branch and not _fetch(recorded, env, fetch_branch):
         print("Its project clone is kept, and it's still listed.", file=sys.stderr)
@@ -156,10 +160,10 @@ def run_kill(
     return 0
 
 
-def _choose(
+def choose_environment(
     config: UserConfig, envs: ActiveEnvironmentSet, host: str | None,
 ) -> EnvironmentDesc | None:
-    """The environment to stop: `host`, or the project's only one; None, having said why."""
+    """The environment `host`, or the project's only one; None, having said why."""
     if host:
         env = envs.get_environ_by_host(host)
         if env is None:

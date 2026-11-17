@@ -5,7 +5,7 @@ Much of what keeps an environment contained comes not from the project or from S
 * the default system configuration, [`defaults/setup.yaml`](../../defaults/setup.yaml);
 * the compose file that wires the containers together, [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml);
 * the firewall container, [`containers/firewall-router`](../../containers/firewall-router/);
-* the gateway container, [`containers/network-gateway`](../../containers/network-gateway/).
+* the gateway container: Squid, [`containers/network-gateway-squid`](../../containers/network-gateway-squid/), by default, or seekrit-proxy, [`containers/network-gateway-seekrit`](../../containers/network-gateway-seekrit/).
 
 You can replace every one of them through your own [system configuration](../system-config-file.md).
 
@@ -32,11 +32,17 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | `ssh: runs: proxy-command` | How SSH reaches the container | Keep it going through the runtime's exec channel.  Switching to a published port breaks N5. |
 | `ssh: paths: key-file`, `known-hosts`, `config-file` | Your client key and the files `scoter` edits | `scoter` rewrites the config and `known_hosts` files on each run. |
 | `project-state: paths: *` | Where the project clone, setup and resources directories live | Keep all three, and the directories above them, where the container can't write: the clone is mounted read-write, so nothing may be inside it, and a directory the container could replace with a symlink would redirect where `scoter` clones and deletes ([FILE-10](files-attack-vectors.md#file-10-the-clones-path-through-container-symlinks)).  The default keeps them outside the project, in `state-dir` (FILE-9). |
+| `project-state: paths: secret-store` | Your secret store for the project: the values of the secrets its egress rules name | Anyone who can change this path chooses which values the gateway sends, and the store's `command` entries run on your host.  Keep it out of every project and its clone, readable only by you, and never mounted.  Guarded, with the other `project-state` paths. |
 | `project-state: values: persistent-store-volume`, `persistent-store-prefix` | The dev container's persistent store, and how `scoter cleanup` recognizes the tools' volumes | Keep the name different for each project, or two projects' containers share one store.  A prefix that matches other volumes lets `scoter cleanup --persistent-stores` remove them. |
 | `git-vcs: runs: *`, `file-vcs: runs: *` | How the project clone is created, refreshed and merged back | None of them may run with the clone as its working directory or repository, or push into it: Git would run the clone's hooks on your host ([FILE-1](files-attack-vectors.md#file-1-scoter-run-runs-git-inside-the-project-clone)).  `refresh-bundle`, `set-clone-origin` and `fetch-changes-into` are guarded. |
 | `docker: runs: inspect-volume`, `create-volume`, `remove-volume`, `list-volumes` | The persistent store volume | `inspect-volume` must fail only when the volume isn't there, or `scoter run` tries to create it again, which fails with Podman. |
 | `dev-env: runs: network-gateway-write-config` | Turns the egress rules into the gateway's configuration | A command that writes a broader list than the rules say breaks N2. |
 | `dev-env: values: network-gateway-name` | The gateway the egress rules are enforced by | Part of the setup a pull records; a gateway that enforces less than its name suggests weakens N2. |
+| `dev-env: values: network-gateway-reads-tls` | Whether the gateway is given the run's CA key | `'yes'` only for a gateway that looks inside TLS: any gateway given the key can intercept the dev container's TLS to any host.  With it, the key is readable by others, so keep the resources directory inside one only you can use. |
+| `dev-env: runs: network-gateway-mk-ca` | Makes each run's CA, which the dev container trusts | A CA that's reused, or whose key others can read, lets anyone with it intercept the dev container's TLS to any host.  Keep it new for each run, with its key readable only by you. |
+| `dev-env: runs: network-gateway-mk-leaf` | Makes a certificate for each host the Envoy gateway reads, signed by the run's CA | A certificate for a host the rules don't name, or for a wildcard or a CA, lets the gateway's holder intercept more than the rules say.  Keep it to the one host it's given (`{x:subject}`, `{x:san}`), a server certificate, not a CA. |
+| `dev-env: runs: network-gateway-post-start`, `docker: runs: exec-stdin` | Give the gateway what it needs once running: the seekrit gateway's secrets | They handle your secret values.  `exec-stdin` must pass them on standard input, without a TTY, and to the gateway's container only. |
+| `dev-env: value-lists: network-gateway-ports`, `network-gateway-tls-ports` | The ports egress rules may use, and of those, where `https` rules (and their secrets) are allowed | Keep `network-gateway-ports` the same as the firewall's: a port the firewall drops gives a rule that fails, and opening a port in the firewall without listing it here leaves it unused.  A port in `network-gateway-tls-ports` lets the gateway read, and inject secrets into, traffic on it, so list only ports where the upstream speaks TLS.  Both are guarded. |
 | `dev-env: paths: docker-compose`, `firewall-router`, `network-gateway` | Which compose file and network containers to use | Replacing these replaces the network.  Recheck every property. |
 | `dev-env: values: *-image` | Image names for the containers | An image from a registry rather than a local build means trusting whoever publishes it. |
 | `dev-env: values: mem-limit`, `cpus`, `pids-limit`, `logging-max-size` | Dev container resource limits | Removing them lets the container exhaust your host. |
@@ -65,6 +71,8 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 | Firewall health check, and `gateway` waits for `service_healthy` | N6: the proxy starts only once the rules are loaded |
 | No `ports:` on any service | N5 |
 | Setup directory mounted read-only, gateway configuration not mounted in the dev container | N2: the container can't change its own allowed hosts |
+| The run's CA: the certificate mounted read-only in `dev`, the key only in a gateway that reads TLS | Only that gateway can sign certificates the dev container trusts ([SQUID-3](network-gateway-squid-attack-vectors.md#squid-3-the-runs-ca-with-a-gateway-that-doesnt-use-it), [SEEKRIT-3](network-gateway-seekrit-attack-vectors.md#seekrit-3-the-interception-ca)) |
+| A tmpfs at the gateway's `/run/seekrit` | The seekrit gateway's secrets arrive through a socket there, never a file ([SEEKRIT-2](network-gateway-seekrit-attack-vectors.md#seekrit-2-secrets-in-the-gateways-memory-and-their-delivery)) |
 | No fixed subnet on `isolated` | N7: each environment gets its own subnet |
 | Process, memory, CPU and log limits | Contained resource use |
 
@@ -107,14 +115,18 @@ When changing it, keep these properties:
 
 ## The gateway container
 
-[`containers/network-gateway`](../../containers/network-gateway/) runs Squid on Debian as the unprivileged `proxy` user, with no capabilities, caching off, and the access log on standard output (`podman logs HOSTNAME-ng`).  It provides N2, and backs up N3.
+The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: network-gateway-image`, `network-gateway-name`, `network-gateway-config-mount` and `network-gateway-reads-tls`, and `runs: network-gateway-write-config` and `network-gateway-post-start`, together.  The distribution's [`setup.yaml`](../../defaults/setup.yaml) has Squid's, and the seekrit and Envoy gateways' to copy into your setup.  Either way, the setup's `dev-env: value-lists: network-gateway-ports` must match the ports the firewall lets out.
 
-[`squid.conf`](../../containers/network-gateway/squid.conf) applies its rules in this order:
+### Gateway: Squid
+
+[`containers/network-gateway-squid`](../../containers/network-gateway-squid/) runs Squid on Debian as the unprivileged `proxy` user, with no capabilities, caching off, and the access log on standard output (`podman logs HOSTNAME-ng`).  It provides N2, and backs up N3.
+
+[`squid.conf`](../../containers/network-gateway-squid/squid.conf) applies its rules in this order:
 
 1. Refuse anything that isn't `CONNECT`.
 2. Refuse any port but 443.
 3. Refuse any hostname not on the allowed host list (`/user-space/egress-hosts.txt`, made from the egress rules and mounted read-only).  Each line is a regular expression (`dstdom_regex`): `^host$` for a host, `^.+\.domain$` for `*.domain` (its subdomains, not the domain itself).  `-i` ignores case, and `-n` stops Squid from making reverse DNS lookups to test the list.
-4. Refuse destinations that resolve into the [blocked destination list](../../containers/network-gateway/blocked-destinations.txt): private, loopback, link-local, carrier-grade NAT, multicast, documentation and reserved ranges, for IPv4 and IPv6.
+4. Refuse destinations that resolve into the [blocked destination list](../../containers/network-gateway-squid/blocked-destinations.txt): private, loopback, link-local, carrier-grade NAT, multicast, documentation and reserved ranges, for IPv4 and IPv6.
 5. Allow what's left.
 
 The order matters.  The hostname check comes before the address check, so an unlisted name is refused before Squid resolves it, and a request can't make Squid send a DNS query for an attacker's domain.
@@ -125,7 +137,58 @@ When changing it, keep these properties:
 * Only port 443 is allowed.
 * Squid stays unprivileged and without capabilities.
 * The blocked destination list stays in the image, out of reach of the user and the project.
-* There's no TLS interception, unless you've thought through what it means.  It needs a private certificate authority trusted inside the container, and it puts every request's contents in Squid's hands.
+* There's no TLS interception.  For that, use the seekrit gateway, whose analysis is its [attack vectors page](network-gateway-seekrit-attack-vectors.md).
+* Its `network-gateway-reads-tls` stays `'no'`, so it's never given the run's CA key.
+
+Its own weak points are on the [Squid gateway attack vectors](network-gateway-squid-attack-vectors.md) page.
+
+### Gateway: seekrit
+
+[`containers/network-gateway-seekrit`](../../containers/network-gateway-seekrit/) builds [seekrit-proxy](https://github.com/seekritdev/proxy) from a pinned upstream commit, with Surf Scoter's [patches](../../containers/network-gateway-seekrit/patches/), into a `scratch` image: the binary, and nothing else, not even a shell.  It runs as an unprivileged user (65532), with no capabilities, logs JSON to standard output (`scoter netlog` reads it), and stops on `SIGINT`.  It provides N2, backs up N3, and reads the hosts with `https` rules.
+
+[`gateway_seekrit.py`](../../scripts/gateway_seekrit.py) writes its configuration (`/user-space/gateway/seekrit-proxy.toml`):
+
+1. Refuse any host without a rule (`unmatched_host_policy = "deny"`).
+2. A `tls` rule's host is passed through untouched (`intercept = false`), on its rules' ports.
+3. An `https` or `http` rule's host is read, on its rule's port, with its methods; an `https` rule's `secrets` may be filled in (`allow`).
+4. Never put a secret into plain HTTP (`plaintext_injection = "refuse"`).
+5. Refuse destinations that resolve to private, loopback, link-local or special-purpose addresses (`[egress]`), connecting only to the address checked.
+6. Scrub the values it put into a request out of that request's response (`[redaction]`).
+7. Take the secrets after starting, once, over a socket in `/run/seekrit` (`[secrets] source = "inject"`).
+
+It refuses wildcard hosts, and one host with rules it can't tell apart.  The run's CA is at `/user-space/ca`, with `network-gateway-reads-tls: 'yes'`.  Once it starts, `network-gateway-post-start` ([`gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py)) reads your secret store and gives it the values the rules name.
+
+When changing it, keep these properties:
+
+* Every host without a rule refused, and `tls` hosts passed through, not read.
+* Secrets only over TLS, only to the exact hosts and methods of the rules naming them.
+* The secrets only ever in its memory: never in its configuration, environment, files or logs, nor on a command line.
+* The gateway unprivileged, without capabilities or a shell, and its build pinned by full commit hash, with every patch applied cleanly.
+* `network-gateway-reads-tls: 'yes'` for it, and the resources directory inside one only you can use.
+
+Its own weak points are on the [seekrit gateway attack vectors](network-gateway-seekrit-attack-vectors.md) page.
+
+### Gateway: Envoy
+
+[`containers/network-gateway-envoy`](../../containers/network-gateway-envoy/) runs [Envoy](https://www.envoyproxy.io)'s distroless image, pinned by digest: no shell, no package manager.  It runs as an unprivileged user (65532), with no capabilities, two worker threads, and its access log as JSON on standard output (`scoter netlog` reads it).  It provides N2, and backs up N3.  It passes `tls` rules through, on any port in `network-gateway-ports`, each rule on its own port, and reads `https` rules for exact hosts, on the ports in `network-gateway-tls-ports`, to check their methods.  It never fills in secrets.
+
+For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/v1.36.12/configuration/http/http_filters/dynamic_forward_proxy_filter), which resolves the requested host and connects to it.  Envoy's documentation warns that such a proxy is open to confused deputy attacks.  [`gateway_envoy.py`](../../scripts/gateway_envoy.py) writes its configuration (`/user-space/gateway/envoy.json`) so that:
+
+1. Only `CONNECT` is routed, over HTTP/1 only.
+2. Each rule is a route matching the request's whole `:authority`, port included: `host:port` exactly, or, for `*.domain`, a regular expression for its subdomains, at any depth, on that port (not the domain itself).  Case is ignored.  Anything else matches no route, and gets a 404.
+3. The host the route matched is the host that's resolved and dialled: nothing rewrites it, and nothing can hand the proxy another one (no host rewrites, no host from filter state, no port stripping, no other filters).
+4. A host is only resolved for a route that matched, so an unlisted name never reaches DNS.
+5. A `tls` tunnel is plain TCP: the proxy's cluster has no TLS of its own.
+6. A read host's `CONNECT` goes to an internal listener for that host and port alone, never through the dynamic forward proxy.  It ends the TLS connection with a certificate for that host, made for the run by `network-gateway-mk-leaf` and signed by the run's CA, and sends on only the requests whose `:authority` is that host, with the rules' methods; anything else gets a 403.  It sends them to a cluster that names the host, fixed, over TLS that checks the server's certificate against the system's CAs and the host's name.
+7. There's no admin interface, and only IPv4 addresses are looked up.
+
+When changing it, keep these properties, the [tests](../../scripts/tests/test_gateway_envoy.py) that check them, and:
+
+* Envoy stays unprivileged and without capabilities, its image pinned by digest.
+* Its `network-gateway-reads-tls` stays `'no'`: it's never given the run's CA key, only a certificate for each host it reads.  Those keys are in its configuration, which is readable by others, so the resources directory stays inside one only you can use.
+* A read host's HTTP/2 windows stay small, so a slow reader can't fill the gateway's memory.
+
+Its own weak points are on the [Envoy gateway attack vectors](network-gateway-envoy-attack-vectors.md) page.
 
 
 ## What this doesn't protect
@@ -138,7 +201,9 @@ When changing it, keep these properties:
 
 **Restarts need verification (N6).**  The firewall and gateway use `restart: unless-stopped`.  Confirm that if the firewall container restarts, the gateway can't keep carrying traffic without the rules in place.
 
-**Squid is a large attack surface.**  If it's subverted, N4 still limits it to TCP 443 on public addresses, but not to the allowed domains.
+**The gateway is a large attack surface.**  If it's subverted, N4 still limits it to TCP 443 on public addresses, but not to the allowed hosts.  A subverted seekrit gateway also holds the plaintext of the hosts it reads, your secrets and the run's CA key.
+
+**The seekrit gateway's secrets live in its memory.**  After a gateway restart, they're gone until `scoter gateway-post-start`; anyone who can `docker exec` into it can give it values of their own first.
 
 **The image's default list allows nothing.**  The gateway image has an empty `/user-space/egress-hosts.txt`, so its configuration parses; `scoter run` mounts the list it made over it.
 
@@ -148,9 +213,18 @@ When changing it, keep these properties:
 Run these against a running environment whenever you change any of these files.  The [containers README](../../containers/README.md) has more detail.
 
 1. From the dev container, an allowed domain works: `curl -sI https://github.com`.
-2. An unlisted domain is refused with a 403: `curl -sI https://example.com`.
+2. An unlisted domain is refused with a 403: `curl -sI https://example.com`.  `scoter netlog` shows it, refused.
 3. A direct connection fails: `curl -sI --noproxy '*' --connect-timeout 3 https://github.com`.
 4. External DNS fails: `getent hosts example.com`.
 5. The firewall table is loaded, and its drop counters move: `podman exec HOSTNAME-fr nft -a list table inet egress`.
 6. No container publishes a port: `podman port HOSTNAME`, and the same for `HOSTNAME-fr` and `HOSTNAME-ng`.
 7. Two environments started at once each get their own isolated network: `podman network ls`.
+
+With the seekrit gateway, also:
+
+8. A `tls` host shows its own certificate, not the run's CA: `curl -sv https://pypi.org/ 2>&1 | grep issuer`.
+9. A secret goes only where its rule says, and the container holds only the placeholder: `printenv NAME` shows `{{seekrit:NAME}}`, and `scoter netlog` shows the request `with NAME`.
+10. A method the rule doesn't give is refused with a 403, and a placeholder in a plain `http://` request too.
+11. No value shows in `podman inspect HOSTNAME-ng`, `podman logs HOSTNAME-ng`, or the gateway's configuration.
+
+[`07-seekrit-gateway`](../../integration-tests/07-seekrit-gateway/run.sh) checks these.

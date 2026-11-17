@@ -574,6 +574,41 @@ impl ProjectConfig {
     }
 }
 
+impl ProjectConfig {
+    /// The `egress` rules with `secrets` on a port that isn't one of
+    /// `tls_ports` (the setup's `dev-env: value-lists:
+    /// network-gateway-tls-ports`): the gateway may only read, and put
+    /// secrets into, TLS on those.
+    pub fn secret_port_problems(&self, tls_ports: &[u16]) -> Vec<ConfigError> {
+        let allowed = if tls_ports.is_empty() {
+            "none".to_string()
+        } else {
+            tls_ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        self.egress
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| !rule.secrets.is_empty() && !tls_ports.contains(&rule.port))
+            .map(|(i, rule)| {
+                ConfigError::new(
+                    Some(&self.path),
+                    &format!("{}.port", index_key("egress", i)),
+                    format!(
+                        "a rule with `secrets` must be on a port in your setup's `{}: value-lists: {}` ({allowed}), not {}",
+                        egress::GATEWAY_SECTION,
+                        egress::GATEWAY_TLS_PORTS,
+                        rule.port
+                    ),
+                )
+            })
+            .collect()
+    }
+}
+
 /// The errors for egress hosts (`egress[i].host` in `file`) that are a
 /// wildcard on a domain `refused` gives a reason for.
 pub fn wildcard_errors<'a>(

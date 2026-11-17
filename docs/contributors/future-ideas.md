@@ -53,3 +53,28 @@ When importing a `Dockerfile` and `dev-env.yaml` into the locked stage, the user
 Instead, that tag represents *what the Dockerfile references*, not the actual tag.  The import would use the user configuration prefix + a generated suffix and replace that in the Dockerfile.
 
 The import analysis would need to flag all Dockerfile `FROM` tags that do not have a listed parent.  These represent external parent images not directly under the user's review.
+
+
+## Reshuffle Surf Scoter Files
+
+The files in this repository grew organically as the design and ideas grew.  It now seems to make more sense to organize this as a monorepo.  That will make out-of-the-box usage of Surf Scoter harder - it means the build-scripts do more work.  However, it puts related things next to related things.  It will also make sub-project handling nicer for IDEs.
+
+- Python scripts kept together.  This allows for a `pyproject.toml` file and better build tool support.
+- All the rust programs together.  This will need 2 libraries (the host-bridge communication + the SUC format) and 4 executables.  Probably put them as a directory with each as separate Rust projects.
+- Installer as its own thing.  This will contain the defaults.  Maybe also the templates.
+- Containers in their own directory, like now.  To support the host-bridge executables, it'll need to have a local version (requires a copy into the directory) and one that pulls from GitHub.
+- Use proper `Makefile` splitting per directory.
+
+
+## Network Gateway Follow-ups
+
+Ideas left over from adding the seekrit gateway (see the [seekrit gateway's attack vectors](../security/network-gateway-seekrit-attack-vectors.md)):
+
+- **Port 80, and a test server.**  Opening TCP 80 in the firewall ([`egress.nft`](../../containers/firewall-router/egress.nft)), with `dev-env: value-lists: network-gateway-ports`, would let `http` rules work with the seekrit gateway; secrets still never go over it.  With an allowed test-server CIDR (seekrit's `[egress] allow_cidr`), integration tests could run their own server to check what the gateway lets through, refuses, and sends.
+- **Wildcard hosts with the seekrit gateway.**  seekrit-proxy matches hosts exactly, so the gateway refuses `*.` rules.  A patch for suffix matching, with the same public-suffix refusals as the generator, would let it take them.
+- **Name constraints on the run's CA.**  The dev container trusts the run's CA for every host.  Limiting it to the hosts with `https` rules (X.509 name constraints) would stop a stolen key from intercepting anything else.
+- **Per-gateway hardening in the compose file.**  `read_only: true` and a fixed `user:` suit the seekrit gateway, but not Squid, which writes at run time; the compose file has one gateway service for both.
+- **Paths in egress rules.**  seekrit-proxy can limit a rule to paths as well as methods, which would narrow what a secret can be used for.
+- **Upstream the patches.**  The ports (0001) and CA loading (0006) patches stand alone, and fix upstream behavior; the fewer patches, the less rebasing.
+- **An OpenTelemetry collector.**  seekrit-proxy can export traces and metrics; a collector beside the gateway would give `scoter netlog` history beyond the container's log.
+- **A corporate TLS-inspection CA.**  On a network that re-signs TLS, the seekrit gateway can't verify the hosts it reads (it trusts only its built-in roots).  An `upstream_ca` setting, from the user's setup, would add theirs.

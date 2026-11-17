@@ -49,6 +49,7 @@ The locations below are the defaults; your [setup file](system-config-file.md) c
 | A running environment's record | `~/.config/surf-scoter.d/state/running-env.json` | The run ends, `scoter kill`, or `scoter cleanup` once its run is gone |
 | A running environment's configuration | `~/.config/surf-scoter.d/state/environments/HOST/` | The run ends, `scoter kill`, or `scoter cleanup` |
 | The project's state: its clone (`project-clone`), setup and resources directories | `~/.config/surf-scoter.d/state/projects/PROJECT-ID/` | `scoter run --clean-project-clone`, `scoter kill --clean-project-clone`, or `scoter cleanup --project-state` |
+| The network gateway's certificate authority for the run (its key signs certificates the dev container trusts) | The project's resources directory, `ca/` | The run ends, `scoter kill`, or `scoter cleanup` |
 | The dev container's persistent store | A volume in your container tool, `scoter-PROJECT-ID-store` | `scoter run --clean-persistent-store`, `scoter kill --clean-persistent-store`, or `scoter cleanup --persistent-stores` |
 | Your configurations, with a copy of their files | `~/.config/surf-scoter.d/verified/` | `scoter remove`, or `scoter cleanup` once the project's directory is gone |
 | An unlocked configuration, for you to edit | `~/.config/surf-scoter.d/unlocked/ENV-ID/` | `scoter lock`, or `scoter lock --revert` |
@@ -89,14 +90,6 @@ The dev container keeps its own files between runs, such as its IDE server, cach
 * `scoter kill --clean-persistent-store` removes it once the environment is stopped.
 * `scoter cleanup --persistent-stores` removes every one no running environment uses.
 * By hand: `docker volume ls --filter name=^scoter-` lists them, and `docker volume rm NAME` removes one.
-
-## Upgrading From Workspaces
-
-Before the project clone and the persistent store, each project had a *workspace*, in `state/workspaces`, which held both the clone and the container's home directory.  The new version doesn't read the old running environment records, so:
-
-* **Stop every environment before you upgrade**, with `scoter kill` (or `scoter kill --fetch BRANCH` to bring back what's in its workspace first).
-* If you upgraded with one still running, stop its containers with your container tool (`docker ps` lists them, named `scoter-...`), then delete `~/.config/surf-scoter.d/state/running-env.json`.
-* Fetch anything you need from the old workspaces, then delete `~/.config/surf-scoter.d/state/workspaces`.  Nothing uses it any more, and `scoter cleanup` doesn't look there.
 
 ## Configurations
 

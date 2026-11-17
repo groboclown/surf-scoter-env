@@ -39,7 +39,7 @@ def suc(
         "resolved": {
             "dev-env": {"values": {
                 "firewall-router-image": "local-surf-scoter/firewall-router:latest",
-                "network-gateway-image": "local-surf-scoter/network-gateway:latest",
+                "network-gateway-image": "local-surf-scoter/network-gateway-squid:latest",
                 "dev-env-image-prefix": "local-surf-scoter/",
                 "network-gateway-config-mount": "/user-space",
                 "pids-limit": "128", "mem-limit": "4g", "cpus": "2", "logging-max-size": "10m",
@@ -84,6 +84,8 @@ class EnvFileTest(unittest.TestCase):
             config=config, file=file, host="scoter-me-p",
             clone_dir=Path("/state/projects/p/project-clone"), volume="scoter-p-store",
             settings_dir=Path(settings), gateway_config=Path("/state/resources/gateway-config"),
+            gateway_ca_dir=Path("/state/resources/gateway-no-ca"),
+            ca_cert=Path("/state/resources/ca/gateway-ca.pem"), secret_names=["GITHUB_TOKEN", "NPM_TOKEN"],
         )
         values: dict[str, str] = {}
         for line in file.read_text(encoding="utf-8").splitlines():
@@ -102,6 +104,9 @@ class EnvFileTest(unittest.TestCase):
         self.assertEqual(values["SETTINGS_CONTAINER"], "/setup")
         self.assertEqual(values["FIREWALL_ROUTER"], "local-surf-scoter/firewall-router:latest")
         self.assertNotIn("WORKSPACE_HOST", values)
+        self.assertEqual(values["GATEWAY_CA_HOST"], "/state/resources/gateway-no-ca")
+        self.assertEqual(values["GATEWAY_CA_CERT_HOST"], "/state/resources/ca/gateway-ca.pem")
+        self.assertEqual(values["SECRET_NAMES"], "GITHUB_TOKEN NPM_TOKEN")
 
     def test_project_clone_override(self) -> None:
         """The project file's `container: mounts: project-clone` takes the container's place."""

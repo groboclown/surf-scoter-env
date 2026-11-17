@@ -53,7 +53,16 @@ docker:
         inspect-image: ${exec} image inspect {x:name} --format json
         inspect-container: ${exec} inspect --format json {x:name}
         image-logs: ${exec} logs {x:name}
+        # `logs-follow`, when set, follows a container's log as it grows, for
+        # `scoter netlog --follow`: `${exec} logs --follow {x:name}`.  Some
+        # container tools can't (Podman on WSL2), so it isn't set, and netlog
+        # reads the log again every few seconds instead.
         kill-container: ${exec} kill {x:container}
+        # Runs a program in a running container, with `scoter`'s input as its
+        # standard input: the command goes after these arguments.  The network
+        # gateway's secrets go this way, never on a command line or in the
+        # container's environment.  No `-t`: a terminal would echo the input.
+        exec-stdin: ${exec} exec -i {x:container}
         # For `scoter cleanup --images`: the images whose name matches
         # `{x:pattern}` (such as `local-surf-scoter/*`), one `REPOSITORY:TAG` a
         # line; removing one; and removing the layers no image uses any more.
@@ -154,6 +163,16 @@ project-state:
         # The clone is the directory itself, mounted at the dev container's
         # `mounts: project-clone`.  Nothing the container can write is above it.
         project-clone-dir: ${project-state-dir}/project-clone
+        # Your secret store for the project (TOML; see docs/system-config-file.md):
+        # the values of the secrets its egress rules name (`secrets: [NAME]`), or
+        # a seekrit.dev token that gives them.
+        # Yours alone: you write it, `scoter` only reads it, when the gateway
+        # starts, and never copies it, mounts it or records what's in it.  Only
+        # this path is in the configuration.  Keep it outside the project, its
+        # clone and `project-state-dir`, readable only by you.  Without it, a
+        # rule that names a secret stops the run.  Point several projects at one
+        # file to share their secrets.
+        secret-store: ${scoter:user-dir}/secrets/${scoter:project-id}.toml
     values:
         # The container volume mounted at the dev container's `mounts:
         # persistent-store`: the container's own files, kept between runs.  It
@@ -304,14 +323,24 @@ file-vcs:
 
 # Information for dealing with developer environments.
 dev-env:
+    programs:
+        openssl: openssl
+    # The network gateway is Squid (`containers/network-gateway-squid`).  The
+    # others are seekrit-proxy (`containers/network-gateway-seekrit`), which can
+    # also look inside TLS to check a request and fill in secrets, and Envoy
+    # (`containers/network-gateway-envoy`), which passes `tls` rules through
+    # and reads `https` rules, checking their methods, without secrets.  A
+    # gateway is chosen by these settings together: `paths: network-gateway`, `values: network-gateway-image`,
+    # `network-gateway-name` and `network-gateway-config-mount`, and
+    # `runs: network-gateway-write-config`.
     paths:
         firewall-router: ${scoter:distribution-dir}/containers/firewall-router
-        network-gateway: ${scoter:distribution-dir}/containers/network-gateway
+        network-gateway: ${scoter:distribution-dir}/containers/network-gateway-squid
 
         docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
     values:
         firewall-router-image: ${dev-env-image-prefix}firewall-router
-        network-gateway-image: ${dev-env-image-prefix}network-gateway
+        network-gateway-image: ${dev-env-image-prefix}network-gateway-squid
         dev-env-image-prefix: local-surf-scoter/
 
         # Limits for the docker-compose file.
@@ -334,16 +363,147 @@ dev-env:
         # `network-gateway-write-config` makes (the docker-compose file mounts it
         # there, read-only).
         network-gateway-config-mount: /user-space/egress-hosts.txt
+        # Whether the gateway looks inside TLS, and so is given the run's CA key.
+        # Squid doesn't: it gets an empty directory in its place.
+        network-gateway-reads-tls: 'no'
+        # How long, in seconds, `network-gateway-post-start` waits for the
+        # gateway's container to run and take commands after `compose up`: it
+        # can take minutes, more so the first time, or on a slow machine.
+        network-gateway-start-seconds: 300
+    value-lists:
+        # The TCP ports the gateway's firewall lets out (containers/firewall-router/
+        # egress.nft).  An egress rule on any other port is refused: the gateway
+        # can't let out what the firewall drops.  Adding a port here doesn't open
+        # it; the firewall has to change with it.
+        network-gateway-ports:
+            - '443'
+        # Of those, the ports where a gateway that looks inside TLS may do so,
+        # and so where `https` rules (and the secrets they carry) are allowed.
+        # The gateway always talks TLS to the upstream on them.
+        network-gateway-tls-ports:
+            - '443'
     runs:
+        # A new certificate authority for each run, which a gateway that looks
+        # inside TLS signs its certificates with: the certificate
+        # (`{x:ca-cert}`), which the dev container trusts, and its private key
+        # (`{x:ca-key}`, PKCS#8), which only the gateway reads.  `scoter run`
+        # makes one whatever the gateway, and removes it when the run ends.
+        network-gateway-mk-ca:
+            - ${openssl}
+            - req
+            - -x509
+            - -newkey
+            - ec
+            - -pkeyopt
+            - ec_paramgen_curve:P-256
+            - -nodes
+            - -keyout
+            - '{x:ca-key}'
+            - -out
+            - '{x:ca-cert}'
+            - -days
+            - '30'
+            - -subj
+            - /CN=Surf Scoter network gateway CA
+            - -addext
+            - basicConstraints=critical,CA:TRUE
+            - -addext
+            - keyUsage=critical,keyCertSign,cRLSign
+        # For a gateway that reads TLS without the CA's key (Envoy): a
+        # certificate for one host (`{x:subject}`, `/CN=HOST`, and `{x:san}`,
+        # `subjectAltName=DNS:HOST`), signed by the run's CA (`{x:ca-cert}`,
+        # `{x:ca-key}`), written with its key to `{x:leaf-cert}` and
+        # `{x:leaf-key}`.  The gateway's `network-gateway-write-config` runs it,
+        # once for each host it reads.  Needs OpenSSL 3.0 or later.
+        network-gateway-mk-leaf:
+            - ${openssl}
+            - req
+            - -x509
+            - -CA
+            - '{x:ca-cert}'
+            - -CAkey
+            - '{x:ca-key}'
+            - -newkey
+            - ec
+            - -pkeyopt
+            - ec_paramgen_curve:P-256
+            - -nodes
+            - -keyout
+            - '{x:leaf-key}'
+            - -out
+            - '{x:leaf-cert}'
+            - -days
+            - '30'
+            - -subj
+            - '{x:subject}'
+            - -addext
+            - '{x:san}'
+            - -addext
+            - basicConstraints=critical,CA:FALSE
+            - -addext
+            - keyUsage=critical,digitalSignature
+            - -addext
+            - extendedKeyUsage=serverAuth
         # Given the universal configuration file (`{x:universal}`) and where to
         # write (`{x:output}`), writes the gateway's configuration from the egress
         # rules, and prints JSON saying what it enforces and what it refuses.  It
-        # exits with 1, writing nothing, when it refuses any rule.
+        # exits with 1, writing nothing, when it refuses any rule.  The run's CA
+        # is `{x:ca-cert}` and `{x:ca-key}`, for a gateway that needs them.
         network-gateway-write-config:
             - ${python:script}
             - ${scoter:distribution-bin-dir}/gateway_squid.py
             - '{x:universal}'
             - '{x:output}'
+        # `network-gateway-post-start`, when set, runs once the gateway has
+        # started, with the universal configuration file (`{x:universal}`) and
+        # the gateway's container (`{x:gateway-container}`): for a gateway that
+        # needs something after it starts, such as its secrets.  Squid needs
+        # nothing, so it isn't set.  When it fails, the environment stops.
+        # `scoter gateway-post-start` runs it again, after the gateway restarts.
+
+    # The seekrit gateway, in place of Squid: copy these into your setup to
+    # replace the settings above.
+    #
+    # paths:
+    #     network-gateway: ${scoter:distribution-dir}/containers/network-gateway-seekrit
+    # values:
+    #     network-gateway-image: ${dev-env-image-prefix}network-gateway-seekrit
+    #     network-gateway-name: seekrit
+    #     network-gateway-config-mount: /user-space/gateway/seekrit-proxy.toml
+    #     network-gateway-reads-tls: 'yes'
+    # runs:
+    #     network-gateway-write-config:
+    #         - ${python:script}
+    #         - ${scoter:distribution-bin-dir}/gateway_seekrit.py
+    #         - '{x:universal}'
+    #         - '{x:output}'
+    #     network-gateway-post-start:
+    #         - ${python:script}
+    #         - ${scoter:distribution-bin-dir}/gateway_postrun_seekrit.py
+    #         - '{x:universal}'
+    #         - '{x:gateway-container}'
+
+    # The Envoy gateway, in place of Squid: copy these into your setup to
+    # replace the settings above.  It passes `tls` rules through, and reads
+    # `https` rules for exact hosts, with a certificate for each from
+    # `network-gateway-mk-leaf`; it never holds the CA's key, so
+    # `network-gateway-reads-tls` stays 'no'.
+    #
+    # paths:
+    #     network-gateway: ${scoter:distribution-dir}/containers/network-gateway-envoy
+    # values:
+    #     network-gateway-image: ${dev-env-image-prefix}network-gateway-envoy
+    #     network-gateway-name: envoy
+    #     network-gateway-config-mount: /user-space/gateway/envoy.json
+    #     network-gateway-reads-tls: 'no'
+    # runs:
+    #     network-gateway-write-config:
+    #         - ${python:script}
+    #         - ${scoter:distribution-bin-dir}/gateway_envoy.py
+    #         - '{x:universal}'
+    #         - '{x:output}'
+    #         - '{x:ca-cert}'
+    #         - '{x:ca-key}'
 
 
 # What the checks on a configuration look for (`scoter pull`, `scoter lock`,
@@ -819,7 +979,14 @@ verification:
             - project-state:values:*
             # The network: the gateway, its configuration, and the containers.
             - dev-env:values:network-gateway-name
+            - dev-env:values:network-gateway-reads-tls
+            - dev-env:value-lists:network-gateway-ports
+            - dev-env:value-lists:network-gateway-tls-ports
             - dev-env:runs:network-gateway-write-config
+            - dev-env:runs:network-gateway-mk-ca
+            - dev-env:runs:network-gateway-mk-leaf
+            - dev-env:runs:network-gateway-post-start
+            - docker:runs:exec-stdin
             - dev-env:paths:docker-compose
             - dev-env:paths:firewall-router
             - dev-env:paths:network-gateway

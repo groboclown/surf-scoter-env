@@ -79,7 +79,7 @@ The compose file does **not** set a read-only root file system, size limits on w
 * It accepts only public key authentication, only for the `ubuntu` user, never root, without PAM.
 * It turns off agent forwarding, X11 forwarding, tunnels and Unix socket forwarding, and refuses remote listeners (`PermitListen none`).
 * It allows TCP forwarding, for IDE port forwarding.
-* It sets the proxy variables for SSH sessions, which start with a fresh environment.
+* It sets the proxy variables for SSH sessions, which start with a fresh environment, and the trust of the run's gateway CA (`SSL_CERT_FILE` and the like, pointing at a bundle of the system's CAs and the run's), and a `NAME={{seekrit:NAME}}` placeholder for each secret the egress rules name.  The start-up script makes these, checking each name, so nothing else reaches the configuration; the placeholders are names, never values.
 * It logs at `VERBOSE`.
 
 On the host side, `scoter` gives each launch a host key in the setup directory and writes it into your `known_hosts` under the container's name, with `StrictHostKeyChecking yes`.  Your client key (`~/.ssh/scoter-dev-container` by default) has no passphrase.  It only opens dev containers, and never enters one.

@@ -169,6 +169,20 @@ def _project_roots(config: UserConfig) -> list[tuple[str, Path]]:
     return roots
 
 
+def inside_project(config: UserConfig, path: Path) -> str | None:
+    """Which of the project's locations `path` is in, if any, once symlinks are resolved.
+
+    The project directory, its files directory, its clone, the repository
+    holding it, and the project's state directory (which holds the clone):
+    whatever's there, the project, or its container, could have written.
+    """
+    roots = _project_roots(config)
+    state = config.optional_path("project-state", "project-state-dir")
+    if state is not None:
+        roots.append(("the project's state directory", state))
+    return _inside(path, roots)
+
+
 def _inside(path: Path, roots: Sequence[tuple[str, Path]]) -> str | None:
     """The name of the root `path` is in, once symlinks are resolved."""
     real = Path(os.path.realpath(path))

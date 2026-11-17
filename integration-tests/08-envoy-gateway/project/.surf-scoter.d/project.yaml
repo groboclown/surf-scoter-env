@@ -1,0 +1,9 @@
+# A sample project for the Envoy gateway: the distribution's dev-env container
+# (by name), in a Git repository, reading one host (GET only), and passing
+# the subdomains of another through.
+container:
+  dev-container: dev-env
+vcs: git
+egress:
+  - {host: registry.npmjs.org, protocol: https, methods: [GET]}
+  - {host: '*.github.com', protocol: tls}

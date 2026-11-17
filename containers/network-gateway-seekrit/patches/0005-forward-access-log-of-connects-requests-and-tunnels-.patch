@@ -1,0 +1,860 @@
+From ee985362785a81d4b4f39204497e4df1df4bfb38 Mon Sep 17 00:00:00 2001
+From: Groboclown <groboclown@gmail.com>
+Date: Sat, 7 Nov 2026 18:00:37 -0600
+Subject: [PATCH 5/5] forward: access log of connects, requests, and tunnels;
+ JSON log lines
+
+Add an access log on the `seekrit_access` target, at info, for the
+forward plane:
+
+- `event="connect"` for every CONNECT decision: host, port, action
+  (intercept, tunnel, deny) and the reason that decided it (rule,
+  tunnel_rule, unmatched_tunnel, no_rule, port_not_allowed,
+  egress_blocked).
+- `event="request"` for every request the plane answers, plain http://
+  and intercepted alike: plane, method, host, port, path without the
+  query string, status, time until the response started, and the names
+  of the secrets injected (carried from `inject_and_forward` on a
+  response extension).
+- `event="tunnel_closed"` for every blind tunnel: bytes each way and
+  duration, or the error that ended it.
+
+Add `SEEKRIT_LOG_FORMAT=json` to seekrit-telemetry's `install_subscriber`
+(both the OTel and the no-OTel builds): one JSON object per line, with an
+event's fields flattened beside timestamp, level, and target, and spans
+left out so a collector can filter on target and fields alone. This
+enables tracing-subscriber's `json` feature (adds tracing-serde).
+
+What it prevents:
+
+- Traffic passing unrecorded. Before, a blind tunnel or an allowed
+  request left no line at info level; only denials and injections did.
+  Without an OTLP collector there was no record of where a workload
+  went, or how much it sent.
+- Logged secrets. Paths are recorded as the workload sent them, before
+  substitution, so they can name a placeholder but never hold a value;
+  query strings, where tokens and identifiers usually sit, are dropped;
+  injected secrets appear by name only. Logged paths are capped at 2048
+  characters so a workload cannot inflate the log.
+
+tests/access_log.rs drives the real binary with SEEKRIT_LOG_FORMAT=json
+and checks every event kind from its stdout, and that neither an
+injected value nor a query string appears in stdout or stderr.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                          |  13 ++
+ README.md                           |  30 +++
+ src/forward.rs                      | 164 +++++++++++++--
+ tests/access_log.rs                 | 313 ++++++++++++++++++++++++++++
+ vendor/seekrit-telemetry/Cargo.lock |  32 +++
+ vendor/seekrit-telemetry/Cargo.toml |   4 +-
+ vendor/seekrit-telemetry/src/imp.rs |   3 +-
+ vendor/seekrit-telemetry/src/lib.rs |  40 +++-
+ 8 files changed, 583 insertions(+), 16 deletions(-)
+ create mode 100644 tests/access_log.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 6855ca1..e630d94 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2196,6 +2196,16 @@ dependencies = [
+  "web-time",
+ ]
+ 
++[[package]]
++name = "tracing-serde"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
++dependencies = [
++ "serde",
++ "tracing-core",
++]
++
+ [[package]]
+ name = "tracing-subscriber"
+ version = "0.3.23"
+@@ -2206,12 +2216,15 @@ dependencies = [
+  "nu-ansi-term",
+  "once_cell",
+  "regex-automata",
++ "serde",
++ "serde_json",
+  "sharded-slab",
+  "smallvec",
+  "thread_local",
+  "tracing",
+  "tracing-core",
+  "tracing-log",
++ "tracing-serde",
+ ]
+ 
+ [[package]]
+diff --git a/README.md b/README.md
+index 812f17d..10e20b0 100644
+--- a/README.md
++++ b/README.md
+@@ -396,3 +396,33 @@ Build with `--no-default-features` to compile telemetry out entirely
+ (+538 KiB in this binary).
+ 
+ Full guide: <https://seekrit.dev/docs/guides/telemetry>
++
++### Access log
++
++Without a collector, the forward proxy also writes an access log to stdout on
++the `seekrit_access` target, at `info`:
++
++- `event="connect"`: each `CONNECT` decision, with `host`, `port`, `action`
++  (`intercept`, `tunnel`, or `deny`), and `reason` (`rule`, `tunnel_rule`,
++  `unmatched_tunnel`, `no_rule`, `port_not_allowed`, `egress_blocked`).
++- `event="request"`: each request the forward plane answered, with `plane`
++  (`http` or `intercept`), `method`, `host`, `port`, `path` (without the query
++  string), `status`, `duration_ms` (until the response started), and `injected`
++  (comma-separated secret **names**).
++- `event="tunnel_closed"`: each blind tunnel, with `bytes_up`, `bytes_down`, and
++  `duration_ms`, or `error`.
++
++Set `SEEKRIT_LOG_FORMAT=json` for one JSON object per line, with an event's
++fields at the top level beside `timestamp`, `level`, and `target`:
++
++```sh
++SEEKRIT_LOG_FORMAT=json RUST_LOG=warn,seekrit_access=info seekrit-proxy
++```
++
++```json
++{"timestamp":"…","level":"INFO","message":"connect","event":"connect","host":"pypi.org","port":443,"action":"tunnel","reason":"tunnel_rule","target":"seekrit_access"}
++```
++
++Paths are logged as the workload sent them, before substitution, so they can
++hold a placeholder's name but never a value. They can still carry identifiers;
++filter the target out if that matters more than the record.
+diff --git a/src/forward.rs b/src/forward.rs
+index 34f1e42..6862353 100644
+--- a/src/forward.rs
++++ b/src/forward.rs
+@@ -297,7 +297,19 @@ async fn outer(req: Request<Incoming>, state: ForwardState) -> Result<Response<B
+     if req.method() == Method::CONNECT {
+         Ok(handle_connect(req, state))
+     } else {
+-        Ok(handle_absolute_http(req, state).await)
++        let method = req.method().clone();
++        let host = req.uri().host().unwrap_or("").to_ascii_lowercase();
++        let port = req.uri().port_u16().unwrap_or(80);
++        let path = req.uri().path().to_string();
++        Ok(access_request(
++            "http",
++            method,
++            &host,
++            port,
++            &path,
++            handle_absolute_http(req, state),
++        )
++        .await)
+     }
+ }
+ 
+@@ -306,6 +318,7 @@ async fn outer(req: Request<Incoming>, state: ForwardState) -> Result<Response<B
+ /// refuse (unmatched + deny policy).
+ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body> {
+     let Some(authority) = req.uri().authority().cloned() else {
++        access_connect("", 0, "deny", "bad_request");
+         return text(StatusCode::BAD_REQUEST, "CONNECT requires an authority");
+     };
+     let host = authority.host().to_ascii_lowercase();
+@@ -321,6 +334,7 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+         state
+             .metrics
+             .record_request(PLANE_FORWARD, "egress_blocked");
++        access_connect(&host, port, "deny", "egress_blocked");
+         return text(StatusCode::FORBIDDEN, &e.to_string());
+     }
+ 
+@@ -328,11 +342,13 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+     // whatever the unmatched policy: blind-tunnelling a ruled host on another
+     // port would step around that host's rules entirely.
+     if let Some(refusal) = refuse_port(&state, &host, port) {
++        access_connect(&host, port, "deny", "port_not_allowed");
+         return refusal;
+     }
+ 
+     let is_ruled = state.intercepts(&host);
+     if is_ruled {
++        access_connect(&host, port, "intercept", "rule");
+         // MITM: on upgrade, terminate TLS with a minted cert and serve.
+         let st = state.clone();
+         let host_c = host.clone();
+@@ -352,13 +368,21 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+     // A tunnel-only rule (`intercept = false`) allows the host without reading
+     // it, so `unmatched_host_policy = deny` can still name hosts that need no
+     // inspection: no minted cert, no CA trust in the workload, no plaintext here.
+-    let tunnel = state.fwd().tunnels(&host) || state.fwd().unmatched == UnmatchedPolicy::Tunnel;
+-    if !tunnel {
++    let reason = if state.fwd().tunnels(&host) {
++        Some("tunnel_rule")
++    } else if state.fwd().unmatched == UnmatchedPolicy::Tunnel {
++        Some("unmatched_tunnel")
++    } else {
++        None
++    };
++    let Some(reason) = reason else {
++        access_connect(&host, port, "deny", "no_rule");
+         return text(
+             StatusCode::FORBIDDEN,
+             &format!("host {host:?} has no rule and unmatched_host_policy = deny"),
+         );
+-    }
++    };
++    access_connect(&host, port, "tunnel", reason);
+ 
+     // Blind-tunnel: never decrypt, just splice bytes to the real host.
+     // Never decrypted is not never checked — an unruled host is exactly
+@@ -368,8 +392,31 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+     tokio::spawn(async move {
+         match hyper::upgrade::on(req).await {
+             Ok(upgraded) => {
+-                if let Err(e) = blind_tunnel(upgraded, host, port, egress).await {
+-                    debug!("tunnel ended: {e}");
++                let started = std::time::Instant::now();
++                let outcome = blind_tunnel(upgraded, &host, port, egress).await;
++                let duration_ms = started.elapsed().as_millis() as u64;
++                match outcome {
++                    Ok((bytes_up, bytes_down)) => info!(
++                        target: "seekrit_access",
++                        event = "tunnel_closed",
++                        %host,
++                        port,
++                        bytes_up,
++                        bytes_down,
++                        duration_ms,
++                        "tunnel closed"
++                    ),
++                    // Includes a destination the egress gate refused after the
++                    // CONNECT was accepted: the name resolved somewhere private.
++                    Err(e) => info!(
++                        target: "seekrit_access",
++                        event = "tunnel_closed",
++                        %host,
++                        port,
++                        duration_ms,
++                        error = %e,
++                        "tunnel closed"
++                    ),
+                 }
+             }
+             Err(e) => debug!("CONNECT upgrade failed: {e}"),
+@@ -378,6 +425,75 @@ fn handle_connect(req: Request<Incoming>, state: ForwardState) -> Response<Body>
+     established()
+ }
+ 
++/// The access log line for one `CONNECT` decision: `action` is `intercept`,
++/// `tunnel`, or `deny`, and `reason` says which rule or check decided.
++fn access_connect(host: &str, port: u16, action: &'static str, reason: &'static str) {
++    info!(
++        target: "seekrit_access",
++        event = "connect",
++        host,
++        port,
++        action,
++        reason,
++        "connect"
++    );
++}
++
++/// The secret names injected into a request, attached to its response so the
++/// access log can name them. Names only — never values.
++#[derive(Clone)]
++struct Injected(Vec<String>);
++
++/// The longest request path the access log records; longer ones are cut, so a
++/// workload cannot inflate the log with a megabyte of path.
++const MAX_LOGGED_PATH: usize = 2048;
++
++/// Run one request's handler and write its access log line: the method, host,
++/// port, and path (without the query string, which is where tokens and
++/// identifiers tend to sit), the status, how long until the response started,
++/// and the names of any secrets injected.
++///
++/// The path is the one the workload sent, before substitution, so it can hold a
++/// placeholder's *name* but never a value.
++async fn access_request<F>(
++    plane: &'static str,
++    method: Method,
++    host: &str,
++    port: u16,
++    path: &str,
++    handler: F,
++) -> Response<Body>
++where
++    F: std::future::Future<Output = Response<Body>>,
++{
++    let started = std::time::Instant::now();
++    let resp = handler.await;
++    let duration_ms = started.elapsed().as_millis() as u64;
++    let injected = resp
++        .extensions()
++        .get::<Injected>()
++        .map(|i| i.0.join(","))
++        .unwrap_or_default();
++    let path = match path.char_indices().nth(MAX_LOGGED_PATH) {
++        Some((cut, _)) => &path[..cut],
++        None => path,
++    };
++    info!(
++        target: "seekrit_access",
++        event = "request",
++        plane,
++        method = %method,
++        host,
++        port,
++        path,
++        status = resp.status().as_u16(),
++        duration_ms,
++        injected = %injected,
++        "request"
++    );
++    resp
++}
++
+ /// The refusal for a ruled host on a port its rules do not give, if it is one.
+ ///
+ /// Only hosts with a rule in this file are limited; an unruled host is left to
+@@ -424,7 +540,22 @@ async fn mitm_serve(
+     let svc = service_fn(move |req| {
+         let st = state.clone();
+         let host = host.clone();
+-        async move { Ok::<_, Infallible>(mitm_forward(req, host, port, st).await) }
++        async move {
++            let method = req.method().clone();
++            let path = req.uri().path().to_string();
++            let log_host = host.clone();
++            Ok::<_, Infallible>(
++                access_request(
++                    "intercept",
++                    method,
++                    &log_host,
++                    port,
++                    &path,
++                    mitm_forward(req, host, port, st),
++                )
++                .await,
++            )
++        }
+     });
+     http1::Builder::new()
+         .serve_connection(TokioIo::new(tls), svc)
+@@ -437,20 +568,21 @@ async fn mitm_serve(
+ /// The gate resolves the name and hands back the addresses it approved, and those
+ /// are what get dialled — resolving again here would hand a rebind exactly the
+ /// window this is meant to close.
++/// Returns the bytes copied each way: client to upstream, then upstream to
++/// client.
+ async fn blind_tunnel(
+     upgraded: Upgraded,
+-    host: String,
++    host: &str,
+     port: u16,
+     egress: Arc<crate::egress::Egress>,
+-) -> std::io::Result<()> {
++) -> std::io::Result<(u64, u64)> {
+     let addrs = egress
+-        .resolve(&host, port)
++        .resolve(host, port)
+         .await
+         .map_err(|e| std::io::Error::other(e.to_string()))?;
+     let mut client = TokioIo::new(upgraded);
+     let mut server = TcpStream::connect(&addrs[..]).await?;
+-    tokio::io::copy_bidirectional(&mut client, &mut server).await?;
+-    Ok(())
++    tokio::io::copy_bidirectional(&mut client, &mut server).await
+ }
+ 
+ /// One decrypted HTTPS request on a MITM'd tunnel — inject and forward over TLS.
+@@ -847,7 +979,13 @@ async fn inject_and_forward(
+     span.record("http.response.status_code", resp.status().as_u16());
+ 
+     let redactor = crate::redact::for_response(state.config.redaction.as_ref(), &injected, store);
+-    streaming_response(resp, redactor, state, audit_host, &span)
++    let mut response = streaming_response(resp, redactor, state, audit_host, &span);
++    if !injected.is_empty() {
++        response
++            .extensions_mut()
++            .insert(Injected(injected.into_iter().collect()));
++    }
++    response
+ }
+ 
+ /// Build a lookup closure over the request's gate + the secret store
+diff --git a/tests/access_log.rs b/tests/access_log.rs
+new file mode 100644
+index 0000000..0de8062
+--- /dev/null
++++ b/tests/access_log.rs
+@@ -0,0 +1,313 @@
++//! The `seekrit_access` log, as the real binary writes it with
++//! `SEEKRIT_LOG_FORMAT=json`.
++//!
++//! Proves, from the process's actual stdout:
++//!   1. every line is one JSON object with `timestamp`, `level`, and `target`,
++//!      and an event's fields at the top level;
++//!   2. each `CONNECT` decision is logged: intercept, tunnel, and deny, with the
++//!      reason;
++//!   3. each answered request is logged with its plane, method, host, port,
++//!      path, status, and the *names* of injected secrets;
++//!   4. a closed tunnel is logged with the bytes it carried;
++//!   5. no secret value and no query string reaches the log.
++#![cfg(unix)]
++
++use std::collections::BTreeMap;
++use std::io::{BufRead, BufReader, Write};
++use std::net::SocketAddr;
++use std::path::PathBuf;
++use std::process::{Child, Command, Stdio};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use axum::routing::any;
++use axum::Router;
++use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
++use serde_json::Value;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::TcpListener;
++use tokio_rustls::TlsAcceptor;
++
++const SECRET: &str = "s3cr3t-value-for-the-access-log";
++const QUERY_TOKEN: &str = "query-token-never-logged";
++
++struct TempDir(PathBuf);
++
++impl TempDir {
++    fn new() -> TempDir {
++        // Short: the inject socket must fit a Unix socket address.
++        let dir = std::env::temp_dir().join(format!("sk-al-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        TempDir(dir)
++    }
++}
++
++impl Drop for TempDir {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.0);
++    }
++}
++
++/// Kills the proxy if a test assertion fails before it is collected.
++struct Proxy(Option<Child>);
++
++impl Drop for Proxy {
++    fn drop(&mut self) {
++        if let Some(child) = self.0.as_mut() {
++            let _ = child.kill();
++            let _ = child.wait();
++        }
++    }
++}
++
++async fn http_upstream() -> SocketAddr {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(async move {
++        axum::serve(listener, Router::new().fallback(any(|| async { "ok" })))
++            .await
++            .unwrap();
++    });
++    addr
++}
++
++/// A TLS server that answers any request with a fixed HTTP response. Only the
++/// tunnel test talks to it, through a blind tunnel the proxy cannot read.
++async fn tls_upstream() -> SocketAddr {
++    let key = rcgen::KeyPair::generate().unwrap();
++    let cert = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])
++        .unwrap()
++        .self_signed(&key)
++        .unwrap();
++    let der: CertificateDer<'static> = cert.der().clone();
++    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
++    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
++        rustls::crypto::ring::default_provider(),
++    ))
++    .with_safe_default_protocol_versions()
++    .unwrap()
++    .with_no_client_auth()
++    .with_single_cert(vec![der], key_der)
++    .unwrap();
++    let acceptor = TlsAcceptor::from(Arc::new(server));
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(async move {
++        while let Ok((tcp, _)) = listener.accept().await {
++            let acceptor = acceptor.clone();
++            tokio::spawn(async move {
++                if let Ok(mut tls) = acceptor.accept(tcp).await {
++                    let mut buf = [0u8; 1024];
++                    let _ = tls.read(&mut buf).await;
++                    let _ = tls
++                        .write_all(
++                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
++                        )
++                        .await;
++                    let _ = tls.shutdown().await;
++                }
++            });
++        }
++    });
++    addr
++}
++
++fn free_port() -> u16 {
++    std::net::TcpListener::bind("127.0.0.1:0")
++        .unwrap()
++        .local_addr()
++        .unwrap()
++        .port()
++}
++
++async fn wait_for(addr: SocketAddr, path: &std::path::Path) {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    while Instant::now() < deadline {
++        if path.exists() && tokio::net::TcpStream::connect(addr).await.is_ok() {
++            return;
++        }
++        tokio::time::sleep(Duration::from_millis(50)).await;
++    }
++    panic!("the proxy did not start listening");
++}
++
++#[tokio::test]
++async fn the_access_log_records_decisions_requests_and_tunnels_as_json() {
++    let dir = TempDir::new();
++    let socket = dir.0.join("i.sock");
++    let ca_cert = dir.0.join("ca.pem");
++    let http = http_upstream().await;
++    let tls = tls_upstream().await;
++    let listen: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
++
++    let config = dir.0.join("proxy.toml");
++    std::fs::write(
++        &config,
++        format!(
++            "[egress]\nallow_cidr=['127.0.0.0/8']\n\
++             [forward]\nlisten='{listen}'\nunmatched_host_policy='deny'\n\
++             ca_cert='{}'\nca_key='{}'\n\
++             [[forward.host]]\nmatch='localhost'\nallow=['API_KEY']\n\
++             [[forward.host]]\nmatch='127.0.0.1'\nintercept=false\n\
++             [secrets]\nsource='inject'\nsocket='{}'\n",
++            ca_cert.display(),
++            dir.0.join("ca-key.pem").display(),
++            socket.display(),
++        ),
++    )
++    .unwrap();
++
++    let bin = env!("CARGO_BIN_EXE_seekrit-proxy");
++    let mut proxy = Proxy(Some(
++        Command::new(bin)
++            .arg("--config")
++            .arg(&config)
++            .env("SEEKRIT_LOG_FORMAT", "json")
++            .env("RUST_LOG", "warn,seekrit_access=info")
++            .env_remove("SEEKRIT_TOKEN")
++            .stdout(Stdio::piped())
++            .stderr(Stdio::piped())
++            .spawn()
++            .unwrap(),
++    ));
++    wait_for(listen, &socket).await;
++
++    let mut inject = Command::new(bin)
++        .args(["inject", "--socket"])
++        .arg(&socket)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::null())
++        .spawn()
++        .unwrap();
++    inject
++        .stdin
++        .take()
++        .unwrap()
++        .write_all(format!(r#"{{"values": {{"API_KEY": "{SECRET}"}}}}"#).as_bytes())
++        .unwrap();
++    assert!(inject.wait().unwrap().success());
++
++    let proxy_url = format!("http://{listen}");
++    let ca = reqwest::Certificate::from_pem(&std::fs::read(&ca_cert).unwrap()).unwrap();
++    let agent = reqwest::Client::builder()
++        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
++        .add_root_certificate(ca)
++        .build()
++        .unwrap();
++
++    // Plain HTTP to a ruled host, with a secret injected and a query token.
++    let resp = agent
++        .get(format!(
++            "http://localhost:{}/v1/items?token={QUERY_TOKEN}",
++            http.port()
++        ))
++        .header("authorization", "Bearer {{seekrit:API_KEY}}")
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), 200);
++
++    // Intercepted HTTPS to the same host. The upstream there speaks plain HTTP,
++    // so the proxy's re-originated TLS fails and it answers 502 itself — still
++    // one intercepted request, logged.
++    let resp = agent
++        .get(format!("https://localhost:{}/v2/thing", http.port()))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), 502);
++
++    // A tunnel-only host, spliced through. The proxy never sees inside, so
++    // this agent accepts the upstream's self-signed certificate itself.
++    let tunnel_agent = reqwest::Client::builder()
++        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
++        .danger_accept_invalid_certs(true)
++        .build()
++        .unwrap();
++    let resp = tunnel_agent
++        .get(format!("https://127.0.0.1:{}/", tls.port()))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), 200);
++    assert_eq!(resp.text().await.unwrap(), "ok");
++    drop(tunnel_agent);
++
++    // A host with no rule.
++    assert!(agent.get("https://other.test/").send().await.is_err());
++
++    // Give the tunnel's close event a moment, then stop the proxy.
++    tokio::time::sleep(Duration::from_millis(300)).await;
++    let mut child = proxy.0.take().unwrap();
++    child.kill().unwrap();
++    child.wait().unwrap();
++    let mut stdout = String::new();
++    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
++    let mut stderr = String::new();
++    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
++
++    // 5. Nothing secret, anywhere in the process's output.
++    for (stream, text) in [("stdout", &stdout), ("stderr", &stderr)] {
++        assert!(!text.contains(SECRET), "a secret value reached {stream}");
++        assert!(
++            !text.contains(QUERY_TOKEN),
++            "a query string reached {stream}"
++        );
++    }
++
++    // 1. Every line is a JSON object with the standard fields.
++    let lines: Vec<BTreeMap<String, Value>> = BufReader::new(stdout.as_bytes())
++        .lines()
++        .map(|l| l.unwrap())
++        .filter(|l| !l.trim().is_empty())
++        .map(|l| serde_json::from_str(&l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
++        .collect();
++    for line in &lines {
++        for key in ["timestamp", "level", "target"] {
++            assert!(line.contains_key(key), "{key} missing from {line:?}");
++        }
++    }
++    let access: Vec<&BTreeMap<String, Value>> = lines
++        .iter()
++        .filter(|l| l["target"] == "seekrit_access")
++        .collect();
++    let find = |pred: &dyn Fn(&BTreeMap<String, Value>) -> bool| {
++        access
++            .iter()
++            .find(|l| pred(l))
++            .copied()
++            .unwrap_or_else(|| panic!("no matching access event in:\n{stdout}"))
++    };
++
++    // 2. CONNECT decisions.
++    let intercept = find(&|l| l["event"] == "connect" && l["action"] == "intercept");
++    assert_eq!(intercept["host"], "localhost");
++    assert_eq!(intercept["port"], http.port());
++    let tunnel = find(&|l| l["event"] == "connect" && l["action"] == "tunnel");
++    assert_eq!(tunnel["host"], "127.0.0.1");
++    assert_eq!(tunnel["port"], tls.port());
++    assert_eq!(tunnel["reason"], "tunnel_rule");
++    let deny = find(&|l| l["event"] == "connect" && l["action"] == "deny");
++    assert_eq!(deny["host"], "other.test");
++    assert_eq!(deny["reason"], "no_rule");
++
++    // 3. Requests, with injected names and no query string.
++    let plain = find(&|l| l["event"] == "request" && l["plane"] == "http");
++    assert_eq!(plain["method"], "GET");
++    assert_eq!(plain["host"], "localhost");
++    assert_eq!(plain["path"], "/v1/items");
++    assert_eq!(plain["status"], 200);
++    assert_eq!(plain["injected"], "API_KEY");
++    assert!(plain["duration_ms"].is_u64());
++    let mitm = find(&|l| l["event"] == "request" && l["plane"] == "intercept");
++    assert_eq!(mitm["path"], "/v2/thing");
++    assert_eq!(mitm["status"], 502);
++    assert_eq!(mitm["injected"], "");
++
++    // 4. The tunnel's close, with what it carried each way.
++    let closed = find(&|l| l["event"] == "tunnel_closed");
++    assert_eq!(closed["host"], "127.0.0.1");
++    assert!(!closed.contains_key("error"), "{closed:?}");
++    assert!(closed["bytes_up"].as_u64().unwrap() > 0, "{closed:?}");
++    assert!(closed["bytes_down"].as_u64().unwrap() > 0, "{closed:?}");
++}
+diff --git a/vendor/seekrit-telemetry/Cargo.lock b/vendor/seekrit-telemetry/Cargo.lock
+index 2632c34..b325103 100644
+--- a/vendor/seekrit-telemetry/Cargo.lock
++++ b/vendor/seekrit-telemetry/Cargo.lock
+@@ -692,6 +692,19 @@ dependencies = [
+  "syn 3.0.3",
+ ]
+ 
++[[package]]
++name = "serde_json"
++version = "1.0.154"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
++dependencies = [
++ "itoa",
++ "memchr",
++ "serde",
++ "serde_core",
++ "zmij",
++]
++
+ [[package]]
+ name = "sharded-slab"
+ version = "0.1.7"
+@@ -869,6 +882,16 @@ dependencies = [
+  "web-time",
+ ]
+ 
++[[package]]
++name = "tracing-serde"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
++dependencies = [
++ "serde",
++ "tracing-core",
++]
++
+ [[package]]
+ name = "tracing-subscriber"
+ version = "0.3.23"
+@@ -879,12 +902,15 @@ dependencies = [
+  "nu-ansi-term",
+  "once_cell",
+  "regex-automata",
++ "serde",
++ "serde_json",
+  "sharded-slab",
+  "smallvec",
+  "thread_local",
+  "tracing",
+  "tracing-core",
+  "tracing-log",
++ "tracing-serde",
+ ]
+ 
+ [[package]]
+@@ -1228,3 +1254,9 @@ dependencies = [
+  "quote",
+  "syn 3.0.3",
+ ]
++
++[[package]]
++name = "zmij"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+diff --git a/vendor/seekrit-telemetry/Cargo.toml b/vendor/seekrit-telemetry/Cargo.toml
+index 6c5a8e0..166aada 100644
+--- a/vendor/seekrit-telemetry/Cargo.toml
++++ b/vendor/seekrit-telemetry/Cargo.toml
+@@ -35,7 +35,9 @@ testing = ["otel", "opentelemetry_sdk/testing"]
+ [dependencies]
+ # Always present: every consumer logs, with or without OTLP export.
+ tracing = "0.1"
+-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
++# `json`: SEEKRIT_LOG_FORMAT=json writes one JSON object per log line, for
++# collectors that parse service logs (see `fmt_layers`).
++tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry", "json"] }
+ 
+ # The OpenTelemetry **API** is always linked; only the SDK and exporters are
+ # optional. That is what makes `--no-default-features` a drop-in: instruments
+diff --git a/vendor/seekrit-telemetry/src/imp.rs b/vendor/seekrit-telemetry/src/imp.rs
+index 4aa9e8b..8076a23 100644
+--- a/vendor/seekrit-telemetry/src/imp.rs
++++ b/vendor/seekrit-telemetry/src/imp.rs
+@@ -215,7 +215,8 @@ pub fn install_subscriber(telemetry: &Telemetry, default_filter: &str) {
+     // `try_init` so a subscriber already installed (tests) is not a panic.
+     let _ = tracing_subscriber::registry()
+         .with(filter)
+-        .with(tracing_subscriber::fmt::layer())
++        // Text or JSON lines to stdout, per SEEKRIT_LOG_FORMAT.
++        .with(crate::fmt_layer())
+         .with(otel_layer)
+         .with(log_layer)
+         .try_init();
+diff --git a/vendor/seekrit-telemetry/src/lib.rs b/vendor/seekrit-telemetry/src/lib.rs
+index 523f2eb..b17e688 100644
+--- a/vendor/seekrit-telemetry/src/lib.rs
++++ b/vendor/seekrit-telemetry/src/lib.rs
+@@ -60,6 +60,39 @@
+ #[cfg(feature = "otel")]
+ mod client;
+ 
++/// The environment variable that selects the log line format: `json` for one
++/// JSON object per line, anything else (or unset) for the human-readable text.
++pub const LOG_FORMAT_ENV: &str = "SEEKRIT_LOG_FORMAT";
++
++/// True when [`LOG_FORMAT_ENV`] asks for JSON log lines.
++pub fn json_logs() -> bool {
++    std::env::var(LOG_FORMAT_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("json"))
++}
++
++/// The stdout formatter: human-readable text, or (with
++/// `SEEKRIT_LOG_FORMAT=json`) one JSON object per line.
++///
++/// JSON lines put an event's fields at the top level (`flatten_event`) beside
++/// `timestamp`, `level`, and `target`, and leave out the enclosing spans: a log
++/// collector filtering on `target` and a field should not have to know which
++/// span an event happened to be emitted in.
++pub(crate) fn fmt_layer<S>() -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
++where
++    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
++{
++    if json_logs() {
++        Box::new(
++            tracing_subscriber::fmt::layer()
++                .json()
++                .flatten_event(true)
++                .with_current_span(false)
++                .with_span_list(false),
++        )
++    } else {
++        Box::new(tracing_subscriber::fmt::layer())
++    }
++}
++
+ #[cfg(feature = "otel")]
+ mod imp;
+ 
+@@ -96,7 +129,12 @@ mod imp {
+     pub fn install_subscriber(_telemetry: &Telemetry, default_filter: &str) {
+         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
++        use tracing_subscriber::layer::SubscriberExt;
++        use tracing_subscriber::util::SubscriberInitExt;
++        let _ = tracing_subscriber::registry()
++            .with(filter)
++            .with(crate::fmt_layer())
++            .try_init();
+     }
+ 
+     /// Without the SDK there is no span to reparent, so this is a no-op — the

@@ -13,7 +13,9 @@ GO ?= go
 LOCAL_CONTAINER_TAG_PREFIX ?= local-surf-scoter-env/
 DEV_ENV_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)dev-env:build
 FIREWALL_ROUTER_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)firewall-router:build
-NETWORK_GATEWAY_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway:build
+NETWORK_GATEWAY_SQUID_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway-squid:build
+NETWORK_GATEWAY_SEEKRIT_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway-seekrit:build
+NETWORK_GATEWAY_ENVOY_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway-envoy:build
 
 PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
@@ -206,7 +208,7 @@ dev-env-image:
 .PHONY: dev-env-clean
 clean: dev-env-clean
 dev-env-clean:
-	-docker rmi $(DEV_ENV_TAG)
+	-$(DOCKER) rmi $(DEV_ENV_TAG)
 
 
 ## firewall-router-image     Build the firewall-router image.
@@ -220,21 +222,47 @@ firewall-router-image:
 .PHONY: firewall-router-clean
 clean: firewall-router-clean
 firewall-router-clean:
-	-docker rmi $(FIREWALL_ROUTER_TAG)
+	-$(DOCKER) rmi $(FIREWALL_ROUTER_TAG)
 
 
-## network-gateway-image     Build the network-gateway image.
-.PHONY: network-gateway-image
-build: network-gateway-image
-image: network-gateway-image
-network-gateway-image:
-	cd containers/network-gateway && $(DOCKER) build -t $(NETWORK_GATEWAY_TAG) .
+## network-gateway-squid-image Build the Squid network-gateway image.
+.PHONY: network-gateway-squid-image
+build: network-gateway-squid-image
+image: network-gateway-squid-image
+network-gateway-squid-image:
+	cd containers/network-gateway-squid && $(DOCKER) build -t $(NETWORK_GATEWAY_SQUID_TAG) .
 
-## network-gateway-clean     Delete the local network-gateway image.
-.PHONY: network-gateway-clean
-clean: network-gateway-clean
-network-gateway-clean:
-	-docker rmi $(NETWORK_GATEWAY_TAG)
+## network-gateway-squid-clean Delete the local Squid network-gateway image.
+.PHONY: network-gateway-squid-clean
+clean: network-gateway-squid-clean
+network-gateway-squid-clean:
+	-$(DOCKER) rmi $(NETWORK_GATEWAY_SQUID_TAG)
+
+## network-gateway-seekrit-image Build the seekrit network-gateway image.
+.PHONY: network-gateway-seekrit-image
+build: network-gateway-seekrit-image
+image: network-gateway-seekrit-image
+network-gateway-seekrit-image:
+	cd containers/network-gateway-seekrit && $(DOCKER) build -t $(NETWORK_GATEWAY_SEEKRIT_TAG) .
+
+## network-gateway-seekrit-clean Delete the local seekrit network-gateway image.
+.PHONY: network-gateway-seekrit-clean
+clean: network-gateway-seekrit-clean
+network-gateway-seekrit-clean:
+	-$(DOCKER) rmi $(NETWORK_GATEWAY_SEEKRIT_TAG)
+
+## network-gateway-envoy-image Build the Envoy network-gateway image.
+.PHONY: network-gateway-envoy-image
+build: network-gateway-envoy-image
+image: network-gateway-envoy-image
+network-gateway-envoy-image:
+	cd containers/network-gateway-envoy && $(DOCKER) build -t $(NETWORK_GATEWAY_ENVOY_TAG) .
+
+## network-gateway-envoy-clean Delete the local Envoy network-gateway image.
+.PHONY: network-gateway-envoy-clean
+clean: network-gateway-envoy-clean
+network-gateway-envoy-clean:
+	-$(DOCKER) rmi $(NETWORK_GATEWAY_ENVOY_TAG)
 
 
 # ---------------------------------------------------------------------
@@ -341,22 +369,48 @@ target/sboms/surf-scoter-firewall-router.cdx.json: target/images/firewall-router
 		--output $@ \
 		$<
 
-target/images/firewall-router.tar: network-gateway-image target/images
+target/images/firewall-router.tar: firewall-router-image target/images
 	test -f $@ && rm $@ || true
 	$(DOCKER) save -o $@ $(FIREWALL_ROUTER_TAG)
 
-sbom: target/sboms/surf-scoter-network-gateway.cdx.json
-target/sboms/surf-scoter-network-gateway.cdx.json: target/images/network-gateway.tar
+sbom: target/sboms/surf-scoter-network-gateway-squid.cdx.json
+target/sboms/surf-scoter-network-gateway-squid.cdx.json: target/images/network-gateway-squid.tar
 	$(CDXGEN) -t docker --format cyclonedx \
 		--author "Surf Scoter Team" \
 		--project-version $(VERSION) \
-		--project-name "surf-scoter network-gateway" \
+		--project-name "surf-scoter network-gateway-squid" \
 		--output $@ \
 		$<
 
-target/images/network-gateway.tar: network-gateway-image target/images
+target/images/network-gateway-squid.tar: network-gateway-squid-image target/images
 	test -f $@ && rm $@ || true
-	$(DOCKER) save -o $@ $(NETWORK_GATEWAY_TAG)
+	$(DOCKER) save -o $@ $(NETWORK_GATEWAY_SQUID_TAG)
+
+sbom: target/sboms/surf-scoter-network-gateway-seekrit.cdx.json
+target/sboms/surf-scoter-network-gateway-seekrit.cdx.json: target/images/network-gateway-seekrit.tar
+	$(CDXGEN) -t docker --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter network-gateway-seekrit" \
+		--output $@ \
+		$<
+
+target/images/network-gateway-seekrit.tar: network-gateway-seekrit-image target/images
+	test -f $@ && rm $@ || true
+	$(DOCKER) save -o $@ $(NETWORK_GATEWAY_SEEKRIT_TAG)
+
+sbom: target/sboms/surf-scoter-network-gateway-envoy.cdx.json
+target/sboms/surf-scoter-network-gateway-envoy.cdx.json: target/images/network-gateway-envoy.tar
+	$(CDXGEN) -t docker --format cyclonedx \
+		--author "Surf Scoter Team" \
+		--project-version $(VERSION) \
+		--project-name "surf-scoter network-gateway-envoy" \
+		--output $@ \
+		$<
+
+target/images/network-gateway-envoy.tar: network-gateway-envoy-image target/images
+	test -f $@ && rm $@ || true
+	$(DOCKER) save -o $@ $(NETWORK_GATEWAY_ENVOY_TAG)
 
 target/sboms:
 	mkdir -p target/sboms
@@ -424,8 +478,26 @@ target/sboms/surf-scoter-firewall-router.scan.json: target/sboms/surf-scoter-fir
 	$(OSVSCANNER) scan source \
 		--lockfile $<
 
-scan: target/sboms/surf-scoter-network-gateway.scan.json
-target/sboms/surf-scoter-network-gateway.scan.json: target/sboms/surf-scoter-network-gateway.cdx.json
+scan: target/sboms/surf-scoter-network-gateway-squid.scan.json
+target/sboms/surf-scoter-network-gateway-squid.scan.json: target/sboms/surf-scoter-network-gateway-squid.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-network-gateway-seekrit.scan.json
+target/sboms/surf-scoter-network-gateway-seekrit.scan.json: target/sboms/surf-scoter-network-gateway-seekrit.cdx.json
+	-$(OSVSCANNER) scan source \
+		--lockfile $< \
+		--format json \
+		--output-file $@
+	$(OSVSCANNER) scan source \
+		--lockfile $<
+
+scan: target/sboms/surf-scoter-network-gateway-envoy.scan.json
+target/sboms/surf-scoter-network-gateway-envoy.scan.json: target/sboms/surf-scoter-network-gateway-envoy.cdx.json
 	-$(OSVSCANNER) scan source \
 		--lockfile $< \
 		--format json \

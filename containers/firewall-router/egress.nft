@@ -1,6 +1,6 @@
 # Outbound firewall for the gateway's network namespace (loaded by
-# entrypoint.sh).  Squid shares this namespace, so these rules govern what the
-# proxy may reach on behalf of the isolated network.  Rules live in their own
+# entrypoint.sh).  The gateway shares this namespace, so these rules govern what
+# the proxy may reach on behalf of the isolated network.  Rules live in their own
 # `inet` table (IPv4 + IPv6) so Docker's own tables and chains are untouched.
 table inet egress {
   # Destinations that must never be reached: private, loopback, link-local,

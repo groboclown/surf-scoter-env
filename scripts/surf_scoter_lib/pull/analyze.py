@@ -139,8 +139,13 @@ def _subject(finding: checks.Finding, staged: UserConfig, resolved: list[checks.
         r = next((r for r in resolved if r.index == index), None)
         return ("host-command", r.name if r else str(index), match.group(3), (r.executable or "") if r else "")
     egress = staged.project_egress()
-    host = jdata.find_str(egress[index], "host") if index < len(egress) else None
-    return ("egress", host or str(index), match.group(3), host or "")
+    rule = egress[index] if index < len(egress) else {}
+    host = jdata.find_str(rule, "host")
+    value = host or ""
+    if match.group(3).startswith(".secrets"):
+        # Which secrets go to the host: another name is another issue.
+        value += " " + ",".join(sorted(jdata.find_str_list(rule, "secrets")))
+    return ("egress", host or str(index), match.group(3), value)
 
 
 def finding_ids(
@@ -233,7 +238,15 @@ def build_report(
             "findings": under(f"commands[{r.index}]"),
         })
     egress: list[jdata.JsonData] = [
-        {"index": i, "host": _text(jdata.find_str(rule, "host") or ""), "findings": under(f"egress[{i}]")}
+        {
+            "index": i,
+            "host": _text(jdata.find_str(rule, "host") or ""),
+            "protocol": jdata.find_str(rule, "protocol"),
+            "port": jdata.find_int(rule, "port"),
+            "methods": [_text(m) for m in jdata.find_str_list(rule, "methods")],
+            "secrets": [_text(n) for n in jdata.find_str_list(rule, "secrets")],
+            "findings": under(f"egress[{i}]"),
+        }
         for i, rule in enumerate(inspection.staged.project_egress())
     ]
     counts = {str(s): sum(1 for f in findings if f.severity == s) for s in checks.Severity}

@@ -1,0 +1,364 @@
+From d8a561193d870d7a8327cad8ac6c686d187052fd Mon Sep 17 00:00:00 2001
+From: Groboclown <groboclown@gmail.com>
+Date: Sat, 7 Nov 2026 20:20:26 -0600
+Subject: [PATCH] ca: sign leaves as the loaded CA certificate says
+
+Let the forward proxy use a CA made outside it. Loading a CA now builds
+the signing issuer from the certificate on disk, with its own subject
+and subject key identifier, instead of rebuilding it from the fixed
+parameters this proxy uses when it generates a CA.
+
+The proxy was built to generate and keep its own CA, and for that the
+fixed parameters are enough. An operator who brings their own CA (made
+with openssl, a CA per deployment, a CA shared with other tools) gets
+leaves that name an issuer which does not exist: the subject is
+`CN=seekrit-proxy local CA, O=seekrit` whatever the certificate says,
+and the authority key identifier is rcgen's hash of the key rather than
+the certificate's subject key identifier. Every intercepted connection
+then fails verification in the workload with "unable to get local
+issuer certificate". A CA this proxy generated loads as before.
+
+What it prevents:
+
+- Silently mis-chained leaves from an operator-supplied CA, as above.
+- Loading a certificate that is not a CA (basic constraints without cA),
+  or a key that is not the certificate's. Both used to be accepted and
+  would mint leaves that chain to nothing; both are now startup errors.
+
+Adds the `x509-parser` feature to rcgen, and `x509-parser` itself (the
+same version rcgen uses) as a direct dependency to compare the key with
+the certificate. The tests mint a leaf from a CA with its own subject
+and key identifier and verify it with webpki against that certificate
+alone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                 |   1 +
+ Cargo.toml                 |   5 +-
+ README.md                  |   5 +-
+ seekrit-proxy.example.toml |   3 +
+ src/ca.rs                  | 210 ++++++++++++++++++++++++++++++++++---
+ 5 files changed, 206 insertions(+), 18 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index e630d94..d3340e8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1679,6 +1679,7 @@ dependencies = [
+  "tokio-rustls",
+  "toml",
+  "tracing",
++ "x509-parser",
+  "zeroize",
+ ]
+ 
+diff --git a/Cargo.toml b/Cargo.toml
+index d99e28e..5aff3fc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -76,7 +76,10 @@ futures-util = "0.3"
+ bytes = "1"
+ rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+ tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+-rcgen = "0.14"
++# `x509-parser`: an existing CA is loaded as its certificate says (subject, key
++# identifier), not rebuilt from fixed parameters.
++rcgen = { version = "0.14", features = ["x509-parser"] }
++x509-parser = "0.18"
+ 
+ # Config (TOML) + resolve response deserialization.
+ serde = { version = "1", features = ["derive"] }
+diff --git a/README.md b/README.md
+index 10e20b0..4c7850d 100644
+--- a/README.md
++++ b/README.md
+@@ -349,7 +349,10 @@ The image reads its config from `/seekrit-proxy.toml` (override with `--config`)
+ and the token from `SEEKRIT_TOKEN`. For a **sidecar** sharing the workload's
+ network namespace, keep the default loopback bind; for a **standalone** container
+ pass `--listen 0.0.0.0:<port>`. In forward mode, persist the CA (mount a volume
+-for `ca_cert`/`ca_key`) so the cert the workload trusts survives restarts.
++for `ca_cert`/`ca_key`) so the cert the workload trusts survives restarts. The
++CA may also be one you made yourself (a CA certificate and its PKCS#8 key): the
++proxy signs leaves with that certificate's own subject and key identifier, and
++refuses a certificate that is not a CA or a key that is not its own.
+ 
+ ## Build
+ 
+diff --git a/seekrit-proxy.example.toml b/seekrit-proxy.example.toml
+index 5fc7b5c..7edf217 100644
+--- a/seekrit-proxy.example.toml
++++ b/seekrit-proxy.example.toml
+@@ -93,6 +93,9 @@ allow = ["EXAMPLE_API_KEY"]
+ # # The interception CA. Generated + persisted on first run if absent; install
+ # # ca_cert into the workload's trust store (e.g. NODE_EXTRA_CA_CERTS,
+ # # SSL_CERT_FILE, REQUESTS_CA_BUNDLE, or the system store).
++# # Both files may instead be made with other tools (e.g. openssl): a CA
++# # certificate (basic constraints cA set) and its private key in PKCS#8 PEM.
++# # Leaves are signed with that certificate's own subject and key identifier.
+ # ca_cert = "seekrit-proxy-ca.pem"
+ # ca_key = "seekrit-proxy-ca-key.pem"
+ #
+diff --git a/src/ca.rs b/src/ca.rs
+index e0d01e9..72f873d 100644
+--- a/src/ca.rs
++++ b/src/ca.rs
+@@ -9,13 +9,18 @@
+ //! The CA private key never leaves this host, and it only ever signs leaves for
+ //! hosts the config says to intercept. Everything is in-memory except the two
+ //! persisted CA files.
++//!
++//! The CA files may also come from elsewhere: an operator can make the CA with
++//! their own tools. A loaded CA signs as its certificate says, with the
++//! certificate's own subject and key identifier, so leaves chain to that
++//! certificate whoever made it.
+ 
+ use std::collections::HashMap;
+ use std::sync::{Arc, Mutex};
+ 
+ use rcgen::{
+     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+-    KeyUsagePurpose,
++    KeyUsagePurpose, PublicKeyData,
+ };
+ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+ use rustls::ServerConfig;
+@@ -65,10 +70,8 @@ impl Ca {
+         let cert_pem =
+             std::fs::read_to_string(cert_path).map_err(|e| CaError::Io(e.to_string()))?;
+         let key = KeyPair::from_pem(&key_pem).map_err(|e| CaError::Cert(e.to_string()))?;
+-        // Rebuild the issuer from the persisted key and fixed CA parameters.
+-        // Same key and subject let leaves chain to the on-disk CA the operator
+-        // already trusts, without parsing its X.509 certificate.
+-        Ok(Ca::new(Issuer::new(ca_params()?, key), cert_pem))
++        let issuer = issuer_from_cert(&cert_pem, key)?;
++        Ok(Ca::new(issuer, cert_pem))
+     }
+ 
+     fn generate(cert_path: &str, key_path: &str) -> Result<Ca, CaError> {
+@@ -114,6 +117,21 @@ impl Ca {
+     }
+ 
+     fn mint_server_config(&self, host: &str) -> Result<ServerConfig, CaError> {
++        let (leaf, key_der) = self.mint_leaf(host)?;
++        // Explicit provider so we never depend on a process-wide default.
++        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
++            .with_safe_default_protocol_versions()
++            .map_err(|e| CaError::Tls(e.to_string()))?
++            .with_no_client_auth()
++            .with_single_cert(vec![leaf], key_der)
++            .map_err(|e| CaError::Tls(e.to_string()))
++    }
++
++    /// A leaf certificate for `host`, signed by this CA, and its private key.
++    fn mint_leaf(
++        &self,
++        host: &str,
++    ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), CaError> {
+         let mut params = CertificateParams::new(vec![host.to_string()])
+             .map_err(|e| CaError::Cert(e.to_string()))?;
+         params.distinguished_name.push(DnType::CommonName, host);
+@@ -128,21 +146,44 @@ impl Ca {
+             .signed_by(&leaf_key, &self.issuer)
+             .map_err(|e| CaError::Cert(e.to_string()))?;
+ 
+-        let cert_chain: Vec<CertificateDer<'static>> = vec![leaf.der().clone()];
+         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
++        Ok((leaf.der().clone(), key_der))
++    }
++}
+ 
+-        // Explicit provider so we never depend on a process-wide default.
+-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+-            .with_safe_default_protocol_versions()
+-            .map_err(|e| CaError::Tls(e.to_string()))?
+-            .with_no_client_auth()
+-            .with_single_cert(cert_chain, key_der)
+-            .map_err(|e| CaError::Tls(e.to_string()))
++/// The issuer for an existing CA: the certificate's own subject and key
++/// identifier, signing with `key`.
++///
++/// A leaf names its issuer by subject, and by key identifier in its authority
++/// key identifier extension; a client looks for a trusted certificate with both.
++/// Rebuilding the issuer from fixed parameters instead only matched a CA this
++/// proxy had generated itself: any other CA — made with openssl, say — got
++/// leaves naming an issuer that does not exist, and every intercepted
++/// connection failed verification in the workload.
++///
++/// Refuses a certificate that is not a CA, and a key that is not the
++/// certificate's: either would mint leaves that chain to nothing.
++fn issuer_from_cert(cert_pem: &str, key: KeyPair) -> Result<Issuer<'static, KeyPair>, CaError> {
++    let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
++        .map_err(|e| CaError::Cert(format!("the CA certificate is not PEM: {e}")))?;
++    let cert = pem
++        .parse_x509()
++        .map_err(|e| CaError::Cert(format!("cannot parse the CA certificate: {e}")))?;
++    if !cert.is_ca() {
++        return Err(CaError::Cert(
++            "the CA certificate is not a CA (its basic constraints do not set cA)".into(),
++        ));
++    }
++    if cert.public_key().raw != key.subject_public_key_info().as_slice() {
++        return Err(CaError::Cert(
++            "the CA key is not the key of the CA certificate".into(),
++        ));
+     }
++    Issuer::from_ca_cert_der(&CertificateDer::from(pem.contents.as_slice()), key)
++        .map_err(|e| CaError::Cert(format!("cannot use the CA certificate: {e}")))
+ }
+ 
+-/// The fixed CA certificate parameters. Kept in one place so `generate` and
+-/// `load` produce a byte-identical subject (leaves must chain to the same CA).
++/// The parameters of a CA this proxy generates.
+ fn ca_params() -> Result<CertificateParams, CaError> {
+     let mut params =
+         CertificateParams::new(Vec::new()).map_err(|e| CaError::Cert(e.to_string()))?;
+@@ -197,11 +238,148 @@ mod tests {
+         let c2 = ca.server_config("api.example.com").unwrap();
+         assert!(Arc::ptr_eq(&c1, &c2));
+ 
+-        // A second load reads the persisted CA back and can still mint.
++        // A second load reads the persisted CA back, and its leaves still
++        // chain to the CA the workload was told to trust.
+         let ca2 = Ca::load_or_generate(cert_s, key_s).unwrap();
+         assert_eq!(ca2.cert_pem(), ca.cert_pem());
+         ca2.server_config("other.example.com").unwrap();
++        assert_chains(&ca2, ca.cert_pem(), "other.example.com");
+ 
+         std::fs::remove_dir_all(&dir).ok();
+     }
++
++    /// A scratch directory holding `ca.pem` and `ca-key.pem`.
++    struct CaFiles(std::path::PathBuf);
++
++    impl CaFiles {
++        fn write(name: &str, cert_pem: &str, key_pem: &str) -> CaFiles {
++            let dir = std::env::temp_dir()
++                .join(format!("seekrit-proxy-ca-{name}-{}", std::process::id()));
++            std::fs::create_dir_all(&dir).unwrap();
++            std::fs::write(dir.join("ca.pem"), cert_pem).unwrap();
++            std::fs::write(dir.join("ca-key.pem"), key_pem).unwrap();
++            CaFiles(dir)
++        }
++
++        fn load(&self) -> Result<Ca, CaError> {
++            Ca::load_or_generate(
++                self.0.join("ca.pem").to_str().unwrap(),
++                self.0.join("ca-key.pem").to_str().unwrap(),
++            )
++        }
++    }
++
++    impl Drop for CaFiles {
++        fn drop(&mut self) {
++            let _ = std::fs::remove_dir_all(&self.0);
++        }
++    }
++
++    /// A CA as another tool would make it: its own subject, and a subject key
++    /// identifier this proxy would not compute (openssl hashes differently).
++    fn operator_ca() -> (String, KeyPair) {
++        let key = KeyPair::generate().unwrap();
++        let mut params = CertificateParams::new(Vec::new()).unwrap();
++        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
++        params
++            .distinguished_name
++            .push(DnType::CommonName, "Example Operator CA");
++        params
++            .distinguished_name
++            .push(DnType::OrganizationName, "Example");
++        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
++        params.key_identifier_method = rcgen::KeyIdMethod::PreSpecified(vec![0xab; 20]);
++        let cert = params.self_signed(&key).unwrap();
++        (cert.pem(), key)
++    }
++
++    /// Mint a leaf for `host` and check it the way a workload would: it must
++    /// verify against `ca_pem` as the only trusted root, and name that
++    /// certificate as its issuer by subject and by key identifier.
++    fn assert_chains(ca: &Ca, ca_pem: &str, host: &str) {
++        use rustls::client::danger::ServerCertVerifier;
++        use rustls::pki_types::{ServerName, UnixTime};
++
++        let (leaf, _) = ca.mint_leaf(host).unwrap();
++        let (_, ca_pem) = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes()).unwrap();
++        let root = CertificateDer::from(ca_pem.contents.clone());
++
++        let mut roots = rustls::RootCertStore::empty();
++        roots.add(root).unwrap();
++        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
++            Arc::new(roots),
++            Arc::new(rustls::crypto::ring::default_provider()),
++        )
++        .build()
++        .unwrap();
++        verifier
++            .verify_server_cert(
++                &leaf,
++                &[],
++                &ServerName::try_from(host.to_string()).unwrap(),
++                &[],
++                UnixTime::now(),
++            )
++            .expect("the leaf verifies against the CA certificate");
++
++        let ca_cert = ca_pem.parse_x509().unwrap();
++        let (_, leaf) = x509_parser::parse_x509_certificate(&leaf).unwrap();
++        assert_eq!(leaf.issuer().as_raw(), ca_cert.subject().as_raw());
++        let ski = ca_cert
++            .extensions()
++            .iter()
++            .find_map(|e| match e.parsed_extension() {
++                x509_parser::extensions::ParsedExtension::SubjectKeyIdentifier(id) => Some(id.0),
++                _ => None,
++            })
++            .expect("the CA has a subject key identifier");
++        let aki = leaf
++            .extensions()
++            .iter()
++            .find_map(|e| match e.parsed_extension() {
++                x509_parser::extensions::ParsedExtension::AuthorityKeyIdentifier(a) => {
++                    a.key_identifier.as_ref().map(|k| k.0)
++                }
++                _ => None,
++            })
++            .expect("the leaf has an authority key identifier");
++        assert_eq!(aki, ski, "the leaf names the CA's own key identifier");
++    }
++
++    #[test]
++    fn a_ca_made_elsewhere_signs_as_its_certificate_says() {
++        let (cert_pem, key) = operator_ca();
++        let files = CaFiles::write("operator", &cert_pem, &key.serialize_pem());
++        let ca = files.load().unwrap();
++        assert_eq!(ca.cert_pem(), cert_pem, "the operator's file, untouched");
++        assert_chains(&ca, &cert_pem, "api.example.com");
++    }
++
++    #[test]
++    fn a_key_that_is_not_the_certificates_is_refused() {
++        let (cert_pem, _) = operator_ca();
++        let other = KeyPair::generate().unwrap();
++        let files = CaFiles::write("mismatch", &cert_pem, &other.serialize_pem());
++        let err = files.load().err().expect("a mismatched key is refused");
++        assert!(err.to_string().contains("not the key of the CA"), "{err}");
++    }
++
++    #[test]
++    fn a_certificate_that_is_not_a_ca_is_refused() {
++        let key = KeyPair::generate().unwrap();
++        let leaf = CertificateParams::new(vec!["not-a-ca.example".to_string()])
++            .unwrap()
++            .self_signed(&key)
++            .unwrap();
++        let files = CaFiles::write("not-ca", &leaf.pem(), &key.serialize_pem());
++        let err = files.load().err().expect("a non-CA certificate is refused");
++        assert!(err.to_string().contains("is not a CA"), "{err}");
++    }
++
++    #[test]
++    fn a_file_that_is_not_a_certificate_is_refused() {
++        let key = KeyPair::generate().unwrap();
++        let files = CaFiles::write("not-pem", "not a certificate", &key.serialize_pem());
++        assert!(files.load().is_err());
++    }
+ }

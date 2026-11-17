@@ -516,7 +516,7 @@ def _host_covers(rule_host: str, pattern: str) -> bool:
 def check_egress(
     config: UserConfig, entries: list[jdata.DictJsonData] | None = None,
 ) -> list[Finding]:
-    """Plain `http`, and hosts that can carry data out whatever the other rules say.
+    """Plain `http`, secrets, and hosts that can carry data out whatever the other rules say.
 
     The rules are `entries` when given (a review's), or else the project file's.
     """
@@ -533,6 +533,13 @@ def check_egress(
                 Severity.WARN, key,
                 f"`{rule.host}` over plain HTTP can be read, and its downloads changed, by "
                 "anyone in between.",
+            ))
+        if rule.secrets:
+            names = ", ".join(rule.secrets)
+            findings.append(Finding(
+                Severity.WARN, f"{key}.secrets",
+                f"`{rule.host}` gets your {names}: the gateway puts your values into requests "
+                "to it, so anything in the dev container can use them there, as you.",
             ))
 
         def match(check: SimpleCheck, host: str = rule.host) -> str | None:

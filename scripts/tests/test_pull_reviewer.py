@@ -72,6 +72,34 @@ class CompareTest(unittest.TestCase):
         self.assertEqual(reviewer.compare(None, second, {"f2"}).new, {"f3"})
 
 
+class EgressDisplayTest(unittest.TestCase):
+    """Test how the reviewer shows an egress rule, and its finding ids."""
+
+    def test_egress_line(self) -> None:
+        """Host, protocol, port and methods, from the report's cleaned text."""
+        self.assertEqual(
+            reviewer.egress_line({
+                "host": _text("api.github.com"), "protocol": "https", "port": 443,
+                "methods": [_text("GET"), _text("HEAD")], "secrets": [_text("GITHUB_TOKEN")],
+            }),
+            "api.github.com (https 443, GET HEAD)",
+        )
+        self.assertEqual(reviewer.egress_line({"host": _text("a.example.com")}), "a.example.com")
+
+    def test_secret_finding_ids_follow_the_names(self) -> None:
+        """Another secret for the same host is a new finding, not one already seen."""
+        def ids(secrets: list[str]) -> list[str]:
+            staged = UserConfig({"current-project-setup": {"egress": [
+                {"host": "api.github.com", "protocol": "https", "secrets": secrets},
+            ]}})
+            finding = analyze.checks.Finding(analyze.checks.Severity.WARN, "egress[0].secrets", "same message")
+            return analyze.finding_ids([finding], staged, [])
+
+        self.assertEqual(ids(["A"]), ids(["A"]))
+        self.assertNotEqual(ids(["A"]), ids(["A", "B"]))
+        self.assertEqual(ids(["A", "B"]), ids(["B", "A"]))
+
+
 class ReviewerTest(unittest.TestCase):
     """The explorer, driven by scripted answers."""
 
