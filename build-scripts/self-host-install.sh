@@ -120,27 +120,27 @@ src="${work}/src"
 
 echo "Building the host programs"
 locked=""
-if [ -f "${src}/host/Cargo.lock" ] ; then
+if [ -f "${src}/rust/host/Cargo.lock" ] ; then
     locked="--locked"
 fi
 cargo build --release ${locked} \
-    --manifest-path "${src}/host/Cargo.toml" \
+    --manifest-path "${src}/rust/host/Cargo.toml" \
     --target-dir "${work}/target"
 
 echo "Installing into ${dest}"
 mkdir "${staging}"
 mkdir "${staging}/bin" "${staging}/bin/surf_scoter_lib"
 cp "${work}/target/release/scoter-host" "${work}/target/release/gen-scoter-uc" "${staging}/bin/"
-cp -R "${src}/scripts/"* "${staging}/bin/"
+cp -R "${src}/py/src/dist_bin/"* "${staging}/bin/"
 rm -r \
     "${staging}/bin/__pycache__" \
     "${staging}/bin/surf_scoter_lib/__pycache__" \
     "${staging}/bin/surf_scoter_lib/"*/__pycache__ \
     2>/dev/null || true
-cp -R "${src}/containers" "${src}/defaults" "${src}/docs" "${src}/templates" "${staging}/"
-cp "${src}/scoter.py" "${src}/LICENSE" "${staging}/"
-# The distribution's own setup file.
-cp "${src}/defaults/setup.yaml" "${staging}/setup.yaml"
+cp -R "${src}/containers" "${src}/docs" "${staging}/"
+# The files installed as they are: the setup file, `defaults` and `templates`.
+cp -R "${src}/dist-files/." "${staging}/"
+cp "${src}/py/src/dist_root/scoter.py" "${src}/LICENSE" "${staging}/"
 {
     echo "Surf Scoter, installed by build-scripts/self-host-install.sh"
     echo "from: ${base}"

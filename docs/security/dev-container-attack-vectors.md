@@ -16,9 +16,9 @@ This analysis starts from one assumption: **anything inside the dev container ma
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../scripts/main_run.py); `write_host` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py) |
-| `Dockerfile`, build context, parent directories and their tags | The project, as pulled into your configuration | `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml) |
-| Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which doesn't override them |
+| `dev-env.yaml` values | The project | `parse` and `text_field` in [`dev_env.rs`](../../rust/host/config/src/config/dev_env.rs); `_write_compose_env_file` in [`main_run.py`](../../py/src/dist_bin/main_run.py); `write_host` in [`ssh_hosts.py`](../../py/src/dist_bin/surf_scoter_lib/ssh_hosts.py); [`ssh_config.py`](../../py/src/dist_bin/surf_scoter_lib/ssh_config.py) |
+| `Dockerfile`, build context, parent directories and their tags | The project, as pulled into your configuration | `_build_containers` in [`main_run.py`](../../py/src/dist_bin/main_run.py); [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../dist-files/setup.yaml) |
+| Image contents (`USER`, `/etc/group`, binaries) | The project | [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), which doesn't override them |
 | The project clone's files, including permission bits | Code in the container | The host file system, and whatever later reads it |
 | The persistent store | Code in the container | The dev container's start-up script, such as the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) |
 | Processes and files inside the container | Code in the container | The [runtime constraints](dev-container.md#runtime-constraints) |
@@ -67,7 +67,7 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 ### DEV-1: `user` is written into the SSH configuration
 
 **Severity:** Critical.  **Status:** Mitigated: the generator refuses a `user` that isn't a plain user name (a letter or `_`, then letters, digits, `.`, `_` and `-`, at most 32), and `write_host` checks it again where it's written.  The `Host` is no longer made from it (it's `${ssh:host-prefix}${scoter:project-id}`, checked against a strict pattern).  The pull's review shows `user` with the dev container's other values ([VER-3](verification-attack-vectors.md#ver-3-the-review-doesnt-show-everything-it-accepts)).
-**Where:** `user_name_problem` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `write_host` and `host_name` in [`ssh_hosts.py`](../../scripts/surf_scoter_lib/ssh_hosts.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py).
+**Where:** `user_name_problem` in [`dev_env.rs`](../../rust/host/config/src/config/dev_env.rs); `write_host` and `host_name` in [`ssh_hosts.py`](../../py/src/dist_bin/surf_scoter_lib/ssh_hosts.py); `add_host` and `add_key_value` in [`ssh_config.py`](../../py/src/dist_bin/surf_scoter_lib/ssh_config.py).
 
 `user` went into the developer's `~/.ssh/config`, in the container's `Host` line and its `User` line, without escaping.  The only check was that it's a non-empty string.  A value containing a newline adds arbitrary directives, such as a `Match all` block with a `ProxyCommand`, which runs on the host the next time the developer uses `ssh` for anything.  A value containing spaces adds extra `Host` patterns.  This happens before any container starts.
 
@@ -78,7 +78,7 @@ DEV-4, DEV-7, DEV-10 and DEV-11 follow from this.  The recommended way of bringi
 ### DEV-2: Mount points are written into the compose `.env` file
 
 **Severity:** Critical.  **Status:** Mitigated.
-**Where:** `container_path_problem` and `mounts_overlap` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `parse_container` in [`project.rs`](../../host/src/config/project.rs); `_write_compose_env_file` and `env_line` in [`main_run.py`](../../scripts/main_run.py); the `volumes` in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `container_path_problem` and `mounts_overlap` in [`dev_env.rs`](../../rust/host/config/src/config/dev_env.rs); `parse_container` in [`project.rs`](../../rust/host/config/src/config/project.rs); `_write_compose_env_file` and `env_line` in [`main_run.py`](../../py/src/dist_bin/main_run.py); the `volumes` in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 The mount points (`mounts: project-clone`, `persistent-store` and `setup`, and the project file's `container: mounts: project-clone`) go into the compose `.env` file.  They used to go in unescaped, with only a leading `/` checked.  A newline added a line, and compose takes the last value for a repeated name (confirmed with podman-compose 1.6.0), so `"/workspace\nWORKSPACE_HOST=/home/you"` mounted the developer's home directory into the container, read-write.
 
@@ -98,7 +98,7 @@ The pull's review shows the mount points ([VER-3](verification-attack-vectors.md
 ### DEV-3: Image builds run outside the isolation
 
 **Severity:** High.  **Status:** Open for the network; the build's inputs are now mitigated.
-**Where:** `_build_containers` in [`main_run.py`](../../scripts/main_run.py); [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `_build_containers` in [`main_run.py`](../../py/src/dist_bin/main_run.py); [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py); `docker: runs: build` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 None of the [required network properties](network.md#required-properties) hold during a build.  `RUN` steps have the builder's ordinary network access, including the LAN and cloud metadata endpoints, and can bake anything into the image.
 
@@ -111,7 +111,7 @@ What gets built is narrower than it was.  The project's containers and their par
 ### DEV-4: Host ids under rootful Docker
 
 **Severity:** High.  **Status:** Open.
-**Where:** [`docker-compose.yaml`](../../defaults/docker-compose.yaml) (no `user:`, no `group_add`); the image's `USER` and `/etc/group`; see [background](#background-how-container-ids-reach-the-host).
+**Where:** [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml) (no `user:`, no `group_add`); the image's `USER` and `/etc/group`; see [background](#background-how-container-ids-reach-the-host).
 
 Without a user namespace, container ids are host ids.  A container running as root (see DEV-6) can leave a setuid-root program in the project clone.  A container whose user belongs to a group whose number matches a privileged host group (`docker`, `disk`, `adm`, `shadow`) can leave a setgid program for that group.  Anyone who runs either on the host gains those privileges: `docker` or root means the whole host.  The project can't see the host's group numbers, but common ones are easy to guess.
 
@@ -135,7 +135,7 @@ The distribution's container keeps the IDE server (`~/.vscode-server`) in the pe
 ### DEV-6: The image chooses the container user
 
 **Severity:** Medium.  **Status:** Open.
-**Where:** [`docker-compose.yaml`](../../defaults/docker-compose.yaml), which sets no `user:`; the project's `Dockerfile`.
+**Where:** [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), which sets no `user:`; the project's `Dockerfile`.
 
 A project `Dockerfile` that ends with `USER root` runs the container as root.  Dropped capabilities and `no-new-privileges` still apply, but root can change files the image meant to protect, such as the SSH server configuration, and makes DEV-4 worse.  The [project Dockerfile guide](../project-dockerfile.md) says the run forces an unprivileged user; it doesn't.
 
@@ -168,7 +168,7 @@ The IDE server, terminal sessions, builds, agents and bridged commands all run a
 ### DEV-9: Unpinned base images
 
 **Severity:** Medium.  **Status:** Open.
-**Where:** [`containers/dev-env/Dockerfile`](../../containers/dev-env/Dockerfile) (`ubuntu:rolling`, `rust:slim-trixie`).
+**Where:** [`containers/dev-env/Dockerfile`](../../containers/dev-env/Dockerfile) (`ubuntu:rolling`, `rust:slim-trixie`, and the bridge source fetched from the Surf Scoter repository at the pinned `SCOTER_COMMIT`; a full commit id, checked after the fetch, so the repository can't swap it, though its crates still come from crates.io through `Cargo.lock`).
 
 Tags, not digests, so the same `Dockerfile` can produce a different image from one build to the next.
 
@@ -217,7 +217,7 @@ The start-up script used to link the bridge commands into `/usr/local/bin`, whic
 ### DEV-14: Unbounded writable storage
 
 **Severity:** Low.  **Status:** Open.
-**Where:** [`docker-compose.yaml`](../../defaults/docker-compose.yaml) (no `read_only`, no size-limited `tmpfs`).
+**Where:** [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml) (no `read_only`, no size-limited `tmpfs`).
 
 Code in the container can fill the disk that backs the container's writable layer, the project clone's disk, and the persistent store's volume, which outlives the session.
 
@@ -226,7 +226,7 @@ Code in the container can fill the disk that backs the container's writable laye
 ### DEV-15: The project chooses shared image tags
 
 **Severity:** Medium.  **Status:** Open.
-**Where:** the `parents` `tag` in [`dev_env.rs`](../../host/src/config/dev_env.rs); `_build_containers` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** the `parents` `tag` in [`dev_env.rs`](../../rust/host/config/src/config/dev_env.rs); `_build_containers` in [`main_run.py`](../../py/src/dist_bin/main_run.py).
 
 Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, and nothing checks it.  Tags are shared by every project on the computer.  A project can tag its own parent with a name another project builds `FROM`, such as the distribution's `local-surf-scoter/dev-env:distro` (the base of the distribution's templates), and that project's next build uses the first project's image without a review of its own.  The review lists parent tags, but doesn't flag one that isn't the project's.
 
@@ -237,7 +237,7 @@ Each parent a `dev-env.yaml` builds is tagged with the `tag` the project gives, 
 ### DEV-16: The persistent store outlives the session
 
 **Severity:** Medium.  **Status:** Open; narrowed for the distribution's container.
-**Where:** the `persistent-store` mount in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); the dev container's start-up script, such as the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) and [`persistent-store.txt`](../../containers/dev-env/persistent-store.txt).
+**Where:** the `persistent-store` mount in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml); the dev container's start-up script, such as the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh) and [`persistent-store.txt`](../../containers/dev-env/persistent-store.txt).
 
 Each dev container gets a persistent store: a container volume, mounted at its `mounts: persistent-store`, kept between runs so IDE settings, caches and shell history survive.  Whatever a session leaves there is there for the next one, through image rebuilds, `--clean-project-clone`, and removing and pulling the project's configuration again, until the store is removed (`--clean-persistent-store`, or `scoter cleanup --persistent-stores`).  What that means depends on how the container uses the store, and that's the container's choice, which comes with the project:
 
@@ -253,12 +253,12 @@ What's no longer a risk: the store isn't a host directory, so its contents, the 
 
 ## Sensitive code
 
-* [`host/src/config/dev_env.rs`](../../host/src/config/dev_env.rs): validation of every `dev-env.yaml` value.
-* [`scripts/main_run.py`](../../scripts/main_run.py): everything written to `~/.ssh/config`, `known_hosts`, the `.env` file and the setup directory, and the image builds.
-* [`scripts/surf_scoter_lib/ssh_config.py`](../../scripts/surf_scoter_lib/ssh_config.py): the SSH configuration writer.
-* [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml): the `dev` service's user, capabilities, mounts and limits.
+* [`rust/host/config/src/config/dev_env.rs`](../../rust/host/config/src/config/dev_env.rs): validation of every `dev-env.yaml` value.
+* [`py/src/dist_bin/main_run.py`](../../py/src/dist_bin/main_run.py): everything written to `~/.ssh/config`, `known_hosts`, the `.env` file and the setup directory, and the image builds.
+* [`py/src/dist_bin/surf_scoter_lib/ssh_config.py`](../../py/src/dist_bin/surf_scoter_lib/ssh_config.py): the SSH configuration writer.
+* [`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml): the `dev` service's user, capabilities, mounts and limits.
 * [`containers/dev-env/`](../../containers/dev-env/): the base image, start-up script (including what it keeps in the persistent store), `persistent-store.txt` and `sshd_config`.
-* [`scripts/surf_scoter_lib/run_config.py`](../../scripts/surf_scoter_lib/run_config.py): what the build is made from.
+* [`py/src/dist_bin/surf_scoter_lib/run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py): what the build is made from.
 
 
 ## Open design questions

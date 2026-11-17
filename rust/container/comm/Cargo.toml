@@ -1,0 +1,8 @@
+[package]
+name = "scoter-comm"
+description = "The wire protocol shared by the dev container's client and broker and the host."
+# Not inherited from the workspace: `rust/host` uses this crate as a path
+# dependency, and `cross` mounts only this directory (not the parent
+# workspace root) into its build container.
+version = "0.9.0"
+edition = "2024"

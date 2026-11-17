@@ -64,6 +64,6 @@ USER 65532:65532
 
 EXPOSE 3128
 
-# Surf Scoter mounts the configuration that `scripts/gateway_seekrit.py`
+# Surf Scoter mounts the configuration that `py/src/dist_bin/gateway_seekrit.py`
 # writes.  Without it, the proxy refuses to start.
 ENTRYPOINT ["/seekrit-proxy", "--config", "/user-space/gateway/seekrit-proxy.toml"]

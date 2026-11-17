@@ -20,7 +20,7 @@ There are two cleanup commands, and they don't overlap:
 ```shell
 scoter cleanup                          # List what's left behind, and ask.
 scoter cleanup --dry-run                # Only list it.
-scoter cleanup --force                  # Remove it without asking (for scripts).
+scoter cleanup --force                  # Remove it without asking (for py/src/dist_bin).
 scoter cleanup --project-state --persistent-stores --images
                                         # Project state, persistent stores and images too.
 ```

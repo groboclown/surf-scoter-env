@@ -26,18 +26,19 @@ mkdir -p "${target}"
 mkdir -p "${target}/bin"
 
 echo "#!/bin/sh" > "${target}/bin/gen-scoter-uc"
-echo "exec cargo run --manifest-path \"${here}/host/Cargo.toml\" --bin gen-scoter-uc -- \"\$@\"" >> "${target}/bin/gen-scoter-uc"
+echo "exec cargo run --manifest-path \"${here}/rust/host/Cargo.toml\" --bin gen-scoter-uc -- \"\$@\"" >> "${target}/bin/gen-scoter-uc"
 chmod +x "${target}/bin/gen-scoter-uc"
 
 echo "#!/bin/sh" > "${target}/bin/scoter-host"
-echo "exec cargo run --manifest-path \"${here}/host/Cargo.toml\" --bin scoter-host -- \"\$@\"" >> "${target}/bin/scoter-host"
+echo "exec cargo run --manifest-path \"${here}/rust/host/Cargo.toml\" --bin scoter-host -- \"\$@\"" >> "${target}/bin/scoter-host"
 chmod +x "${target}/bin/scoter-host"
 
 cd "${target}/bin"
-ln -s "${here}/scripts/"* .
+ln -s "${here}/py/src/dist_bin/"* .
 
 cd "${target}"
-ln -s "${here}/defaults" .
+ln -s "${here}/dist-files/defaults" .
+ln -s "${here}/dist-files/templates" .
 
 # The tooling prohibits user's "containers" from linking into the
 # project directory.  For self-hosted scoter, that means we need a
@@ -49,15 +50,15 @@ cp -R "${here}/containers" .
 # These need a hard-link, not a symbolic link, because of how the
 # file finds itself.  But cross-filesystem hard-links can fail.
 link_fail=0
-if ! ln "${here}/defaults/setup.yaml" . ; then
-    cp "${here}/defaults/setup.yaml" .
-    echo "defaults/setup.yaml : link failed."
+if ! ln "${here}/dist-files/setup.yaml" . ; then
+    cp "${here}/dist-files/setup.yaml" .
+    echo "dist-files/setup.yaml : link failed."
     link_fail=1
 fi
-if ! ln "${here}/scoter.py" scoter ; then
-    cp "${here}/scoter.py" scoter
+if ! ln "${here}/py/src/dist_root/scoter.py" scoter ; then
+    cp "${here}/py/src/dist_root/scoter.py" scoter
     chmod 0755 scoter
-    echo "scoter.py : link failed."
+    echo "py/src/dist_root/scoter.py : link failed."
     link_fail=1
 fi
 if [ "${link_fail}" = 1 ] ; then

@@ -18,13 +18,13 @@ Verification is the control that several other vectors depend on: [NET-2](networ
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Files in `.surf-scoter.d` (project file, Dockerfiles, `dev-env.yaml`, build files) | The project, including changes pulled from others or brought back from the project clone | `snapshot_source`, `snapshot_bytes` and `select_build` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); [`pull/seed.py`](../../scripts/surf_scoter_lib/pull/seed.py) |
-| The VCS's reports on committed files | The repository's objects; the handler is setup | [`vcs_files.py`](../../scripts/surf_scoter_lib/vcs_files.py), [`vcs_git_files.py`](../../scripts/vcs_git_files.py) |
-| File names and contents shown in the review | The project | [`pull/analyze.py`](../../scripts/surf_scoter_lib/pull/analyze.py), [`pull/reviewer.py`](../../scripts/surf_scoter_lib/pull/reviewer.py), [`review.py`](../../scripts/surf_scoter_lib/review.py); [`checks.py`](../../scripts/surf_scoter_lib/checks.py) |
-| The working directory and the unlocked copy | You, your editor, and any process running as you | [`pull/workdir.py`](../../scripts/surf_scoter_lib/pull/workdir.py), [`pull/unlocked.py`](../../scripts/surf_scoter_lib/pull/unlocked.py) |
-| The verified store | You, and any process running as you | [`store.py`](../../scripts/surf_scoter_lib/verified/store.py), [`configs.py`](../../scripts/surf_scoter_lib/verified/configs.py); [`host_file.rs`](../../host/src/config/host_file.rs) |
-| The setup, and the reviewer it names | You | [`setup.yaml`](../../defaults/setup.yaml); `fingerprint` in [`pull/workdir.py`](../../scripts/surf_scoter_lib/pull/workdir.py) |
-| The distribution's scripts and templates | Whoever installed them | [`scoter.py`](../../scoter.py); [`pull/lifecycle.py`](../../scripts/surf_scoter_lib/pull/lifecycle.py) |
+| Files in `.surf-scoter.d` (project file, Dockerfiles, `dev-env.yaml`, build files) | The project, including changes pulled from others or brought back from the project clone | `snapshot_source`, `snapshot_bytes` and `select_build` in [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py); [`pull/seed.py`](../../py/src/dist_bin/surf_scoter_lib/pull/seed.py) |
+| The VCS's reports on committed files | The repository's objects; the handler is setup | [`vcs_files.py`](../../py/src/dist_bin/surf_scoter_lib/vcs_files.py), [`vcs_git_files.py`](../../py/src/dist_bin/vcs_git_files.py) |
+| File names and contents shown in the review | The project | [`pull/analyze.py`](../../py/src/dist_bin/surf_scoter_lib/pull/analyze.py), [`pull/reviewer.py`](../../py/src/dist_bin/surf_scoter_lib/pull/reviewer.py), [`review.py`](../../py/src/dist_bin/surf_scoter_lib/review.py); [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py) |
+| The working directory and the unlocked copy | You, your editor, and any process running as you | [`pull/workdir.py`](../../py/src/dist_bin/surf_scoter_lib/pull/workdir.py), [`pull/unlocked.py`](../../py/src/dist_bin/surf_scoter_lib/pull/unlocked.py) |
+| The verified store | You, and any process running as you | [`store.py`](../../py/src/dist_bin/surf_scoter_lib/verified/store.py), [`configs.py`](../../py/src/dist_bin/surf_scoter_lib/verified/configs.py); [`host_file.rs`](../../rust/host/config/src/config/host_file.rs) |
+| The setup, and the reviewer it names | You | [`setup.yaml`](../../dist-files/setup.yaml); `fingerprint` in [`pull/workdir.py`](../../py/src/dist_bin/surf_scoter_lib/pull/workdir.py) |
+| The distribution's scripts and templates | Whoever installed them | [`scoter.py`](../../py/src/dist_root/scoter.py); [`pull/lifecycle.py`](../../py/src/dist_bin/surf_scoter_lib/pull/lifecycle.py) |
 
 
 ## Summary
@@ -76,7 +76,7 @@ The design's candidate IDs VER-12 to VER-14 and VER-17 to VER-19 were taken into
 ### VER-1: The Dockerfile meaning match can be fooled
 
 **Severity:** High.  **Status:** Closed.
-**Where:** `canonical_dockerfile` and `is_dockerfile` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); `file_lines` and `visible` in [`review.py`](../../scripts/surf_scoter_lib/review.py); `from_findings` in [`checks.py`](../../scripts/surf_scoter_lib/checks.py); `docker: runs: build` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `canonical_dockerfile` and `is_dockerfile` in [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py); `file_lines` and `visible` in [`review.py`](../../py/src/dist_bin/surf_scoter_lib/review.py); `from_findings` in [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py); `docker: runs: build` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 Under the acceptances Surf Scoter used before configurations, a Dockerfile that differed from the accepted one only in comments and blank lines matched on meaning, and the run carried the acceptance forward without asking.  The canonical form used to drop more than Docker does (lines split on `\r` and other breaks Docker doesn't use, heredocs it couldn't follow, files named `Dockerfile.*`), so a hidden command could ride along.  It was made to fail closed: a canonical form only for a Dockerfile plainly within what it understands, split on `\n` only.
 
@@ -89,7 +89,7 @@ Under the acceptances Surf Scoter used before configurations, a Dockerfile that 
 ### VER-2: Any file named `dev-env.yaml` matches on meaning
 
 **Severity:** High.  **Status:** Closed.
-**Where:** `canonical_hash` and `dev_env_paths` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py).
+**Where:** `canonical_hash` and `dev_env_paths` in [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py).
 
 Every file named `dev-env.yaml` got the merged dev container's meaning hash, so a copy elsewhere in a container directory could change freely and still match.  It was fixed to give that hash only to the files the merge reads, by path; and with no match on meaning any more (VER-1), it no longer reaches a run at all.
 
@@ -98,7 +98,7 @@ Every file named `dev-env.yaml` got the merged dev container's meaning hash, so 
 ### VER-3: The review doesn't show everything it accepts
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `build_report` in [`pull/analyze.py`](../../scripts/surf_scoter_lib/pull/analyze.py); [`pull/reviewer.py`](../../scripts/surf_scoter_lib/pull/reviewer.py).
+**Where:** `build_report` in [`pull/analyze.py`](../../py/src/dist_bin/surf_scoter_lib/pull/analyze.py); [`pull/reviewer.py`](../../py/src/dist_bin/surf_scoter_lib/pull/reviewer.py).
 
 The old review showed some files only by name and size, and none of the dev container's parsed values.  The pull's report and the default reviewer show every file the build uses, in full, with how it differs from the configuration in use; files that can't be shown (over the size limit, or not UTF-8) are refused unless the pull names each one (`--allow-opaque`).  The dev container's values (`user`, `mounts`, `broker-bin`, the sshd settings, the parents) and the project file's `container` settings have their own node.  At approval, the reviewer lists the new, changed or flagged files you never opened.
 
@@ -123,7 +123,7 @@ Acceptances were kept per branch, under two different forms of the branch name. 
 ### VER-6: Setup changes that don't ask for a new review
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `prepare` in [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `fingerprint` in [`pull/workdir.py`](../../scripts/surf_scoter_lib/pull/workdir.py).
+**Where:** `prepare` in [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py); `fingerprint` in [`pull/workdir.py`](../../py/src/dist_bin/surf_scoter_lib/pull/workdir.py).
 
 The checks run again on every run, against the setup as it is: a new or stronger `host-commands`, `project-files` or `egress-hosts` check, or a refreshed public suffix list, applies at once ([VER-22](#ver-22-checks-on-every-run-can-stop-a-run-that-used-to-work)).  A pull records a fingerprint of the setup it was made under (the state directory, the store and the checks), so a pull whose files haven't changed still asks for a review when the checks have.
 
@@ -134,7 +134,7 @@ The build, compose and other `docker` commands, and the compose file, aren't par
 ### VER-7: A distribution inside a project
 
 **Severity:** Medium.  **Status:** Open.
-**Where:** `require_global_dist_dir` and the sub-command dispatch in [`scoter.py`](../../scoter.py); the distribution check in [`system.rs`](../../host/src/config/system.rs); `template_dir` in [`pull/lifecycle.py`](../../scripts/surf_scoter_lib/pull/lifecycle.py).
+**Where:** `require_global_dist_dir` and the sub-command dispatch in [`scoter.py`](../../py/src/dist_root/scoter.py); the distribution check in [`system.rs`](../../rust/host/config/src/config/system.rs); `template_dir` in [`pull/lifecycle.py`](../../py/src/dist_bin/surf_scoter_lib/pull/lifecycle.py).
 
 `scoter` runs `main_<command>.py` from the distribution's `bin` directory.  The generator refuses a `distribution-dir` inside the project when a setup file sets it, but not when it comes from `--distribution-dir` or from where `scoter` itself was found.  Running a `scoter` that lives inside a cloned repository trusts that repository's scripts, including the ones that run the pull.
 
@@ -147,7 +147,7 @@ Templates have the fix this vector proposes: `scoter init` and `scoter unlock --
 ### VER-8: The store itself
 
 **Severity:** Medium.  **Status:** Mitigated on POSIX; Unverified on Windows.
-**Where:** [`store.py`](../../scripts/surf_scoter_lib/verified/store.py), [`configs.py`](../../scripts/surf_scoter_lib/verified/configs.py); `exclusive_lock` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); `check_for_run` in [`host_file.rs`](../../host/src/config/host_file.rs).
+**Where:** [`store.py`](../../py/src/dist_bin/surf_scoter_lib/verified/store.py), [`configs.py`](../../py/src/dist_bin/surf_scoter_lib/verified/configs.py); `exclusive_lock` in [`fileutil.py`](../../py/src/dist_bin/surf_scoter_lib/fileutil.py); `check_for_run` in [`host_file.rs`](../../rust/host/config/src/config/host_file.rs).
 
 The store holds what the run trusts.  Its directories are `0700` and its files `0600`; every read checks the owner and mode, opens without following symlinks, and limits the size.  Writes are atomic, under an operating system lock.  A configuration's blobs are checked against their hashes as they're restored; a link can't name a configuration that isn't stored.  The generator refuses a store or state directory inside the project.  `scoter-host` checks the universal configuration file's owner and mode, and each host file program (see [BRIDGE-14](host-bridge-attack-vectors.md#bridge-14-the-bridge-trusts-the-universal-configuration-files-command-list) for what it doesn't check).  Nothing in the container can reach the store: it isn't mounted, and it isn't under the project clone.
 
@@ -160,7 +160,7 @@ On Windows there are no mode checks; the profile's access control lists are reli
 ### VER-9: Trusted containers
 
 **Severity:** Medium.  **Status:** By design.
-**Where:** `scoter: path-lists: dev-containers-search` in [`setup.yaml`](../../defaults/setup.yaml); `containers_search` in [`config.rs`](../../host/src/config.rs).
+**Where:** `scoter: path-lists: dev-containers-search` in [`setup.yaml`](../../dist-files/setup.yaml); `containers_search` in [`config.rs`](../../rust/host/config/src/config.rs).
 
 Containers found in your `dev-containers-search` directories, by default the distribution's, aren't copied into a configuration or reviewed, and are built from where they are.  A project can build on them by name.  Anyone who can change those directories changes every project that uses them.  (The `verified-containers` setting, which reviewed some of them with each acceptance, went with acceptances.)  Templates aren't trusted this way: they're reviewed by `scoter lock`.
 
@@ -171,7 +171,7 @@ Containers found in your `dev-containers-search` directories, by default the dis
 ### VER-10: Project text printed outside the review
 
 **Severity:** Low.  **Status:** Mitigated.
-**Where:** `check_name` in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); `clean` in [`review.py`](../../scripts/surf_scoter_lib/review.py); the messages of [`main_run.py`](../../scripts/main_run.py), [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py) and [`pull/`](../../scripts/surf_scoter_lib/pull/).
+**Where:** `check_name` in [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py); `clean` in [`review.py`](../../py/src/dist_bin/surf_scoter_lib/review.py); the messages of [`main_run.py`](../../py/src/dist_bin/main_run.py), [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py) and [`pull/`](../../py/src/dist_bin/surf_scoter_lib/pull/).
 
 A project file name with terminal escape sequences could reach a message printed as it is.  A snapshot now refuses any name with a control or non-ASCII character, before it opens the file, and the error shows the name escaped; the pull's messages and the run's pass project text through `review.clean()`.
 
@@ -182,7 +182,7 @@ A project file name with terminal escape sequences could reach a message printed
 ### VER-11: The parse and the snapshot race
 
 **Severity:** Low.  **Status:** Closed.
-**Where:** `seed` and `select_build` in [`pull/seed.py`](../../scripts/surf_scoter_lib/pull/seed.py) and [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); `inspect` in [`pull/analyze.py`](../../scripts/surf_scoter_lib/pull/analyze.py).
+**Where:** `seed` and `select_build` in [`pull/seed.py`](../../py/src/dist_bin/surf_scoter_lib/pull/seed.py) and [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py); `inspect` in [`pull/analyze.py`](../../py/src/dist_bin/surf_scoter_lib/pull/analyze.py).
 
 The generator used to parse the live files while the snapshot read their bytes later.  Seeding, analysis and approval now snapshot first and run the generator on a staged copy of that snapshot, so what's parsed is what's kept; a run reads only a staged copy.
 
@@ -191,7 +191,7 @@ The generator used to parse the live files while the snapshot read their bytes l
 ### VER-15: The push writes into the project tree
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** [`pull/push.py`](../../scripts/surf_scoter_lib/pull/push.py).
+**Where:** [`pull/push.py`](../../py/src/dist_bin/surf_scoter_lib/pull/push.py).
 
 A directory under `.surf-scoter.d` may be a symlink an earlier fetch from the clone brought in, so a push that follows it writes outside the project ([FILE-10](files-attack-vectors.md#file-10-the-clones-path-through-container-symlinks)'s pattern on your own repository).  `scoter push` reads the project's files with the snapshot rules (a link or special file stops it), shows the change as a patch, and, once approved, writes relative to a directory descriptor with `O_NOFOLLOW` on each part of the path, replacing only regular files, each only if it still has the hash the patch showed.  It never deletes, and it pushes only a locked configuration.  `--yes` skips the patch, not the checks.  It refuses a project directory that is, or goes through, a symlink, or lies in the tools' own places.  Windows, without directory descriptors, is refused.
 
@@ -202,35 +202,35 @@ A directory under `.surf-scoter.d` may be a symlink an earlier fetch from the cl
 ### VER-16: The push leaks host details
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** [`pull/push.py`](../../scripts/surf_scoter_lib/pull/push.py); [`host_file.py`](../../scripts/surf_scoter_lib/host_file.py).
+**Where:** [`pull/push.py`](../../py/src/dist_bin/surf_scoter_lib/pull/push.py); [`host_file.py`](../../py/src/dist_bin/surf_scoter_lib/host_file.py).
 
 A configuration's resolved values (absolute program paths) live only in its host file, which push never writes, so the project file stays portable.  As a backstop, the patch marks lines naming your home directory or host name, and files the `project-files` checks flag, and the warnings print even with `--yes`.  Neither can tell an internal mirror in an egress rule from one the project means to share; that's what the patch's review is for.
 
 ### VER-20: Trust doesn't expire
 
 **Severity:** Low.  **Status:** By design.
-**Where:** `_timers` in [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); `verification: values: review-*` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `_timers` in [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py); `verification: values: review-*` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 The permissions behind a configuration's cloud services can change while it stays the same.  Your setup chooses from three timers, counted from your last review (`scoter pull` or `scoter review`; not `scoter lock`): a notice (on by default, after 30 days, then every 7), a warning on every run, and an expiry that stops runs.  The warning and the expiry are off by default, as forced reviews of an unchanged configuration train rubber-stamping ([VER-41](#ver-41-reviews-of-nothing-new-train-rubber-stamping)).  Turning the notice off, or lengthening it, is a guarded change.
 
 ### VER-21: Pulls that never happen
 
 **Severity:** Low.  **Status:** By design.
-**Where:** `_project_changed` in [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py).
+**Where:** `_project_changed` in [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py).
 
 A developer who never pulls misses the project's security fixes too.  Each run hashes the project's files, never parsing them, and prints one line when they differ from the last pull (or push).  It never blocks.  Saying more loudly when the project removes something your copy still allows is a later improvement.
 
 ### VER-22: Checks on every run can stop a run that used to work
 
 **Severity:** Low.  **Status:** By design.
-**Where:** `_refusal` in [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py).
+**Where:** `_refusal` in [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py).
 
 A stronger setup check refuses a run that worked yesterday, which tempts developers to remove the check.  The refusal names the check, the setup file it's in, and how to relax it with an `overrides` check instead.
 
 ### VER-23: Seeding reads hostile input
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `snapshot_source`, `snapshot_bytes`, `check_name` and the reader in [`snapshot.py`](../../scripts/surf_scoter_lib/verified/snapshot.py); `snapshot_commit` in [`vcs_files.py`](../../scripts/surf_scoter_lib/vcs_files.py); [`pull/seed.py`](../../scripts/surf_scoter_lib/pull/seed.py).
+**Where:** `snapshot_source`, `snapshot_bytes`, `check_name` and the reader in [`snapshot.py`](../../py/src/dist_bin/surf_scoter_lib/verified/snapshot.py); `snapshot_commit` in [`vcs_files.py`](../../py/src/dist_bin/surf_scoter_lib/vcs_files.py); [`pull/seed.py`](../../py/src/dist_bin/surf_scoter_lib/pull/seed.py).
 
 Seeding is the only phase that reads the project.  It reads the whole `.surf-scoter.d` within the limits before anything parses it, refusing links, special files, hard links (but for the project file), setuid, setgid and sticky bits, and names with control or non-ASCII characters; from a commit, symlinks and submodules, sizes over the limits from the listing, and contents that don't hash to the listed id.  The generator parses only a staged copy, with its own limits.
 
@@ -241,7 +241,7 @@ Seeding is the only phase that reads the project.  It reads the whole `.surf-sco
 ### VER-24: A lookup reaches the live project
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `load_with` in [`system.rs`](../../host/src/config/system.rs); `containers_search` and `live_files_problems` in [`config.rs`](../../host/src/config.rs).
+**Where:** `load_with` in [`system.rs`](../../rust/host/config/src/config/system.rs); `containers_search` and `live_files_problems` in [`config.rs`](../../rust/host/config/src/config.rs).
 
 A container found by name, or a setting, could lead back into the project's live files.  The generator looks for a container or parent first in the copy it was given (`${scoter:config-dir}`), then only in your `dev-containers-search` directories, and refuses a search entry inside the project directory, its files directory, the repository or the clone, once symlinks are resolved.  With a copy, it refuses an environment value that names the live files directory.
 
@@ -250,14 +250,14 @@ A container found by name, or a setting, could lead back into the project's live
 ### VER-25: Rewriting the provenance
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** [`pull/workdir.py`](../../scripts/surf_scoter_lib/pull/workdir.py).
+**Where:** [`pull/workdir.py`](../../py/src/dist_bin/surf_scoter_lib/pull/workdir.py).
 
 If the VCS report or the comparison with the base were kept in the working directory, an edit could turn "modified" into "committed".  The provenance and each analysis's record are kept beside the working directory, in the state directory, written only by `seed` and `analyze`.
 
 ### VER-26: The reviewer is a setup program
 
 **Severity:** Medium.  **Status:** By design.
-**Where:** `pull: runs: reviewer` in [`setup.yaml`](../../defaults/setup.yaml); the report's project text in [`pull/analyze.py`](../../scripts/surf_scoter_lib/pull/analyze.py).
+**Where:** `pull: runs: reviewer` in [`setup.yaml`](../../dist-files/setup.yaml); the report's project text in [`pull/analyze.py`](../../py/src/dist_bin/surf_scoter_lib/pull/analyze.py).
 
 A graphical or IDE reviewer that renders project text as HTML or Markdown could run the project's script.  The report gives every project text field with its `clean` form, for a reviewer to show; the setting is guarded, and a reviewer is trusted setup.  The reviewer only decides whether to approve: `approve` checks everything again.
 
@@ -270,28 +270,28 @@ The default reviewer needs a terminal and has no `--yes`, but a reviewer of your
 ### VER-28: Approving something other than what was shown
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `approve` in [`pull/approve.py`](../../scripts/surf_scoter_lib/pull/approve.py); `changed` in [`pull/analyze.py`](../../scripts/surf_scoter_lib/pull/analyze.py); [`pull/reviewer.py`](../../scripts/surf_scoter_lib/pull/reviewer.py).
+**Where:** `approve` in [`pull/approve.py`](../../py/src/dist_bin/surf_scoter_lib/pull/approve.py); `changed` in [`pull/analyze.py`](../../py/src/dist_bin/surf_scoter_lib/pull/analyze.py); [`pull/reviewer.py`](../../py/src/dist_bin/surf_scoter_lib/pull/reviewer.py).
 
 The working directory can change between the analysis on screen and approval (an editor saving a file, a reviewer bug).  Approval takes the analysis id, snapshots the working directory and its host file again, and refuses unless they're exactly what that analysis named.  The default reviewer checks `scoter pull changed` before every prompt, analyzes again when anything changed, and compares findings by id, marking what's new.
 
 ### VER-29: Skipping seeding
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `open_workdir` and `fingerprint` in [`pull/workdir.py`](../../scripts/surf_scoter_lib/pull/workdir.py).
+**Where:** `open_workdir` and `fingerprint` in [`pull/workdir.py`](../../py/src/dist_bin/surf_scoter_lib/pull/workdir.py).
 
 If `analyze` or `approve` took a path, the project's own `.surf-scoter.d` could be approved directly.  They take only ids `seed` registered, found through the SUC, and refuse one whose setup fingerprint (state directory, store, checks) isn't the SUC's, so a reviewer run from a different environment can't read another state directory.
 
 ### VER-30: The VCS handler's output
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** [`vcs_files.py`](../../scripts/surf_scoter_lib/vcs_files.py), [`vcs_git_files.py`](../../scripts/vcs_git_files.py).
+**Where:** [`vcs_files.py`](../../py/src/dist_bin/surf_scoter_lib/vcs_files.py), [`vcs_git_files.py`](../../py/src/dist_bin/vcs_git_files.py).
 
 File names with newlines, very large output, or a handler that reads the working tree through the VCS's filters.  The Git handler runs only `rev-parse`, `ls-tree -z` and `cat-file`, with `core.fsmonitor` off and no hooks, and works out blob ids itself.  Every report is cut off at a limit, checked against its schema, and its paths checked by name and shape; a hung handler is killed.
 
 ### VER-31: Resolving through a `PATH` the project influences
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `resolve` in [`host_file.py`](../../scripts/surf_scoter_lib/host_file.py); [`checks.py`](../../scripts/surf_scoter_lib/checks.py).
+**Where:** `resolve` in [`host_file.py`](../../py/src/dist_bin/surf_scoter_lib/host_file.py); [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py).
 
 Tools such as direnv add project directories to the `PATH`; resolving `program: eslint` could find the project's own script.  Every resolution (seeding, approval, unlocked runs) runs the path checks: a program in the project, one others can write, or one a `paths` check matches is found.  A locked configuration's run never resolves: it uses the host file's paths ([BRIDGE-11](host-bridge-attack-vectors.md)).
 
@@ -304,7 +304,7 @@ A host file read from the project's tree would let the project choose the progra
 ### VER-33: The unlocked state
 
 **Severity:** Medium.  **Status:** By design.
-**Where:** [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py); [`pull/lifecycle.py`](../../scripts/surf_scoter_lib/pull/lifecycle.py).
+**Where:** [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py); [`pull/lifecycle.py`](../../py/src/dist_bin/surf_scoter_lib/pull/lifecycle.py).
 
 An unlocked copy runs as it is, unreviewed, with its commands resolved as each run starts: an exemption by another name, possibly left unlocked for good.  Each run warns; after `pull: values: unlock-reminder-days` the warning lists what it allows, and a setup can stop runs after `unlock-days`.  `scoter push` refuses an unlocked configuration, and the checks still run.
 
@@ -329,7 +329,7 @@ Files can reappear in the unlocked directory after a lock (an editor left open, 
 ### VER-37: The unlocked directory setting
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `check_location` in [`pull/unlocked.py`](../../scripts/surf_scoter_lib/pull/unlocked.py).
+**Where:** `check_location` in [`pull/unlocked.py`](../../py/src/dist_bin/surf_scoter_lib/pull/unlocked.py).
 
 Inside a project clone or a state directory, the container could write its own settings for the next run; inside the project, its files would run unreviewed.  `pull: paths: unlocked-dir` is guarded, and refused inside the project, its repository, the clone, the state directory and the store.  The unlocked copy must be yours, with nothing others can write, checked on every use.
 
@@ -342,14 +342,14 @@ Inside a project clone or a state directory, the container could write its own s
 ### VER-39: The first push creates the project's `.surf-scoter.d`
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `_first_push` in [`pull/push.py`](../../scripts/surf_scoter_lib/pull/push.py).
+**Where:** `_first_push` in [`pull/push.py`](../../py/src/dist_bin/surf_scoter_lib/pull/push.py).
 
 Only when nothing at all is there (`lstat`): the files are written into a new directory beside it, and renamed into place after checking, just before, that nothing appeared.
 
 ### VER-40: Removing a configuration in use
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `retire` and `remove_retired` in [`configs.py`](../../scripts/surf_scoter_lib/verified/configs.py); `running_config_ids` in [`run_config.py`](../../scripts/surf_scoter_lib/run_config.py).
+**Where:** `retire` and `remove_retired` in [`configs.py`](../../py/src/dist_bin/surf_scoter_lib/verified/configs.py); `running_config_ids` in [`run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py).
 
 A configuration replaced, or removed, while an environment runs it is marked, not removed; the next run, `scoter kill` or `scoter cleanup` removes it once nothing runs it.  A running environment keeps the configuration it started with.
 
@@ -368,10 +368,10 @@ A project could put a container directory at `.surf-scoter.d/host.json/`.  Every
 
 ## Sensitive code
 
-* [`scripts/surf_scoter_lib/pull/`](../../scripts/surf_scoter_lib/pull/): seeding, analysis, approval, the reviewer, locking and unlocking, pushing.
-* [`scripts/surf_scoter_lib/verified/`](../../scripts/surf_scoter_lib/verified/): the store, snapshots, configurations and links.
-* [`scripts/surf_scoter_lib/run_config.py`](../../scripts/surf_scoter_lib/run_config.py) and [`scripts/main_run.py`](../../scripts/main_run.py): what a run runs.
-* [`scripts/surf_scoter_lib/host_file.py`](../../scripts/surf_scoter_lib/host_file.py), [`vcs_files.py`](../../scripts/surf_scoter_lib/vcs_files.py), [`review.py`](../../scripts/surf_scoter_lib/review.py) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py).
-* [`scoter.py`](../../scoter.py) and [`subcmd-no-project.txt`](../../scripts/subcmd-no-project.txt): how the project is found, without parsing it.
-* [`host/src/config/host_file.rs`](../../host/src/config/host_file.rs), [`host/src/config.rs`](../../host/src/config.rs) and [`host/src/universal.rs`](../../host/src/universal.rs): the host file and the copy in the universal configuration file.
-* The `verification` and `pull` sections of [`defaults/setup.yaml`](../../defaults/setup.yaml).
+* [`py/src/dist_bin/surf_scoter_lib/pull/`](../../py/src/dist_bin/surf_scoter_lib/pull/): seeding, analysis, approval, the reviewer, locking and unlocking, pushing.
+* [`py/src/dist_bin/surf_scoter_lib/verified/`](../../py/src/dist_bin/surf_scoter_lib/verified/): the store, snapshots, configurations and links.
+* [`py/src/dist_bin/surf_scoter_lib/run_config.py`](../../py/src/dist_bin/surf_scoter_lib/run_config.py) and [`py/src/dist_bin/main_run.py`](../../py/src/dist_bin/main_run.py): what a run runs.
+* [`py/src/dist_bin/surf_scoter_lib/host_file.py`](../../py/src/dist_bin/surf_scoter_lib/host_file.py), [`vcs_files.py`](../../py/src/dist_bin/surf_scoter_lib/vcs_files.py), [`review.py`](../../py/src/dist_bin/surf_scoter_lib/review.py) and [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py).
+* [`scoter.py`](../../py/src/dist_root/scoter.py) and [`subcmd-no-project.txt`](../../py/src/dist_bin/subcmd-no-project.txt): how the project is found, without parsing it.
+* [`rust/host/config/src/config/host_file.rs`](../../rust/host/config/src/config/host_file.rs), [`rust/host/config/src/config.rs`](../../rust/host/config/src/config.rs) and [`rust/host/config/src/universal.rs`](../../rust/host/config/src/universal.rs): the host file and the copy in the universal configuration file.
+* The `verification` and `pull` sections of [`dist-files/setup.yaml`](../../dist-files/setup.yaml).

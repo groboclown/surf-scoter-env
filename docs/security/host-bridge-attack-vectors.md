@@ -17,14 +17,14 @@ An allowed command runs on the host, as the developer, with the developer's cred
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| The invocation: command name, arguments, working directory, environment | Code in the container | [`analyze.rs`](../../host/src/host/analyze.rs), [`environment.rs`](../../host/src/config/environment.rs) |
-| Wire messages from the broker | Code in the container (the broker is part of the image) | [`host.rs`](../../host/src/host.rs), [`comm/`](../../containers/dev-env/src/comm.rs) |
-| Standard input and signals for a running command | Code in the container | [`exec.rs`](../../host/src/host/exec.rs) |
-| Project clone files named in path arguments | Code in the container, at any time | `resolve` in [`analyze.rs`](../../host/src/host/analyze.rs); the host program |
-| The `commands` configuration | The project, as pulled into your configuration | [`project.rs`](../../host/src/config/project.rs), [`pattern.rs`](../../host/src/config/pattern.rs), [`checks.py`](../../scripts/surf_scoter_lib/checks.py) |
-| The universal configuration file | `scoter`, as you | `load_universal` in [`config.rs`](../../host/src/config.rs); `check_for_run` in [`host_file.rs`](../../host/src/config/host_file.rs) |
-| The host file's programs on the host | Whoever can write them or their directories | `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs) |
-| The host's `PATH` and working directory | The developer | `find_on_host` in [`exec.rs`](../../host/src/host/exec.rs); [`command.rs`](../../host/src/config/command.rs) |
+| The invocation: command name, arguments, working directory, environment | Code in the container | [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs), [`environment.rs`](../../rust/host/config/src/config/environment.rs) |
+| Wire messages from the broker | Code in the container (the broker is part of the image) | [`host.rs`](../../rust/host/scoter-host/src/host.rs), [`comm/`](../../rust/container/comm/src/comm.rs) |
+| Standard input and signals for a running command | Code in the container | [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs) |
+| Project clone files named in path arguments | Code in the container, at any time | `resolve` in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs); the host program |
+| The `commands` configuration | The project, as pulled into your configuration | [`project.rs`](../../rust/host/config/src/config/project.rs), [`pattern.rs`](../../rust/host/config/src/config/pattern.rs), [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py) |
+| The universal configuration file | `scoter`, as you | `load_universal` in [`config.rs`](../../rust/host/config/src/config.rs); `check_for_run` in [`host_file.rs`](../../rust/host/config/src/config/host_file.rs) |
+| The host file's programs on the host | Whoever can write them or their directories | `accepted_executable` in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs) |
+| The host's `PATH` and working directory | The developer | `find_on_host` in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs); [`command.rs`](../../rust/host/config/src/config/command.rs) |
 
 
 ## Summary
@@ -52,7 +52,7 @@ An allowed command runs on the host, as the developer, with the developer's cred
 ### BRIDGE-1: Allowed commands that read container-controlled input
 
 **Severity:** Critical, when configured.  **Status:** By design; the configuration is the control.
-**Where:** the project's `commands`; [`analyze.rs`](../../host/src/host/analyze.rs).
+**Where:** the project's `commands`; [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs).
 
 The bridge checks the command line, not what the program does with it.  A program that reads configuration or code from its working directory, from a file argument or from its environment (`docker compose`, `make`, `npm run`, `terraform`, `docker build`, `git`, any shell or interpreter) runs whatever the container wrote there.  Allowing `docker compose up` in a directory of the project clone gives the container root on the host.
 
@@ -63,7 +63,7 @@ The bridge checks the command line, not what the program does with it.  A progra
 ### BRIDGE-2: The project chooses the commands
 
 **Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
-**Where:** [`project.rs`](../../host/src/config/project.rs); [`host_commands.rs`](../../host/src/config/host_commands.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py) (the checks); [`host_file.rs`](../../host/src/config/host_file.rs) and [`universal.rs`](../../host/src/universal.rs) (the configuration's commands and their programs).
+**Where:** [`project.rs`](../../rust/host/config/src/config/project.rs); [`host_commands.rs`](../../rust/host/config/src/config/host_commands.rs) and [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py) (the checks); [`host_file.rs`](../../rust/host/config/src/config/host_file.rs) and [`universal.rs`](../../rust/host/config/src/universal.rs) (the configuration's commands and their programs).
 
 The project only suggests `commands`.  `scoter-host` runs only your configuration's commands, which you approved with `scoter pull` (or `lock`, or `review`), each with the absolute program its host file names, and a change to the project's suggestion reaches a run only through another pull.  The checks run again on every run, so a check added since applies at once.  The setup's `verification: host-commands` checks refuse shells, interpreters, command runners and the like, and warn about programs that read configuration from their working directory (BRIDGE-1); programs inside the project are refused, and programs other users can write to are refused or flagged.
 
@@ -81,7 +81,7 @@ What's left:
 ### BRIDGE-3: Path checks race the host program
 
 **Severity:** High.  **Status:** Mitigated: closed for `path` arguments and the working directory itself; a program run in a directory of the clone still reads what's there by path.
-**Where:** `resolve` and `match_path` in [`analyze.rs`](../../host/src/host/analyze.rs); [`clone_path.rs`](../../host/src/host/clone_path.rs); `copy_in`, `copy_out` and `enter_clone_dir` in [`exec.rs`](../../host/src/host/exec.rs).
+**Where:** `resolve` and `match_path` in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs); [`clone_path.rs`](../../rust/host/scoter-host/src/host/clone_path.rs); `copy_in`, `copy_out` and `enter_clone_dir` in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs).
 
 A path argument used to be resolved and checked when the request arrived, then passed to the host program as a path.  The container could change the clone at any time after the check, including while the program ran, for example by replacing a checked directory with a symlink, and the host program then followed it outside the clone.  So could the working directory.
 
@@ -106,7 +106,7 @@ A path argument used to be resolved and checked when the request arrived, then p
 ### BRIDGE-4: Host output returns to the container
 
 **Severity:** High.  **Status:** By design.
-**Where:** [`exec.rs`](../../host/src/host/exec.rs).
+**Where:** [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs).
 
 Everything a host command prints goes back to the container, and the container supplies its standard input.  A command that prints a token, a session credential or a file's contents delivers it to the code the bridge was keeping it from.
 
@@ -117,7 +117,7 @@ Everything a host command prints goes back to the container, and the container s
 ### BRIDGE-5: Allowed environment variables steer the program
 
 **Severity:** High.  **Status:** By design; the configuration is the control.
-**Where:** [`environment.rs`](../../host/src/config/environment.rs); `env_plan` use in [`analyze.rs`](../../host/src/host/analyze.rs).
+**Where:** [`environment.rs`](../../rust/host/config/src/config/environment.rs); `env_plan` use in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs).
 
 Commands start with an empty environment, and only variables the configuration allows come through.  But many variables change what a program loads or where it connects (`LD_PRELOAD`, `PATH`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `AWS_CONFIG_FILE`, `DOCKER_HOST`), and broad `allow` patterns pass them.  Combined with knowledge of the clone's host path, a library or configuration file in the clone can be loaded by the host program.
 
@@ -128,7 +128,7 @@ Commands start with an empty environment, and only variables the configuration a
 ### BRIDGE-6: Path mapping and resolution
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`clone_path.rs`](../../host/src/host/clone_path.rs); [`project_clone.rs`](../../host/src/host/project_clone.rs).
+**Where:** `resolve`, `resolve_dir` and the `path` matching in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs); [`clone_path.rs`](../../rust/host/scoter-host/src/host/clone_path.rs); [`project_clone.rs`](../../rust/host/scoter-host/src/host/project_clone.rs).
 
 Container paths must be inside the project clone's mount (the effective `mounts: project-clone`).  They're mapped to names below the host's clone directory, with `.` and `..` worked out by name (`..` can't leave the clone), and must match the entry's `within` rule.  No name on the way may be a symlink, and the last must be a regular file; a `write` path may be missing, when its directory exists.  The host program never gets the path itself: it gets a copy ([BRIDGE-3](#bridge-3-path-checks-race-the-host-program)).
 
@@ -141,7 +141,7 @@ The container's persistent store is a container volume, not a host directory, so
 ### BRIDGE-7: Argument matching
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `match_args` and the `any` matching in [`analyze.rs`](../../host/src/host/analyze.rs); [`pattern.rs`](../../host/src/config/pattern.rs).
+**Where:** `match_args` and the `any` matching in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs); [`pattern.rs`](../../rust/host/config/src/config/pattern.rs).
 
 Arguments must match an entry one-to-one.  `any` placeholders refuse a leading `-` unless allowed, so they can't introduce options.  But a value without a leading dash can still mean something special to the program: an alternate URL scheme, a remote location, a response-file syntax such as `@file`, or a glob.
 
@@ -152,7 +152,7 @@ Arguments must match an entry one-to-one.  `any` placeholders refuse a leading `
 ### BRIDGE-8: A hostile broker
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** [`host.rs`](../../host/src/host.rs); [`low.rs`](../../containers/dev-env/src/comm/low.rs), [`broker_host.rs`](../../containers/dev-env/src/comm/broker_host.rs), [`client_host.rs`](../../containers/dev-env/src/comm/client_host.rs).
+**Where:** [`host.rs`](../../rust/host/scoter-host/src/host.rs); [`low.rs`](../../rust/container/comm/src/comm/low.rs), [`broker_host.rs`](../../rust/container/comm/src/comm/broker_host.rs), [`client_host.rs`](../../rust/container/comm/src/comm/client_host.rs).
 
 The broker runs from the image, which the project controls, so the host must treat every message from it as hostile.  Messages are length-prefixed and capped at 32 MiB, and malformed input ends the connection.  The cap is per message, not per connection or in total.
 
@@ -163,7 +163,7 @@ The broker runs from the image, which the project controls, so the host must tre
 ### BRIDGE-9: No limit on host processes
 
 **Severity:** Medium.  **Status:** Open.
-**Where:** [`host.rs`](../../host/src/host.rs) (a thread per process); [`exec.rs`](../../host/src/host/exec.rs).
+**Where:** [`host.rs`](../../rust/host/scoter-host/src/host.rs) (a thread per process); [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs).
 
 The container's process and memory limits don't apply on the host.  Each connection can start an allowed host process, with buffered input, and nothing limits how many run at once.
 
@@ -174,7 +174,7 @@ The container's process and memory limits don't apply on the host.  Each connect
 ### BRIDGE-10: Signals delivered to host processes
 
 **Severity:** Low.  **Status:** By design.
-**Where:** the signal handling in [`exec.rs`](../../host/src/host/exec.rs); the forwarded signals in [`client_host.rs`](../../containers/dev-env/src/comm/client_host.rs).
+**Where:** the signal handling in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs); the forwarded signals in [`client_host.rs`](../../rust/container/comm/src/comm/client_host.rs).
 
 The container can send a fixed set of signals to the host processes it started.  Some programs change behavior on signals such as `SIGUSR1`, for example by opening a debugging interface on the host.
 
@@ -185,7 +185,7 @@ The container can send a fixed set of signals to the host processes it started. 
 ### BRIDGE-11: The host's `PATH` lookup
 
 **Severity:** Low.  **Status:** Closed for a locked configuration; knowingly Open while it's unlocked.
-**Where:** `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs); `find_executable` in [`command.rs`](../../host/src/config/command.rs); [`host_file.rs`](../../host/src/config/host_file.rs); `resolve` in [`host_file.py`](../../scripts/surf_scoter_lib/host_file.py).
+**Where:** `accepted_executable` in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs); `find_executable` in [`command.rs`](../../rust/host/config/src/config/command.rs); [`host_file.rs`](../../rust/host/config/src/config/host_file.rs); `resolve` in [`host_file.py`](../../py/src/dist_bin/surf_scoter_lib/host_file.py).
 
 Bare command names used to be found on `scoter-host`'s own `PATH`, where relative entries such as `.` were resolved against its working directory, usually the project directory.
 
@@ -198,7 +198,7 @@ Now `scoter-host` runs exactly the absolute program the configuration's host fil
 ### BRIDGE-12: Windows hosts
 
 **Severity:** Medium.  **Status:** Unverified.
-**Where:** path mapping in [`analyze.rs`](../../host/src/host/analyze.rs) and [`project_clone.rs`](../../host/src/host/project_clone.rs); temporary file names; signal handling in [`exec.rs`](../../host/src/host/exec.rs).
+**Where:** path mapping in [`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs) and [`project_clone.rs`](../../rust/host/scoter-host/src/host/project_clone.rs); temporary file names; signal handling in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs).
 
 The bridge supports Windows hosts, where path rules differ: case-insensitive names, short (8.3) names, junctions, alternate data streams, device names and `\\?\` prefixes.  The temporary file name checks cover separators, `.`, `..` and device names, but the path resolution hasn't been tested against the rest.
 
@@ -209,7 +209,7 @@ The bridge supports Windows hosts, where path rules differ: case-insensitive nam
 ### BRIDGE-13: An accepted program can change after the review
 
 **Severity:** Medium.  **Status:** Partly Mitigated; Open for a program's contents.
-**Where:** `accepted_executable` in [`exec.rs`](../../host/src/host/exec.rs); `check_program` and `check_for_run` in [`host_file.rs`](../../host/src/config/host_file.rs); `resolve` in [`host_file.py`](../../scripts/surf_scoter_lib/host_file.py); the program checks in [`checks.py`](../../scripts/surf_scoter_lib/checks.py).
+**Where:** `accepted_executable` in [`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs); `check_program` and `check_for_run` in [`host_file.rs`](../../rust/host/config/src/config/host_file.rs); `resolve` in [`host_file.py`](../../py/src/dist_bin/surf_scoter_lib/host_file.py); the program checks in [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py).
 
 A configuration's host file records each program's absolute path and the real file it resolved to, with its symlinks followed.  At each run, the generator refuses a program that isn't an executable any more, that's now a different real file (a version manager switching a link, say), or that's in the project, its clone or its repository; `scoter-host` checks the same again as it starts.  So a changed link stops the run rather than running its new target.
 
@@ -222,7 +222,7 @@ Contents aren't checked unless the host file has a `sha256`: the tools don't rec
 ### BRIDGE-14: The bridge trusts the universal configuration file's command list
 
 **Severity:** Low (defense in depth).  **Status:** Open.
-**Where:** `load_universal` in [`config.rs`](../../host/src/config.rs); `check_for_run` in [`host_file.rs`](../../host/src/config/host_file.rs).
+**Where:** `load_universal` in [`config.rs`](../../rust/host/config/src/config.rs); `check_for_run` in [`host_file.rs`](../../rust/host/config/src/config/host_file.rs).
 
 `scoter-host` reads its commands from the universal configuration file's `host-brokered` list.  It checks the file's owner and mode, and that each program its `host-file` names is still the file it was approved as, but not that `host-brokered` is the configuration's commands with those programs, nor that the configuration is still the one in use in the store.  Only something that can already write your private files could use that, but it turns a change to one file into commands run on the host without a review.
 
@@ -233,8 +233,8 @@ Contents aren't checked unless the host file has a `sha256`: the tools don't rec
 
 ## Sensitive code
 
-* [`host/src/host/analyze.rs`](../../host/src/host/analyze.rs): request matching and path resolution.
-* [`host/src/host/exec.rs`](../../host/src/host/exec.rs): process start, environment, input, output and signals.
-* [`host/src/host.rs`](../../host/src/host.rs) and [`host/src/host/container.rs`](../../host/src/host/container.rs): the broker connection.
-* [`host/src/config/`](../../host/src/config/): the `commands`, `env` and pattern parsing, and the host file and its checks (`host_file.rs`).
-* [`containers/dev-env/src/comm/`](../../containers/dev-env/src/comm.rs): the wire protocol.
+* [`rust/host/scoter-host/src/host/analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs): request matching and path resolution.
+* [`rust/host/scoter-host/src/host/exec.rs`](../../rust/host/scoter-host/src/host/exec.rs): process start, environment, input, output and signals.
+* [`rust/host/scoter-host/src/host.rs`](../../rust/host/scoter-host/src/host.rs) and [`rust/host/scoter-host/src/host/container.rs`](../../rust/host/scoter-host/src/host/container.rs): the broker connection.
+* [`rust/host/config/src/config/`](../../rust/host/config/src/config/): the `commands`, `env` and pattern parsing, and the host file and its checks (`host_file.rs`).
+* [`rust/container/comm/src/comm/`](../../rust/container/comm/src/comm.rs): the wire protocol.

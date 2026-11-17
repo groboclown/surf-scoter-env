@@ -1,0 +1,18 @@
+# The programs that run inside the dev container, and the communication
+# library they share with the host's `scoter-host`.
+#
+# This workspace must stay self-contained (nothing outside `rust/container`),
+# so the dev-env image can build it from a sparse clone of this directory
+# alone; see containers/dev-env/Dockerfile.
+
+[workspace]
+resolver = "3"
+members = ["comm", "client", "broker"]
+
+[workspace.package]
+version = "0.9.0"
+edition = "2024"
+
+[workspace.dependencies]
+libc = "0.2"
+scoter-comm = { path = "comm" }

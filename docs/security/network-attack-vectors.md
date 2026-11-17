@@ -16,11 +16,11 @@ Code in the dev container wants to:
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules | The project file's `egress`, as pulled into your configuration | The generator's checks ([`egress.rs`](../../host/src/config/egress.rs)), then the gateway's script and container: see its page |
+| Egress rules | The project file's `egress`, as pulled into your configuration | The generator's checks ([`egress.rs`](../../rust/host/config/src/config/egress.rs)), then the gateway's script and container: see its page |
 | Requests to the gateway, hostnames | Code in the dev container | The gateway: see its page |
 | DNS answers for allowed domains | Whoever runs those domains' DNS | The gateway's address checks, and [`egress.nft`](../../containers/firewall-router/egress.nft) |
 | DNS queries from the dev container | Code in the dev container | The container runtime's resolver |
-| Network topology and start order | Your settings | [`docker-compose.yaml`](../../defaults/docker-compose.yaml), [firewall `entrypoint.sh`](../../containers/firewall-router/entrypoint.sh) |
+| Network topology and start order | Your settings | [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), [firewall `entrypoint.sh`](../../containers/firewall-router/entrypoint.sh) |
 | Forwarded ports | You, through the IDE | [`sshd_config`](../../containers/dev-env/sshd_config), IDE settings |
 
 
@@ -58,7 +58,7 @@ Once a host is allowed, anything in the container can send it anything the rule 
 ### NET-2: The project controls the allowlist
 
 **Severity:** High.  **Status:** Mitigated by [project verification](verification.md).
-**Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../host/src/config/egress.rs), [`public_suffix.rs`](../../host/src/config/public_suffix.rs) and [`checks.py`](../../scripts/surf_scoter_lib/checks.py); the gateway's script ([`gateway_squid.py`](../../scripts/gateway_squid.py), [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py), [`gateway_envoy.py`](../../scripts/gateway_envoy.py)); `_write_gateway_config` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** the project file's `egress`; the egress checks in [`egress.rs`](../../rust/host/config/src/config/egress.rs), [`public_suffix.rs`](../../rust/host/config/src/config/public_suffix.rs) and [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py); the gateway's script ([`gateway_squid.py`](../../py/src/dist_bin/gateway_squid.py), [`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py), [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py)); `_write_gateway_config` in [`main_run.py`](../../py/src/dist_bin/main_run.py).
 
 The project suggests the rules, but the gateway gets only your configuration's rules, which you approved with `scoter pull`, from the verified store.  Without a configuration, nothing gets out.  The generator refuses hosts that aren't plain, lower-case DNS names (no IP addresses, a `*` only as a leading `*.`, at least two labels), wildcards over a public suffix, and `secrets` anywhere but on an `https` rule for an exact host, on a port in the setup's `network-gateway-tls-ports`.  The gateway's script writes each host into its own configuration (escaped into Squid's pattern or Envoy's route, or quoted in seekrit-proxy's), only on the ports in the setup's `network-gateway-ports`, and stops the launch on a rule the gateway can't enforce.
 
@@ -75,7 +75,7 @@ What's left:
 ### NET-3: DNS from the dev container
 
 **Severity:** High, if the channel exists.  **Status:** Unverified (N8).
-**Where:** the `isolated` network in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); the container runtime's resolver (Docker's embedded DNS, Podman's `aardvark-dns`).
+**Where:** the `isolated` network in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml); the container runtime's resolver (Docker's embedded DNS, Podman's `aardvark-dns`).
 
 The firewall limits the gateway's DNS, but the dev container has its own path to the runtime's resolver on the isolated network.  If that resolver forwards queries for external names, DNS becomes an exfiltration and command channel that bypasses the gateway entirely.
 
@@ -86,7 +86,7 @@ The firewall limits the gateway's DNS, but the dev container has its own path to
 ### NET-4: Proxy bypass
 
 **Severity:** High.  **Status:** Mitigated (N1).
-**Where:** `internal: true` and the `dev` service's `networks` in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `internal: true` and the `dev` service's `networks` in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 The dev container has no route out except the gateway.  The proxy environment variables are only a convenience.  Everything else on this page assumes this holds.
 
@@ -101,7 +101,7 @@ The dev container has no route out except the gateway.  The proxy environment va
 ### NET-6: Environments sharing a network
 
 **Severity:** Medium.  **Status:** Unverified (N7).
-**Where:** `docker: runs: compose-up` in [`setup.yaml`](../../defaults/setup.yaml); the resources directory in [`main_run.py`](../../scripts/main_run.py).
+**Where:** `docker: runs: compose-up` in [`setup.yaml`](../../dist-files/setup.yaml); the resources directory in [`main_run.py`](../../py/src/dist_bin/main_run.py).
 
 `compose-up` passes no project name, so compose derives one from the resources directory's name, `resources`, for every project.  Two environments running at once may share or replace each other's containers and networks.
 
@@ -112,7 +112,7 @@ The dev container has no route out except the gateway.  The proxy environment va
 ### NET-7: Traffic without firewall rules
 
 **Severity:** Medium.  **Status:** Unverified (N6).
-**Where:** the health check, `depends_on` and `restart` policies in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); the firewall's [`entrypoint.sh`](../../containers/firewall-router/entrypoint.sh).
+**Where:** the health check, `depends_on` and `restart` policies in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml); the firewall's [`entrypoint.sh`](../../containers/firewall-router/entrypoint.sh).
 
 The gateway starts only after the firewall reports its rules loaded.  Both use `restart: unless-stopped`, and nothing tests what happens to the gateway, which lives in the firewall's network namespace, if the firewall restarts or its rules are deleted.
 
@@ -151,8 +151,8 @@ A forwarded port lets the container serve content to the host's `localhost`, and
 
 Changes to these files can weaken the network properties, and need a security review:
 
-* [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml): networks, capabilities, start order.
+* [`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml): networks, capabilities, start order.
 * [`containers/firewall-router/`](../../containers/firewall-router/): the firewall rules and their start-up checks.
 * Each gateway's container and script: see the [Squid](network-gateway-squid-attack-vectors.md#sensitive-code), [seekrit](network-gateway-seekrit-attack-vectors.md#sensitive-code) and [Envoy](network-gateway-envoy-attack-vectors.md#sensitive-code) pages.
 * [`containers/dev-env/sshd_config`](../../containers/dev-env/sshd_config): forwarding settings.
-* The egress checks in [`host/src/config/egress.rs`](../../host/src/config/egress.rs) and [`scripts/surf_scoter_lib/gateway.py`](../../scripts/surf_scoter_lib/gateway.py), and the gateway handling in [`scripts/main_run.py`](../../scripts/main_run.py).
+* The egress checks in [`rust/host/config/src/config/egress.rs`](../../rust/host/config/src/config/egress.rs) and [`py/src/dist_bin/surf_scoter_lib/gateway.py`](../../py/src/dist_bin/surf_scoter_lib/gateway.py), and the gateway handling in [`py/src/dist_bin/main_run.py`](../../py/src/dist_bin/main_run.py).

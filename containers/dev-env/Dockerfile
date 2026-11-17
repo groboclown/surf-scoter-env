@@ -1,12 +1,50 @@
-# The container that builds the program used to connect to the host.
-FROM public.ecr.aws/docker/library/rust:slim-trixie AS build
+# Where the bridge programs' source (`rust/container` in the Surf Scoter
+# repository) comes from:
+#   git:   a sparse clone of that one directory, at the pinned commit below.
+#          This is how the distribution builds it: the source isn't shipped
+#          with the distribution.
+#   local: a copy already in the build context, in `rust-container/`.
+#          `make dev-env-image` stages one from your checkout
+#          (build-scripts/stage-dev-env.sh), for Surf Scoter development.
+ARG SCOTER_SOURCE=git
 
-WORKDIR /usr/src/surf-scoter-env
-COPY Cargo.lock Cargo.toml ./
-COPY src ./src
+
+# The `git` source.  The commit is pinned by its full id, and checked after
+# the fetch, so the source can't change under the same build arguments.
+# When `rust/container` changes, set SCOTER_COMMIT to a commit with the
+# change (`make dev-env-pin-check` warns when it's behind).
+FROM public.ecr.aws/docker/library/rust:slim-trixie AS src-git
+ARG SCOTER_REPO=https://github.com/groboclown/surf-scoter-env.git
+ARG SCOTER_COMMIT=0000000000000000000000000000000000000000
 RUN set -x \
- && cargo test \
- && cargo build --release
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && git init -q /tmp/surf-scoter-env \
+ && cd /tmp/surf-scoter-env \
+ && git remote add origin "${SCOTER_REPO}" \
+ && git sparse-checkout set --cone rust/container \
+ && git fetch -q --depth 1 --filter=blob:none origin "${SCOTER_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && test "$( git rev-parse HEAD )" = "${SCOTER_COMMIT}" \
+ && mv rust/container /usr/src/surf-scoter-env \
+ && cd / \
+ && rm -rf /tmp/surf-scoter-env
+
+
+# The `local` source.
+FROM public.ecr.aws/docker/library/rust:slim-trixie AS src-local
+COPY rust-container /usr/src/surf-scoter-env
+
+
+# Build the programs used to connect to the host.
+FROM src-${SCOTER_SOURCE} AS build
+WORKDIR /usr/src/surf-scoter-env
+RUN set -x \
+ && cargo test --locked \
+ && cargo build --release --locked
 
 
 # The base container.

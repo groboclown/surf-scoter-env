@@ -19,9 +19,9 @@ The bridge is built to say no.  It runs only the exact command forms listed in t
  +--------------------------------------+        +------------------------------+
 ```
 
-* **`scoter-client`** ([`client.rs`](../../containers/dev-env/src/client.rs)) is hard-linked in the container under the name of each bridged command.  It sends its working directory, arguments and environment to the host, then relays standard input, output, error, signals and the exit code, so the command feels local.
-* **The broker** ([`broker.rs`](../../containers/dev-env/src/broker.rs)) listens on a Unix socket in the container and multiplexes client connections over its standard input and output.  It doesn't read the messages it passes along.
-* **`scoter-host`** ([`host.rs`](../../host/src/host.rs)) starts the broker with `docker exec -i`, decides whether each request may run ([`analyze.rs`](../../host/src/host/analyze.rs)), and runs the approved ones ([`exec.rs`](../../host/src/host/exec.rs)).
+* **`scoter-client`** ([`client.rs`](../../rust/container/client/src/main.rs)) is hard-linked in the container under the name of each bridged command.  It sends its working directory, arguments and environment to the host, then relays standard input, output, error, signals and the exit code, so the command feels local.
+* **The broker** ([`broker.rs`](../../rust/container/broker/src/main.rs)) listens on a Unix socket in the container and multiplexes client connections over its standard input and output.  It doesn't read the messages it passes along.
+* **`scoter-host`** ([`host.rs`](../../rust/host/scoter-host/src/host.rs)) starts the broker with `docker exec -i`, decides whether each request may run ([`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs)), and runs the approved ones ([`exec.rs`](../../rust/host/scoter-host/src/host/exec.rs)).
 
 The command forms come from the `commands` section of the [project configuration file](../project-configuration-file.md#host-commands).
 
@@ -38,11 +38,11 @@ The command forms come from the `commands` section of the [project configuration
 
 The command name, arguments, working directory and environment all come from the container.  The client binary and its hard links are a convenience, not a boundary: any process in the container can connect to the socket and send whatever it likes, including a made-up `argv[0]`.  So the host validates the request itself, and the broker sits on the untrusted side.
 
-The wire protocol ([`comm`](../../containers/dev-env/src/comm.rs)) caps every message at 32 MiB, rejects malformed input by closing the connection, and uses length-prefixed binary framing so data can't be mistaken for commands.
+The wire protocol ([`comm`](../../rust/container/comm/src/comm.rs)) caps every message at 32 MiB, rejects malformed input by closing the connection, and uses length-prefixed binary framing so data can't be mistaken for commands.
 
 ### Exact allowlist matching
 
-A request runs only if an entry in `commands` matches it ([`analyze.rs`](../../host/src/host/analyze.rs)):
+A request runs only if an entry in `commands` matches it ([`analyze.rs`](../../rust/host/scoter-host/src/host/analyze.rs)):
 
 * The command name must match, and the arguments must match the entry's `args` one-to-one, with the same count.
 * Plain string tokens must match exactly.

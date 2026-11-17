@@ -6,6 +6,7 @@ ZIP ?= zip
 DOCKER ?= docker
 CARGO_BIN ?= ~/.cargo/bin
 PYTHON ?= python3
+VENV_PYTHON ?= .venv/bin/python
 
 # Used if you don't have osvscanner installed
 GO ?= go
@@ -93,66 +94,66 @@ self-host-remove:
 # ---------------------------------------------------------------------
 # Rust-related tasks.
 
-## dev-env-rust-tests        Run unit tests for the `dev-env` container tools.
-.PHONY: dev-env-rust-tests
-test: dev-env-rust-tests
-dev-env-rust-tests:
-	cd containers/dev-env && $(CARGO) test
+## container-rust-tests      Run unit tests for the `rust/container` tools (dev container bridge).
+.PHONY: container-rust-tests
+test: container-rust-tests
+container-rust-tests:
+	cd rust/container && $(CARGO) test --locked
 
-## dev-env-rust-clean        Clean the generated rust files from the 'dev-env' container.
-.PHONY: dev-env-rust-clean
-clean: dev-env-rust-clean
-dev-env-rust-clean:
-	-rm -rf containers/dev-env/target
+## container-rust-clean      Clean the generated rust files from `rust/container`.
+.PHONY: container-rust-clean
+clean: container-rust-clean
+container-rust-clean:
+	-rm -rf rust/container/target
 
-## dev-env-rust-fmt          Run 'fmt' on the 'dev-env' container source files.
-.PHONY: dev-env-rust-fmt
-fmt: dev-env-rust-fmt
-dev-env-rust-fmt:
-	cd containers/dev-env && $(CARGO) fmt --all
+## container-rust-fmt        Run 'fmt' on the `rust/container` source files.
+.PHONY: container-rust-fmt
+fmt: container-rust-fmt
+container-rust-fmt:
+	cd rust/container && $(CARGO) fmt --all
 
-## dev-env-rust-lint         Run 'clippy' on the 'dev-env' container source files.
-.PHONY: dev-env-rust-lint
-lint: dev-env-rust-lint
-dev-env-rust-lint:
-	cd containers/dev-env && $(CARGO) clippy --no-deps --locked
+## container-rust-lint       Run 'clippy' on the `rust/container` source files.
+.PHONY: container-rust-lint
+lint: container-rust-lint
+container-rust-lint:
+	cd rust/container && $(CARGO) clippy --no-deps --locked
 
 
-## host-rust-tests           Run unit tests for the 'host' program.
+## host-rust-tests           Run unit tests for the `rust/host` programs.
 .PHONY: host-rust-tests
 test: host-rust-tests
 host-rust-tests:
-	cd host && $(CARGO) test
+	cd rust/host && $(CARGO) test --locked
 
-## host-rust-clean           Clean the generated rust files from 'host'.
+## host-rust-clean           Clean the generated rust files from `rust/host`.
 .PHONY: host-rust-clean
 clean: host-rust-clean
 host-rust-clean:
-	-rm -rf host/target
+	-rm -rf rust/host/target
 
-## host-rust-fmt             Run 'fmt' on the 'host' source files.
+## host-rust-fmt             Run 'fmt' on the `rust/host` source files.
 .PHONY: host-rust-fmt
 fmt: host-rust-fmt
 host-rust-fmt:
-	cd host && $(CARGO) fmt --all
+	cd rust/host && $(CARGO) fmt --all
 
-## host-rust-lint            Run 'clippy' on the 'host' source files.
+## host-rust-lint            Run 'clippy' on the `rust/host` source files.
 .PHONY: host-rust-lint
 lint: host-rust-lint
 host-rust-lint:
-	cd host && $(CARGO) clippy --no-deps --locked
+	cd rust/host && $(CARGO) clippy --no-deps --locked
 
 ## host-build-debug          Build the host executable for your current platform.
 .PHONY: host-build-debug
 build: host-build-debug
 host-build-debug:
-	cd host && $(CARGO) build
+	cd rust/host && $(CARGO) build
 
 ## host-build-release        Build the host executable for your current platform (release-ready).
 .PHONY: host-build-release
 build: host-build-release
 host-build-release:
-	cd host && $(CARGO) build --release
+	cd rust/host && $(CARGO) build --release
 
 ## host-build-release-all    Build the host executable for all supported platforms (release-ready).
 .PHONY: host-build-release-all
@@ -165,23 +166,23 @@ host-build-release-all:
 .PHONY: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-all: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-x86_64-unknown-linux-gnu: dependencies-cross
-	cd host && $(CARGO_BIN)/cross build --target x86_64-unknown-linux-gnu --release
+	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-unknown-linux-gnu --release
 
 .PHONY: host-build-release-aarch64-unknown-linux-gnu
 host-build-release-all: host-build-release-aarch64-unknown-linux-gnu
 host-build-release-aarch64-unknown-linux-gnu:
-	cd host && $(CARGO_BIN)/cross build --target aarch64-unknown-linux-gnu --release
+	cd rust/host && $(CARGO_BIN)/cross build --target aarch64-unknown-linux-gnu --release
 
 .PHONY: host-build-release-x86_64-apple-darwin
 # macOS builds not added to host-build-release-all, as it requires a custom
 # Cross.toml image with the macOS SDK license.
 host-build-release-x86_64-apple-darwin: dependencies-cross
-	cd host && $(CARGO_BIN)/cross build --target x86_64-apple-darwin --release
+	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-apple-darwin --release
 
 .PHONY: host-build-release-x86_64-pc-windows-gnu
 host-build-release-all: host-build-release-x86_64-pc-windows-gnu
 host-build-release-x86_64-pc-windows-gnu: dependencies-cross
-	cd host && $(CARGO_BIN)/cross build --target x86_64-pc-windows-gnu --release
+	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-pc-windows-gnu --release
 
 .PHONY: dependencies-cross
 dev-install: dependencies-cross
@@ -197,18 +198,33 @@ dependencies-cross:
 .PHONY: image
 image:
 
-## dev-env-image             Build the dev-env image.
+## dev-env-image             Build the dev-env image, from this checkout's `rust/container`
+##                           (copied into a staged build context, not fetched).
 .PHONY: dev-env-image
 build: dev-env-image
 image: dev-env-image
 dev-env-image:
-	cd containers/dev-env && $(DOCKER) build -t $(DEV_ENV_TAG) .
+	build-scripts/stage-dev-env.sh target/dev-env-context
+	cd target/dev-env-context && $(DOCKER) build --build-arg SCOTER_SOURCE=local -t $(DEV_ENV_TAG) .
+
+## dev-env-pin-check         Warn when `rust/container` has changed since the commit that
+##                           containers/dev-env/Dockerfile fetches (SCOTER_COMMIT).
+.PHONY: dev-env-pin-check
+lint: dev-env-pin-check
+dev-env-pin-check:
+	@pin=$$( sed -n 's/^ARG SCOTER_COMMIT=//p' containers/dev-env/Dockerfile ) ; \
+	if ! git cat-file -e "$${pin}^{commit}" 2>/dev/null ; then \
+		echo "WARNING: containers/dev-env/Dockerfile SCOTER_COMMIT ($${pin}) isn't a commit here." ; \
+	elif ! git diff --quiet "$${pin}" -- rust/container ; then \
+		echo "WARNING: rust/container changed since SCOTER_COMMIT ($${pin}); update containers/dev-env/Dockerfile." ; \
+	fi
 
 ## dev-env-clean             Delete the local dev-env image.
 .PHONY: dev-env-clean
 clean: dev-env-clean
 dev-env-clean:
 	-$(DOCKER) rmi $(DEV_ENV_TAG)
+	-rm -rf target/dev-env-context
 
 
 ## firewall-router-image     Build the firewall-router image.
@@ -268,31 +284,34 @@ network-gateway-envoy-clean:
 # ---------------------------------------------------------------------
 # Script tasks
 
-## script-tests              Run the script unit tests.
+## script-tests              Run the Python unit tests (`py/tests`).
 #  This just runs tests, which doesn't use any dev requirements.
 .PHONY: script-tests
 test: script-tests
 script-tests:
-	$(PYTHON) -m unittest discover -t . -s scripts/tests
+	mkdir -p target
+	cd py && $(VENV_PYTHON) -m coverage run -m pytest --junitxml=../target/python-test-results.xml
 
 
 .PHONY: python-venv
 dev-install: python-venv
 python-venv:
-	test -d .venv || $(PYTHON) -m venv .venv
-	.venv/bin/pip install -r dev-requirements.txt
+	test -d py/.venv || $(PYTHON) -m venv py/.venv
+	py/.venv/bin/pip install -r py/dev-requirements.txt
 
 
+## python-ruff               Run ruff on the Python sources (settings in py/pyproject.toml).
 .PHONY: python-ruff
 lint: python-ruff
 python-ruff:
-	.venv/bin/python -m ruff check scoter.py scripts/
+	cd py && .venv/bin/python -m ruff check src tests
 
 
+## python-bandit             Run bandit on the Python sources (settings in py/pyproject.toml).
 .PHONY: python-bandit
 lint: python-bandit
 python-bandit:
-	.venv/bin/python -m bandit -r scoter.py scripts/
+	cd py && .venv/bin/python -m bandit -c pyproject.toml -r src tests
 
 
 # ---------------------------------------------------------------------
@@ -328,14 +347,14 @@ target/sboms/surf-scoter-host.cdx.json: target/sboms
 	$(CDXGEN) -t rust --no-recurse --format cyclonedx \
 		--author "Surf Scoter Team" \
 		--output $@ \
-		host
+		rust/host
 
 sbom: target/sboms/surf-scoter-bridge.cdx.json
 target/sboms/surf-scoter-bridge.cdx.json: target/sboms
 	$(CDXGEN) -t rust --no-recurse --format cyclonedx \
 		--author "Surf Scoter Team" \
 		--output $@ \
-		containers/dev-env
+		rust/container
 
 sbom: target/sboms/surf-scoter-python-dev.cdx.json
 # cdxgen expects a directory for python, not a file.
@@ -345,7 +364,7 @@ target/sboms/surf-scoter-python-dev.cdx.json: target/sboms
 		--project-version $(VERSION) \
 		--project-name "surf-scoter Python dev tools" \
 		--output $@ \
-		.
+		py
 
 sbom: target/sboms/surf-scoter-dev-env.cdx.json
 target/sboms/surf-scoter-dev-env.cdx.json: target/images/dev-env.tar

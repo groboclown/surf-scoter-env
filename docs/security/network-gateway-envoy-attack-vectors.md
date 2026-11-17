@@ -11,13 +11,13 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_envoy.py`](../../scripts/gateway_envoy.py) turns them into Envoy's routes |
-| `CONNECT` requests: the target, the `Host` header, other headers | Code in the dev container | Envoy's HTTP/1 codec and routes, as configured by [`gateway_envoy.py`](../../scripts/gateway_envoy.py) |
-| Requests to read hosts: TLS, HTTP/1.1 and HTTP/2, `:authority`, methods, paths, headers, bodies | Code in the dev container | Each read host's internal listener and routes, in [`gateway_envoy.py`](../../scripts/gateway_envoy.py) |
+| Egress rules | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) turns them into Envoy's routes |
+| `CONNECT` requests: the target, the `Host` header, other headers | Code in the dev container | Envoy's HTTP/1 codec and routes, as configured by [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
+| Requests to read hosts: TLS, HTTP/1.1 and HTTP/2, `:authority`, methods, paths, headers, bodies | Code in the dev container | Each read host's internal listener and routes, in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
 | Responses from read hosts, and their certificates | The upstream servers | Envoy's upstream TLS, checked against the image's system CAs |
-| The read hosts' certificates and keys | `network-gateway-mk-leaf`, with the run's CA | `make_leaves` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py); the gateway's configuration file |
+| The read hosts' certificates and keys | `network-gateway-mk-leaf`, with the run's CA | `make_leaves` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); the gateway's configuration file |
 | DNS answers for allowed names | Whoever runs those domains' DNS | [`egress.nft`](../../containers/firewall-router/egress.nft) only |
-| The run's CA | `scoter run` | [`gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../defaults/docker-compose.yaml), `make_leaves` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py) |
+| The run's CA | `scoter run` | [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), `make_leaves` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
 | The gateway's image | Envoy's upstream | [`network-gateway-envoy/Dockerfile`](../../containers/network-gateway-envoy/Dockerfile), pinned by digest |
 
 
@@ -41,7 +41,7 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 ### ENVOY-1: The host checked isn't the host dialled
 
 **Severity:** High.  **Status:** Mitigated (N2).
-**Where:** `config`, `route` and `authority_match` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py), and the invariant tests in [`test_gateway_envoy.py`](../../scripts/tests/test_gateway_envoy.py).
+**Where:** `config`, `route` and `authority_match` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py), and the invariant tests in [`test_gateway_envoy.py`](../../py/tests/test_gateway_envoy.py).
 
 The confused deputy.  The routes decide whether a request is allowed; the dynamic forward proxy decides where it goes.  If those two see different hosts, the container can pass the check with an allowed host and be connected to another.  The dynamic forward proxy takes its host from filter state (`envoy.upstream.dynamic_host` and `dynamic_port`, when `allow_dynamic_host_from_filter_state` is on), then from a route's host rewrite (`host_rewrite_literal`, or `host_rewrite_header`, a header the client picks), and only then from the request's `:authority`.  Port stripping in the connection manager, or a virtual host's domain match that ignores the port, would let the check pass a port the rule didn't name.
 
@@ -54,12 +54,12 @@ The configuration has none of these.  The HTTP filters are only the dynamic forw
 
 **Red team:** try `CONNECT` targets with odd encodings, percent-escapes, IPv6 brackets, whitespace, duplicate or conflicting `Host` headers, absolute-form requests, HTTP/2 prior knowledge, and `Upgrade` headers.  Look for any way to make the upstream address differ from the matched route's.
 
-**When changing this code:** never add `host_rewrite_*`, `auto_host_rewrite`, `allow_dynamic_host_from_filter_state`, a `set_filter_state` filter, an SNI or UDP dynamic forward proxy, `strip_any_host_port`, `strip_matching_host_port`, or `strip_trailing_host_dot`.  Keep the route matching the whole `:authority`, and the codec HTTP/1 only.  [`test_gateway_envoy.py`](../../scripts/tests/test_gateway_envoy.py) checks these; a change that breaks one of its invariant tests needs a security review, not a test update.
+**When changing this code:** never add `host_rewrite_*`, `auto_host_rewrite`, `allow_dynamic_host_from_filter_state`, a `set_filter_state` filter, an SNI or UDP dynamic forward proxy, `strip_any_host_port`, `strip_matching_host_port`, or `strip_trailing_host_dot`.  Keep the route matching the whole `:authority`, and the codec HTTP/1 only.  [`test_gateway_envoy.py`](../../py/tests/test_gateway_envoy.py) checks these; a change that breaks one of its invariant tests needs a security review, not a test update.
 
 ### ENVOY-2: Allowed names resolving to forbidden addresses
 
 **Severity:** Medium.  **Status:** Partly mitigated (N3, N4).
-**Where:** `dns_cache_config` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py); the `blocked_v4` set and the loopback rule in [`egress.nft`](../../containers/firewall-router/egress.nft).
+**Where:** `dns_cache_config` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); the `blocked_v4` set and the loopback rule in [`egress.nft`](../../containers/firewall-router/egress.nft).
 
 As with [SQUID-1](network-gateway-squid-attack-vectors.md#squid-1-allowed-names-resolving-to-forbidden-addresses), an allowed name whose DNS an attacker controls can point anywhere.  Unlike Squid and seekrit-proxy, Envoy's dynamic forward proxy has no list of addresses it refuses: it connects to whatever the name resolves to.  The firewall's blocked set still drops private, link-local (metadata), carrier-grade NAT, multicast, documentation and reserved IPv4 addresses, and it drops IPv6 entirely; Envoy looks up IPv4 addresses only.
 
@@ -72,7 +72,7 @@ What's left is loopback.  The firewall lets the gateway's namespace talk to itse
 ### ENVOY-3: DNS lookups for names no rule allows
 
 **Severity:** Medium.  **Status:** Mitigated (N2).
-**Where:** the filter list and routes in [`gateway_envoy.py`](../../scripts/gateway_envoy.py).
+**Where:** the filter list and routes in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py).
 
 A lookup is itself a way out: a request for `<data>.attacker.example` carries the data to the attacker's DNS server, whatever the gateway does next.  The dynamic forward proxy filter only looks up a host when the request's route sends it to the proxy's cluster, and only a rule's route does.  A request no rule matches reaches the router without a route and gets a 404 without a lookup.  This is the same property Squid gets from checking the name before the address.
 
@@ -96,7 +96,7 @@ Envoy parses hostile input.  If it's subverted, the firewall still limits it to 
 ### ENVOY-5: The run's CA key, kept from the gateway
 
 **Severity:** Low.  **Status:** Mitigated.
-**Where:** as [SQUID-3](network-gateway-squid-attack-vectors.md#squid-3-the-runs-ca-with-a-gateway-that-doesnt-use-it); `make_leaves` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py).
+**Where:** as [SQUID-3](network-gateway-squid-attack-vectors.md#squid-3-the-runs-ca-with-a-gateway-that-doesnt-use-it); `make_leaves` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py).
 
 The dev container trusts the run's CA for every host.  Envoy never gets its key: with `network-gateway-reads-tls: 'no'`, its `/user-space/ca` is an empty directory, and the key stays on the host, readable only by you, until the run ends.  The key is only used on the host, by `network-gateway-write-config`, to sign a certificate for each host the rules read ([ENVOY-7](#envoy-7-the-read-hosts-certificate-keys)).  So a subverted Envoy can pass as the read hosts, but not as any other.
 
@@ -107,7 +107,7 @@ The dev container trusts the run's CA for every host.  Envoy never gets its key:
 ### ENVOY-6: A read host's requests sent somewhere else
 
 **Severity:** High.  **Status:** Mitigated (N2).
-**Where:** `_intercept_listener`, `_intercept_clusters`, `request_authority_regex` and `_overlap_refusal` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py), and the invariant tests in [`test_gateway_envoy.py`](../../scripts/tests/test_gateway_envoy.py).
+**Where:** `_intercept_listener`, `_intercept_clusters`, `request_authority_regex` and `_overlap_refusal` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py), and the invariant tests in [`test_gateway_envoy.py`](../../py/tests/test_gateway_envoy.py).
 
 The confused deputy again, inside TLS.  Once the gateway reads a host's traffic, the request itself names a host (`:authority`, or HTTP/1's `Host`), which the container chooses, and could aim at another site behind the same server, or the same CDN.  The gateway could also be made to talk to a server that isn't the host, if it didn't check the server's certificate.
 
@@ -120,7 +120,7 @@ Each read host and port has its own internal listener, reached only from the `CO
 ### ENVOY-7: The read hosts' certificate keys
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `make_leaves` and `main` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py); `dev-env: runs: network-gateway-mk-leaf` in [`setup.yaml`](../../defaults/setup.yaml); the gateway's configuration in the run's resources directory.
+**Where:** `make_leaves` and `main` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); `dev-env: runs: network-gateway-mk-leaf` in [`setup.yaml`](../../dist-files/setup.yaml); the gateway's configuration in the run's resources directory.
 
 Each read host's certificate key is in the gateway's configuration, which the gateway runs as its own user to read, so it's readable by others (mode 644).  Whoever can read it can pass as that host to the dev container while it trusts the run's CA.  The script refuses to write it unless a directory above it is yours alone, as `scoter run` does for the seekrit gateway's CA key.  The certificates are new each run, made in a private temporary directory that's removed, valid for 30 days, and only good for as long as the dev container trusts the CA, which is new each run.
 
@@ -131,7 +131,7 @@ Each read host's certificate key is in the gateway's configuration, which the ga
 ### ENVOY-8: The gateway's memory, held by slow readers
 
 **Severity:** Low.  **Status:** Mitigated.
-**Where:** `HTTP2_WINDOWS` and `MAX_CONCURRENT_STREAMS` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py); `mem_limit` in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `HTTP2_WINDOWS` and `MAX_CONCURRENT_STREAMS` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); `mem_limit` in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 Reading a host puts Envoy between two connections.  With Envoy's default HTTP/2 stream window (256 MiB), an upstream sends a whole response into the gateway's memory however slowly the container reads it: measured, 20 slow readers held 160 MB.  The windows are set to 1 MiB a stream and 4 MiB a connection, both ways, with at most 100 streams on a connection from the container; 20 slow readers then hold about 30 MB.  The container can still use up the gateway's memory with enough slow connections, which stops its own network until the gateway restarts; nothing else.
 
@@ -142,7 +142,7 @@ Reading a host puts Envoy between two connections.  With Envoy's default HTTP/2 
 ### ENVOY-9: What the log holds
 
 **Severity:** Low.  **Status:** By design.
-**Where:** `ACCESS_LOG_FORMAT` in [`gateway_envoy.py`](../../scripts/gateway_envoy.py); [`netlog.py`](../../scripts/surf_scoter_lib/netlog.py).
+**Where:** `ACCESS_LOG_FORMAT` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); [`netlog.py`](../../py/src/dist_bin/surf_scoter_lib/netlog.py).
 
 For a read host, the access log has each request's method and path, which may carry a token in its query string, and `scoter netlog` shows them.  The log goes to the container tool's log for the gateway, readable by whoever can use the container tool.  It never has headers or bodies.
 
@@ -156,7 +156,7 @@ For a read host, the access log has each request's method and path, which may ca
 Changes to these files can weaken the Envoy gateway, and need a security review:
 
 * [`containers/network-gateway-envoy/`](../../containers/network-gateway-envoy/): the image, and its default configuration.
-* [`scripts/gateway_envoy.py`](../../scripts/gateway_envoy.py): what Envoy is told to allow, and how; see [ENVOY-1](#envoy-1-the-host-checked-isnt-the-host-dialled).
-* [`scripts/tests/test_gateway_envoy.py`](../../scripts/tests/test_gateway_envoy.py): the invariant tests.
-* [`scripts/surf_scoter_lib/gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py): the run's CA, and which gateway gets it.
-* `dev-env: runs: network-gateway-mk-leaf` in [`defaults/setup.yaml`](../../defaults/setup.yaml): the read hosts' certificates.
+* [`py/src/dist_bin/gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py): what Envoy is told to allow, and how; see [ENVOY-1](#envoy-1-the-host-checked-isnt-the-host-dialled).
+* [`py/tests/test_gateway_envoy.py`](../../py/tests/test_gateway_envoy.py): the invariant tests.
+* [`py/src/dist_bin/surf_scoter_lib/gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py): the run's CA, and which gateway gets it.
+* `dev-env: runs: network-gateway-mk-leaf` in [`dist-files/setup.yaml`](../../dist-files/setup.yaml): the read hosts' certificates.

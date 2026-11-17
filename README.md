@@ -73,7 +73,7 @@ Surf Scoter is still in early development stages.  At the moment, you'll need to
 
 To run Surf Scoter, you need to make some configuration settings to allow for an easier connection between your development container environment and your desktop.
 
-You can perform the changes easily with the [`scoter`](scoter.py) script:
+You can perform the changes easily with the [`scoter`](py/src/dist_root/scoter.py) script:
 
 ```shell
 scoter user-setup

@@ -7,7 +7,7 @@ This document describes which files the container can see, how they get there, a
 
 ## The directories
 
-`scoter run` keeps a project's run files in a directory of their own, outside the project: by default `${scoter:state-dir}/projects/${scoter:project-id}` (such as `~/.config/surf-scoter.d/state/projects/client-3f9a0b1c2d4e`), readable only by you.  The `project-state` section of [`defaults/setup.yaml`](../../defaults/setup.yaml) sets the locations; [the system configuration file](../system-config-file.md) describes the project id, and the branch you can add for a clone per branch.  It has three subdirectories:
+`scoter run` keeps a project's run files in a directory of their own, outside the project: by default `${scoter:state-dir}/projects/${scoter:project-id}` (such as `~/.config/surf-scoter.d/state/projects/client-3f9a0b1c2d4e`), readable only by you.  The `project-state` section of [`dist-files/setup.yaml`](../../dist-files/setup.yaml) sets the locations; [the system configuration file](../system-config-file.md) describes the project id, and the branch you can add for a clone per branch.  It has three subdirectories:
 
 | Host directory | Contents | In the dev container | Who writes it |
 | --- | --- | --- | --- |
@@ -80,7 +80,7 @@ Your IDE connects to the container over SSH, rather than opening the clone's fol
 
 ## Adding a VCS implementation
 
-A project's `vcs` value picks a `NAME-vcs` section of the [system configuration](../system-config-file.md), whose `runs` create the project clone, refresh it, show its changes and bring them back.  Those commands run on your host with your privileges, and most of them handle the container's files, so a new implementation is security-sensitive.  The [`git-vcs` and `file-vcs` sections](../../defaults/setup.yaml) are the examples; `git-vcs` is the reference, and `file-vcs` currently fails several of the points below (see [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge)).
+A project's `vcs` value picks a `NAME-vcs` section of the [system configuration](../system-config-file.md), whose `runs` create the project clone, refresh it, show its changes and bring them back.  Those commands run on your host with your privileges, and most of them handle the container's files, so a new implementation is security-sensitive.  The [`git-vcs` and `file-vcs` sections](../../dist-files/setup.yaml) are the examples; `git-vcs` is the reference, and `file-vcs` currently fails several of the points below (see [FILE-3](files-attack-vectors.md#file-3-the-file-vcs-merge)).
 
 ### Creating the clone (`local-clone`)
 

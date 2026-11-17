@@ -15,7 +15,7 @@ The Surf Scoter main script works a bit like other sub-command tools, where it h
     3. the sub-command name;
     4. the remaining arguments passed to the sub-command.
 
-To help with this, the `bin` directory contains the library [`surf_scoter_lib`](../../scripts/surf_scoter_lib/__init__.py) to provide many helpful tools.
+To help with this, the `bin` directory contains the library [`surf_scoter_lib`](../../py/src/dist_bin/surf_scoter_lib/__init__.py) to provide many helpful tools.
 
 This makes the general boilerplate for a sub-command:
 

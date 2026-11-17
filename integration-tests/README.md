@@ -12,13 +12,14 @@ It prints each step, and ends with `PASS` or `FAIL`.
 
 ## What they need
 
-* The debug build of the host tools: `cd host && cargo build`.
+* The debug build of the host tools: `cd rust/host && cargo build`.
+* For the tests that build the distribution's `dev-env` image: the network, to fetch `rust/container` at the commit its Dockerfile pins (`SCOTER_COMMIT`).
 * `python3`, `git`, and `script` (from util-linux, to give the pull's reviewer a terminal).
 * For the tests that run containers (`03`, `07`, `08`): the container tool, with `compose`, and the network.
 
 ## The sandbox
 
-A test never touches your own setup.  Each one makes a private temporary directory (under `TMPDIR`), and runs the tools with `HOME` set inside it, so their setup file, ssh key and configuration, state, verified store and unlocked copies all go there.  Its distribution is this checkout: the debug binaries, the scripts, the containers and the templates are linked in, and the distribution's `setup.yaml` and `scoter` are copied.  The sample project is copied into the sandbox too (as a Git repository, for the tests that need one), so the tests don't write into this repository.
+A test never touches your own setup.  Each one makes a private temporary directory (under `TMPDIR`), and runs the tools with `HOME` set inside it, so their setup file, ssh key and configuration, state, verified store and unlocked copies all go there.  Its distribution is this checkout: the debug binaries, the scripts (`py/src/dist_bin`), the containers and `dist-files`' defaults and templates are linked in, and the distribution's `setup.yaml` and `scoter` are copied.  The sample project is copied into the sandbox too (as a Git repository, for the tests that need one), so the tests don't write into this repository.
 
 The container tool is the exception: the sandbox's setup runs it through a small wrapper with your own `HOME`, so it uses your image store and registry logins, rather than pulling every image again.  The containers it starts are named after the sandbox's environments, and the tests stop them.
 
