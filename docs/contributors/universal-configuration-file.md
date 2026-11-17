@@ -4,7 +4,7 @@ Because the tooling brings configuration settings from many different places, it
 
 ## Running
 
-The program is `gen-scoter-uc` (built from the [`host`](../../host/) project, with the same configuration code that `scoter-host` uses):
+The program is `gen-scoter-uc` (built from the [`host`](../../rust/host/) project, with the same configuration code that `scoter-host` uses):
 
 ```
 gen-scoter-uc [--project-dir DIR] [--config-dir DIR] [--vcs-root DIR] [--project-branch NAME]

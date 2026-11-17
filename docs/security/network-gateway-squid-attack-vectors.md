@@ -9,10 +9,10 @@ Squid only sees each `CONNECT`: the host and port, never what's inside.  It enfo
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_squid.py`](../../scripts/gateway_squid.py) turns them into the host list; [`squid.conf`](../../containers/network-gateway-squid/squid.conf) enforces it |
+| Egress rules | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_squid.py`](../../py/src/dist_bin/gateway_squid.py) turns them into the host list; [`squid.conf`](../../containers/network-gateway-squid/squid.conf) enforces it |
 | `CONNECT` requests, hostnames | Code in the dev container | [`squid.conf`](../../containers/network-gateway-squid/squid.conf) |
 | DNS answers for allowed domains | Whoever runs those domains' DNS | [`blocked-destinations.txt`](../../containers/network-gateway-squid/blocked-destinations.txt), [`egress.nft`](../../containers/firewall-router/egress.nft) |
-| The run's CA | `scoter run` | [`gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../defaults/docker-compose.yaml) |
+| The run's CA | `scoter run` | [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml) |
 
 
 ## Summary
@@ -51,7 +51,7 @@ Squid parses hostile input.  If it's subverted, the firewall still limits it to 
 ### SQUID-3: The run's CA, with a gateway that doesn't use it
 
 **Severity:** Low.  **Status:** Mitigated.
-**Where:** `make_ca` and `gateway_ca_dir` in [`gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py); the gateway's `/user-space/ca` and the dev container's `/etc/scoter/gateway-ca.pem` in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); `dev-env: values: network-gateway-reads-tls` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `make_ca` and `gateway_ca_dir` in [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py); the gateway's `/user-space/ca` and the dev container's `/etc/scoter/gateway-ca.pem` in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml); `dev-env: values: network-gateway-reads-tls` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 `scoter run` makes a new CA for every run, whatever the gateway, and the dev container trusts it for every host.  Squid never uses it: with `network-gateway-reads-tls: 'no'`, its `/user-space/ca` is an empty directory, and the key stays on the host, readable only by you (mode 600, in a 700 directory), until the run ends, when it's removed (as `scoter kill` and `scoter cleanup` remove it).  What's left: while the run lasts, whoever can read your files can sign certificates the dev container trusts.  They could already change the container's image or settings.
 
@@ -65,5 +65,5 @@ Squid parses hostile input.  If it's subverted, the firewall still limits it to 
 Changes to these files can weaken the Squid gateway, and need a security review:
 
 * [`containers/network-gateway-squid/`](../../containers/network-gateway-squid/): the proxy rules and the blocked destinations.
-* [`scripts/gateway_squid.py`](../../scripts/gateway_squid.py): what Squid is told to allow, and what it refuses.
-* [`scripts/surf_scoter_lib/gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py): the run's CA, and which gateway gets it.
+* [`py/src/dist_bin/gateway_squid.py`](../../py/src/dist_bin/gateway_squid.py): what Squid is told to allow, and what it refuses.
+* [`py/src/dist_bin/surf_scoter_lib/gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py): the run's CA, and which gateway gets it.

@@ -2,8 +2,8 @@
 
 Much of what keeps an environment contained comes not from the project or from Surf Scoter's code, but from files Surf Scoter ships as defaults:
 
-* the default system configuration, [`defaults/setup.yaml`](../../defaults/setup.yaml);
-* the compose file that wires the containers together, [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml);
+* the default system configuration, [`dist-files/setup.yaml`](../../dist-files/setup.yaml);
+* the compose file that wires the containers together, [`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml);
 * the firewall container, [`containers/firewall-router`](../../containers/firewall-router/);
 * the gateway container: Squid, [`containers/network-gateway-squid`](../../containers/network-gateway-squid/), by default, or seekrit-proxy, [`containers/network-gateway-seekrit`](../../containers/network-gateway-seekrit/).
 
@@ -24,7 +24,7 @@ The [system configuration file](../system-config-file.md) describes the loading 
 
 ## The system configuration
 
-These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the most security weight.
+These keys from [`dist-files/setup.yaml`](../../dist-files/setup.yaml) carry the most security weight.
 
 | Key | What it does | What to keep in mind when changing it |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ These keys from [`defaults/setup.yaml`](../../defaults/setup.yaml) carry the mos
 
 ## The compose file
 
-[`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml) is where the network properties are actually wired up.  `scoter run` copies it into the environment's resources directory and fills it in from a generated `.env` file.  Some of those values come from the project's `dev-env.yaml`; see [dev container attack vectors](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file).
+[`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml) is where the network properties are actually wired up.  `scoter run` copies it into the environment's resources directory and fills it in from a generated `.env` file.  Some of those values come from the project's `dev-env.yaml`; see [dev container attack vectors](dev-container-attack-vectors.md#dev-2-mount-points-are-written-into-the-compose-env-file).
 
 | Setting | Property |
 | --- | --- |
@@ -115,7 +115,7 @@ When changing it, keep these properties:
 
 ## The gateway container
 
-The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: network-gateway-image`, `network-gateway-name`, `network-gateway-config-mount` and `network-gateway-reads-tls`, and `runs: network-gateway-write-config` and `network-gateway-post-start`, together.  The distribution's [`setup.yaml`](../../defaults/setup.yaml) has Squid's, and the seekrit and Envoy gateways' to copy into your setup.  Either way, the setup's `dev-env: value-lists: network-gateway-ports` must match the ports the firewall lets out.
+The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: network-gateway-image`, `network-gateway-name`, `network-gateway-config-mount` and `network-gateway-reads-tls`, and `runs: network-gateway-write-config` and `network-gateway-post-start`, together.  The distribution's [`setup.yaml`](../../dist-files/setup.yaml) has Squid's, and the seekrit and Envoy gateways' to copy into your setup.  Either way, the setup's `dev-env: value-lists: network-gateway-ports` must match the ports the firewall lets out.
 
 ### Gateway: Squid
 
@@ -146,7 +146,7 @@ Its own weak points are on the [Squid gateway attack vectors](network-gateway-sq
 
 [`containers/network-gateway-seekrit`](../../containers/network-gateway-seekrit/) builds [seekrit-proxy](https://github.com/seekritdev/proxy) from a pinned upstream commit, with Surf Scoter's [patches](../../containers/network-gateway-seekrit/patches/), into a `scratch` image: the binary, and nothing else, not even a shell.  It runs as an unprivileged user (65532), with no capabilities, logs JSON to standard output (`scoter netlog` reads it), and stops on `SIGINT`.  It provides N2, backs up N3, and reads the hosts with `https` rules.
 
-[`gateway_seekrit.py`](../../scripts/gateway_seekrit.py) writes its configuration (`/user-space/gateway/seekrit-proxy.toml`):
+[`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py) writes its configuration (`/user-space/gateway/seekrit-proxy.toml`):
 
 1. Refuse any host without a rule (`unmatched_host_policy = "deny"`).
 2. A `tls` rule's host is passed through untouched (`intercept = false`), on its rules' ports.
@@ -156,7 +156,7 @@ Its own weak points are on the [Squid gateway attack vectors](network-gateway-sq
 6. Scrub the values it put into a request out of that request's response (`[redaction]`).
 7. Take the secrets after starting, once, over a socket in `/run/seekrit` (`[secrets] source = "inject"`).
 
-It refuses wildcard hosts, and one host with rules it can't tell apart.  The run's CA is at `/user-space/ca`, with `network-gateway-reads-tls: 'yes'`.  Once it starts, `network-gateway-post-start` ([`gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py)) reads your secret store and gives it the values the rules name.
+It refuses wildcard hosts, and one host with rules it can't tell apart.  The run's CA is at `/user-space/ca`, with `network-gateway-reads-tls: 'yes'`.  Once it starts, `network-gateway-post-start` ([`gateway_postrun_seekrit.py`](../../py/src/dist_bin/gateway_postrun_seekrit.py)) reads your secret store and gives it the values the rules name.
 
 When changing it, keep these properties:
 
@@ -172,7 +172,7 @@ Its own weak points are on the [seekrit gateway attack vectors](network-gateway-
 
 [`containers/network-gateway-envoy`](../../containers/network-gateway-envoy/) runs [Envoy](https://www.envoyproxy.io)'s distroless image, pinned by digest: no shell, no package manager.  It runs as an unprivileged user (65532), with no capabilities, two worker threads, and its access log as JSON on standard output (`scoter netlog` reads it).  It provides N2, and backs up N3.  It passes `tls` rules through, on any port in `network-gateway-ports`, each rule on its own port, and reads `https` rules for exact hosts, on the ports in `network-gateway-tls-ports`, to check their methods.  It never fills in secrets.
 
-For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/v1.36.12/configuration/http/http_filters/dynamic_forward_proxy_filter), which resolves the requested host and connects to it.  Envoy's documentation warns that such a proxy is open to confused deputy attacks.  [`gateway_envoy.py`](../../scripts/gateway_envoy.py) writes its configuration (`/user-space/gateway/envoy.json`) so that:
+For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/v1.36.12/configuration/http/http_filters/dynamic_forward_proxy_filter), which resolves the requested host and connects to it.  Envoy's documentation warns that such a proxy is open to confused deputy attacks.  [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) writes its configuration (`/user-space/gateway/envoy.json`) so that:
 
 1. Only `CONNECT` is routed, over HTTP/1 only.
 2. Each rule is a route matching the request's whole `:authority`, port included: `host:port` exactly, or, for `*.domain`, a regular expression for its subdomains, at any depth, on that port (not the domain itself).  Case is ignored.  Anything else matches no route, and gets a 404.
@@ -182,7 +182,7 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 6. A read host's `CONNECT` goes to an internal listener for that host and port alone, never through the dynamic forward proxy.  It ends the TLS connection with a certificate for that host, made for the run by `network-gateway-mk-leaf` and signed by the run's CA, and sends on only the requests whose `:authority` is that host, with the rules' methods; anything else gets a 403.  It sends them to a cluster that names the host, fixed, over TLS that checks the server's certificate against the system's CAs and the host's name.
 7. There's no admin interface, and only IPv4 addresses are looked up.
 
-When changing it, keep these properties, the [tests](../../scripts/tests/test_gateway_envoy.py) that check them, and:
+When changing it, keep these properties, the [tests](../../py/tests/test_gateway_envoy.py) that check them, and:
 
 * Envoy stays unprivileged and without capabilities, its image pinned by digest.
 * Its `network-gateway-reads-tls` stays `'no'`: it's never given the run's CA key, only a certificate for each host it reads.  Those keys are in its configuration, which is readable by others, so the resources directory stays inside one only you can use.

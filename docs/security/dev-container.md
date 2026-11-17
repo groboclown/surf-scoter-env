@@ -31,7 +31,7 @@ The split matters.  The project can change anything *inside* the image, but it c
 
 [`containers/dev-env`](../../containers/dev-env/) builds in two stages:
 
-1. A Rust stage compiles and tests the bridge's container side: `scoter-client` and the broker, `scoter-container`.
+1. A Rust stage compiles and tests the bridge's container side: `scoter-client` and the broker, `scoter-container`.  The distribution doesn't ship their source ([`rust/container`](../../rust/container/)): the stage fetches that one directory from the Surf Scoter repository with a sparse `git clone`, at the commit the Dockerfile's `SCOTER_COMMIT` names by its full id, and fails unless it got exactly that commit.  A build for Surf Scoter development (`make dev-env-image`) copies the source from the checkout instead.
 2. The runtime stage, on `ubuntu:rolling`, adds those binaries, `openssh-server`, `socat` (for the SSH proxy), CA certificates, and a few basic tools (`git`, `mercurial`, `curl`, `bash`).  It sets up the SSH configuration template for the unprivileged `ubuntu` user (uid 1000), and ends with `USER ubuntu`.
 
 The [start-up script](../../containers/dev-env/entrypoint.sh) then:
@@ -51,7 +51,7 @@ A build is not an environment run.  `RUN` steps execute in the builder with its 
 
 ## Runtime constraints
 
-The default [compose file](../../defaults/docker-compose.yaml) runs the dev container with:
+The default [compose file](../../dist-files/defaults/docker-compose.yaml) runs the dev container with:
 
 | Setting | Effect |
 | --- | --- |

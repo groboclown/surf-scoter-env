@@ -1,0 +1,73 @@
+# The Surf Scoter Python sources: the `scoter` front end and the scripts
+# installed into the distribution's `bin` directory.  They use only the
+# standard library; nothing here is installed with pip.  This file holds the
+# developer tools' settings.
+#
+#   src/dist_root/  installed into the distribution's top directory
+#                   (`scoter.py` becomes `scoter`).
+#   src/bin/        installed into the distribution's `bin` directory.
+#   tests/          unit tests: `python3 -m unittest discover -t . -s tests`.
+
+[project]
+name = "surf-scoter-scripts"
+description = "The Surf Scoter front end and sub-command scripts."
+license = "MIT"
+requires-python = ">=3.12"
+version = "0.9.0"
+dependencies = []
+
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+addopts = [
+    "--import-mode=importlib",
+]
+testpaths = ["tests"]
+pythonpath = ["src/dist_bin", "src/dist_root", "tests"]
+
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src/dist_bin", "src/dist_root", "tests"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["surf_scoter_lib", "scoter"]
+
+[tool.bandit]
+# The tests are scanned too: they run subprocesses and make files, and each
+# use is marked, as in the sources.
+exclude_dirs = [".venv"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+timid = true
+
+[tool.coverage.report]
+fail_under = 95
+# Regexes for lines to exclude from consideration
+exclude_lines = [
+    # Have to re-enable the standard pragma
+    "pragma: no cover",
+
+    # Don't complain about missing debug-only code:
+    "def __repr__",
+    "if self\\.debug",
+
+    # Don't complain if tests don't hit defensive assertion code:
+    "raise AssertionError",
+    "raise NotImplementedError",
+
+    # Don't complain if non-runnable code isn't run:
+    "if 0:",
+    "if __name__ == .__main__.:",
+
+    # Don't complain about abstract methods, they aren't run:
+    "@(abc\\.)?abstractmethod",
+]
+omit = [
+    # The main entry module is intentionally extremely small with no real logic.
+    # It passes all execution to the entrypoint function.
+    "*/__main__.py"
+]

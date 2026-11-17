@@ -1,0 +1,9 @@
+[package]
+name = "scoter-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc.workspace = true
+scoter-config.workspace = true
+scoter-comm.workspace = true

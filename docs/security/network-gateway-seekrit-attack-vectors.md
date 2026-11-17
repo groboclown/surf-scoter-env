@@ -18,12 +18,12 @@ Beyond the [network's](network-attack-vectors.md#attacker-goals), code in the de
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Egress rules, and the secrets each names | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py) turns them into seekrit-proxy's configuration |
+| Egress rules, and the secrets each names | Your configuration (the project's suggestion, reviewed at `scoter pull`) | [`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py) turns them into seekrit-proxy's configuration |
 | `CONNECT` and plain HTTP requests: hosts, ports, methods, paths, headers, bodies, placeholders | Code in the dev container | seekrit-proxy, with [Surf Scoter's patches](../../containers/network-gateway-seekrit/patches/) |
 | Responses from read hosts | The upstream servers | seekrit-proxy's response redaction |
 | DNS answers for allowed hosts | Whoever runs those domains' DNS | seekrit-proxy's egress gate, [`egress.nft`](../../containers/firewall-router/egress.nft) |
-| The secret values, or a seekrit.dev token | Your secret store (`project-state: paths: secret-store`), its commands | [`gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py), `docker: runs: exec-stdin`, the gateway's inject socket |
-| The run's CA | `scoter run` | [`gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../defaults/docker-compose.yaml) |
+| The secret values, or a seekrit.dev token | Your secret store (`project-state: paths: secret-store`), its commands | [`gateway_postrun_seekrit.py`](../../py/src/dist_bin/gateway_postrun_seekrit.py), `docker: runs: exec-stdin`, the gateway's inject socket |
+| The run's CA | `scoter run` | [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml) |
 | The gateway's source | seekrit's upstream, and Surf Scoter's patches | [`network-gateway-seekrit/Dockerfile`](../../containers/network-gateway-seekrit/Dockerfile) |
 
 
@@ -48,7 +48,7 @@ Beyond the [network's](network-attack-vectors.md#attacker-goals), code in the de
 ### SEEKRIT-1: A secret used through the host its rule allows
 
 **Severity:** High.  **Status:** By design.
-**Where:** the project file's `egress` (`secrets:`, `methods`); the warning in [`checks.py`](../../scripts/surf_scoter_lib/checks.py) and the pull's reviewer; `allow` in [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py).
+**Where:** the project file's `egress` (`secrets:`, `methods`); the warning in [`checks.py`](../../py/src/dist_bin/surf_scoter_lib/checks.py) and the pull's reviewer; `allow` in [`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py).
 
 The container never holds the value, but it can use it: anything in the container can send the placeholder to the host its rule names, with the methods the rule allows, and the request goes out as you.  The placeholder is filled in wherever it is in the request: a header, the path, or the body.  So a rule that sends `GITHUB_TOKEN` to `api.github.com` with every method lets the container create a public gist whose text is `{{seekrit:GITHUB_TOKEN}}`, and the gateway writes your token into it: the value leaves through the very host it was meant for.  [NET-1](network-attack-vectors.md#net-1-allowed-domains-are-open-channels) is the same risk, with your credentials attached.
 
@@ -61,7 +61,7 @@ The project only names a secret; you decide whether your store has a value for i
 ### SEEKRIT-2: Secrets in the gateway's memory, and their delivery
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** the inject socket (patch 0002, `src/inject.rs`); [`gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py); `docker: runs: exec-stdin`; the `/run/seekrit` tmpfs in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** the inject socket (patch 0002, `src/inject.rs`); [`gateway_postrun_seekrit.py`](../../py/src/dist_bin/gateway_postrun_seekrit.py); `docker: runs: exec-stdin`; the `/run/seekrit` tmpfs in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 The values (or a seekrit.dev token) reach the gateway only after it starts: `scoter` runs the store's commands on your host, and sends one JSON document on the standard input of `docker exec -i GATEWAY /seekrit-proxy inject`, which passes it over a Unix socket in a private tmpfs to the proxy.  The socket checks that the caller is the gateway's own user, takes one delivery, then is closed and removed: a second `inject` can't swap the values.  The values are never in the gateway's configuration, environment, image or files, nor on any command line, so `docker inspect` and `docker cp` find nothing ([`07-seekrit-gateway`](../../integration-tests/07-seekrit-gateway/run.sh) checks).  Until the delivery, a request with a placeholder is refused with `503`, never forwarded with the placeholder in it.
 
@@ -78,7 +78,7 @@ What's left:
 ### SEEKRIT-3: The interception CA
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `make_ca`, `private_ancestor` and `gateway_ca_dir` in [`gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py); `dev-env: runs: network-gateway-mk-ca` and `values: network-gateway-reads-tls` in [`setup.yaml`](../../defaults/setup.yaml); the CA mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml); CA loading (patch 0006).
+**Where:** `make_ca`, `private_ancestor` and `gateway_ca_dir` in [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py); `dev-env: runs: network-gateway-mk-ca` and `values: network-gateway-reads-tls` in [`setup.yaml`](../../dist-files/setup.yaml); the CA mounts in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml); CA loading (patch 0006).
 
 The dev container trusts the run's CA for every host, and the gateway holds its key, so the gateway, or anything that gets the key, can intercept any TLS the container makes, not only the hosts with `https` rules.  The CA is new for each run (EC P-256, 30 days), and removed when the run ends, is killed, or is cleaned up.  The gateway runs as its own user, which can't read a key only you can, so the key it's given is readable by others (mode 644, in a 755 directory), and `scoter run` refuses unless a directory above it is yours alone (the project state directory is, by default).  The certificate has no name constraints: it could sign for any host.
 
@@ -89,7 +89,7 @@ The dev container trusts the run's CA for every host, and the gateway holds its 
 ### SEEKRIT-4: Secrets echoed back in responses
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `[redaction]` in the configuration [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py) writes; seekrit-proxy's `src/redact.rs`.
+**Where:** `[redaction]` in the configuration [`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py) writes; seekrit-proxy's `src/redact.rs`.
 
 A host that reflects a request back (an echo endpoint, an error page quoting a header) would hand the container the value it never held.  The gateway scrubs the values it put into a request out of that request's response, as written, percent-encoded or JSON-escaped, for values of 8 bytes or more.  Another encoding (base64, hex, a compressed body), a value split across chunks the scanner misses, or a short value gets through.
 
@@ -100,7 +100,7 @@ A host that reflects a request back (an echo endpoint, an error page quoting a h
 ### SEEKRIT-5: A subverted gateway
 
 **Severity:** Medium.  **Status:** Mitigated (N4).
-**Where:** [`network-gateway-seekrit/Dockerfile`](../../containers/network-gateway-seekrit/Dockerfile), [`egress.nft`](../../containers/firewall-router/egress.nft), the `gateway` service in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** [`network-gateway-seekrit/Dockerfile`](../../containers/network-gateway-seekrit/Dockerfile), [`egress.nft`](../../containers/firewall-router/egress.nft), the `gateway` service in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 seekrit-proxy parses hostile HTTP and TLS from the dev container, and from upstream servers.  If it's subverted, it holds what [SQUID-2](network-gateway-squid-attack-vectors.md#squid-2-a-subverted-squid) can't: the plaintext of read hosts, the secrets, and the CA key ([SEEKRIT-3](#seekrit-3-the-interception-ca)).  The firewall still limits it to TCP 443 on public IPv4 addresses, so it can send them only to some public host on 443.  It runs as an unprivileged user, with no capabilities, on a `scratch` image with no shell.
 
@@ -111,7 +111,7 @@ seekrit-proxy parses hostile HTTP and TLS from the dev container, and from upstr
 ### SEEKRIT-6: The secret store and its commands
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** `read_store`, `entry_value` and `_program` in [`gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py); `project-state: paths: secret-store` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `read_store`, `entry_value` and `_program` in [`gateway_postrun_seekrit.py`](../../py/src/dist_bin/gateway_postrun_seekrit.py); `project-state: paths: secret-store` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 The store decides which values go out, and its `command` entries run on your host, as you.  So it's read only if it's a regular file, yours, readable by nobody else, not a symlink, and outside the project, its files directory, its clone, the repository and the project state directory.  A command's program is a name found through the absolute entries of your `PATH`, or an absolute path, and never inside any of those.  Only the secrets the configuration's rules name are read and sent; the store's other entries stay put.  The store's path is a guarded setting.  A `value` entry is your secret in a plain file: prefer a command that asks your password manager.
 
@@ -122,7 +122,7 @@ The store decides which values go out, and its `command` entries run on your hos
 ### SEEKRIT-7: Guarantees that rest on the translation and the patches
 
 **Severity:** Medium.  **Status:** Mitigated.
-**Where:** [`gateway_seekrit.py`](../../scripts/gateway_seekrit.py); the [patches](../../containers/network-gateway-seekrit/patches/).
+**Where:** [`gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py); the [patches](../../containers/network-gateway-seekrit/patches/).
 
 seekrit-proxy's own defaults are looser than this gateway needs; the configuration `gateway_seekrit.py` writes, and the patches, make up the difference:
 
@@ -137,7 +137,7 @@ A configuration written by hand, or a patch dropped in a rebase, loses these sil
 
 **Red team:** with each kind of rule, try the other ports, plain HTTP with a placeholder, a CONNECT to a `tls` host expecting the run's certificate, and a subdomain of an allowed host.
 
-**When changing this code:** keep each guarantee's test (in the fork, and [`test_gateway_seekrit.py`](../../scripts/tests/test_gateway_seekrit.py)), and run [`07-seekrit-gateway`](../../integration-tests/07-seekrit-gateway/run.sh) after a rebase.
+**When changing this code:** keep each guarantee's test (in the fork, and [`test_gateway_seekrit.py`](../../py/tests/test_gateway_seekrit.py)), and run [`07-seekrit-gateway`](../../integration-tests/07-seekrit-gateway/run.sh) after a rebase.
 
 ### SEEKRIT-8: Allowed names resolving to forbidden addresses
 
@@ -164,7 +164,7 @@ The image fetches seekrit-proxy's source at a full commit hash, checks it, appli
 ### SEEKRIT-10: What the log holds
 
 **Severity:** Low.  **Status:** Mitigated.
-**Where:** the access log (patch 0005); [`netlog.py`](../../scripts/surf_scoter_lib/netlog.py).
+**Where:** the access log (patch 0005); [`netlog.py`](../../py/src/dist_bin/surf_scoter_lib/netlog.py).
 
 The gateway logs each connection, each request it reads (method, host, port, path, status, and the names of the secrets put in), and each tunnel's bytes, as JSON, for `scoter netlog`.  It never logs a value, a query string or a body (the fork's tests and `07-seekrit-gateway` check).  A path can still hold an identifier.  Everything in the log came from the dev container, so `scoter netlog` cleans every field before showing it, and suggests rules only for well-formed host names.
 
@@ -178,7 +178,7 @@ The gateway logs each connection, each request it reads (method, host, port, pat
 Changes to these files can weaken the seekrit gateway, and need a security review:
 
 * [`containers/network-gateway-seekrit/`](../../containers/network-gateway-seekrit/): the build, the pinned commit, and the patches.
-* [`scripts/gateway_seekrit.py`](../../scripts/gateway_seekrit.py): what the gateway is told to allow, read and fill in.
-* [`scripts/gateway_postrun_seekrit.py`](../../scripts/gateway_postrun_seekrit.py) and [`scripts/main_gateway_post_start.py`](../../scripts/main_gateway_post_start.py): the secret store, and the values' delivery.
-* [`scripts/surf_scoter_lib/gateway_start.py`](../../scripts/surf_scoter_lib/gateway_start.py): the run's CA.
-* The gateway's mounts and tmpfs in [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml), and the CA and placeholder handling in [`containers/dev-env/entrypoint.sh`](../../containers/dev-env/entrypoint.sh).
+* [`py/src/dist_bin/gateway_seekrit.py`](../../py/src/dist_bin/gateway_seekrit.py): what the gateway is told to allow, read and fill in.
+* [`py/src/dist_bin/gateway_postrun_seekrit.py`](../../py/src/dist_bin/gateway_postrun_seekrit.py) and [`py/src/dist_bin/main_gateway_post_start.py`](../../py/src/dist_bin/main_gateway_post_start.py): the secret store, and the values' delivery.
+* [`py/src/dist_bin/surf_scoter_lib/gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py): the run's CA.
+* The gateway's mounts and tmpfs in [`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), and the CA and placeholder handling in [`containers/dev-env/entrypoint.sh`](../../containers/dev-env/entrypoint.sh).

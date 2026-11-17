@@ -18,6 +18,31 @@ To generate the SBOM and scan those, you'll need [`cdxgen`](https://github.com/c
     * `make CDXGEN=$( where cdxgen ) OSVSCANNER=$( where osv-scanner ) sbom scan`
 
 
+## Repository layout
+
+| Directory | What's there | Installed as |
+|---|---|---|
+| [`py/`](py/) | The Python sources, with the developer tools' settings in [`pyproject.toml`](py/pyproject.toml). | |
+| [`py/src/dist_root/`](py/src/dist_root/) | `scoter.py`, the front end. | `scoter` at the distribution's top |
+| [`py/src/dist_bin/`](py/src/dist_bin/) | The sub-command and helper scripts, and their library, `surf_scoter_lib`. | the distribution's `bin/` |
+| [`py/tests/`](py/tests/) | Their unit tests: `make script-tests`. | |
+| [`rust/host/`](rust/host/) | A Cargo workspace: the configuration library ([`config`](rust/host/config/)) and the programs that use it, [`scoter-host`](rust/host/scoter-host/) and [`gen-scoter-uc`](rust/host/gen-scoter-uc/). | the distribution's `bin/` |
+| [`rust/container/`](rust/container/) | A Cargo workspace that stands on its own: the wire protocol library ([`comm`](rust/container/comm/), which `rust/host` uses too) and the dev container's bridge programs, [`client`](rust/container/client/) and [`broker`](rust/container/broker/). | built inside the dev-env image |
+| [`dist-files/`](dist-files/) | Files installed as they are, laid out as in the distribution: `setup.yaml`, `defaults/`, `templates/`. | the distribution's top |
+| [`containers/`](containers/) | The images: the dev container's base, the firewall and the network gateways. | `containers/` |
+| [`build-scripts/`](build-scripts/) | Installer and developer scripts. | |
+| [`integration-tests/`](integration-tests/) | End-to-end tests, run by hand. | |
+| [`docs/`](docs/) | The documentation. | `docs/` |
+
+### The dev-env image and `rust/container`
+
+The distribution doesn't ship the bridge programs' source.  [`containers/dev-env/Dockerfile`](containers/dev-env/Dockerfile) fetches just the `rust/container` directory of this repository with a sparse `git clone`, at the commit its `SCOTER_COMMIT` argument names by its full id, and checks it got that commit.  So `rust/container` must never use anything outside itself.
+
+For working on Surf Scoter, `make dev-env-image` instead copies your checkout's `rust/container` into a staged build context ([`stage-dev-env.sh`](build-scripts/stage-dev-env.sh)) and builds with `--build-arg SCOTER_SOURCE=local`.
+
+When a change to `rust/container` is merged, set `SCOTER_COMMIT` to that commit, in a commit of its own.  `make dev-env-pin-check` (part of `make lint`) warns when `rust/container` has changed since the pinned commit.
+
+
 ## Working on Surf Scoter With Surf Scoter
 
 So you've cloned down the `surf-scoter-env` project, and want to kick off a local test so you can contribute back to this project.  Thanks!
@@ -49,7 +74,7 @@ alias scoter='~/.local/share/surf-scoter-linked/scoter '
 scoter help
 ```
 
-If the number of files in the [scripts](scripts/) directory changes, you'll need to rerun `linked-install.sh` to adjust the file links.
+If the number of files in the [`py/src/dist_bin`](py/src/dist_bin/) directory changes, you'll need to rerun `linked-install.sh` to adjust the file links.
 
 ### It's Risky
 
@@ -92,9 +117,12 @@ New releases must pass these gates:
 * Patch versions:
     * Open security issues are fine, if the patch covers at least one security issue.  This allows incremental fixes for security issues as they close, rather than waiting for all fixes to come in.
 * Bump version numbers:
-    * [host + generator](host/Cargo.toml)
-    * [client + bridge](containers/dev-env/Cargo.toml)
+    * [host + generator](rust/host/Cargo.toml) (`workspace.package`)
+    * [client + bridge](rust/container/Cargo.toml) (`workspace.package`)
+    * [comm library](rust/container/comm/Cargo.toml) (`package`)
+    * [Python sources](py/pyproject.toml)
     * [`version.txt`](version.txt)
-    * TODO scoter.py and the install bundler.
+    * TODO scoter.py when it supports the version argument.
+* `SCOTER_COMMIT` in [`containers/dev-env/Dockerfile`](containers/dev-env/Dockerfile) names a commit with the release's `rust/container`, and `make dev-env-pin-check` is quiet.
 * Changelog updated.
 * **All builds pass.** All builds pass.  Includes lint and tests.

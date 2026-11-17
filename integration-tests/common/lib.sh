@@ -48,8 +48,8 @@ it_require() {
 it_init() {
     it_require python3 script git
     for exe in gen-scoter-uc scoter-host; do
-        [ -x "${IT_REPO}/host/target/debug/${exe}" ] \
-            || it_fail "needs the debug build: cd host && cargo build"
+        [ -x "${IT_REPO}/rust/host/target/debug/${exe}" ] \
+            || it_fail "needs the debug build: cd rust/host && cargo build"
     done
 
     IT_SANDBOX=$( mktemp -d "${TMPDIR:-/tmp}/surf-scoter-it-${IT_NAME}-XXXXXX" )
@@ -68,18 +68,18 @@ it_init() {
     # The distribution: like an installed one, but from this checkout.
     IT_DIST="${IT_SANDBOX}/dist"
     mkdir -p "${IT_DIST}/bin"
-    ln -s "${IT_REPO}/host/target/debug/gen-scoter-uc" "${IT_DIST}/bin/gen-scoter-uc"
-    ln -s "${IT_REPO}/host/target/debug/scoter-host" "${IT_DIST}/bin/scoter-host"
-    for script in "${IT_REPO}/scripts/"*.py "${IT_REPO}/scripts/"*.txt; do
+    ln -s "${IT_REPO}/rust/host/target/debug/gen-scoter-uc" "${IT_DIST}/bin/gen-scoter-uc"
+    ln -s "${IT_REPO}/rust/host/target/debug/scoter-host" "${IT_DIST}/bin/scoter-host"
+    for script in "${IT_REPO}/py/src/dist_bin/"*.py "${IT_REPO}/py/src/dist_bin/"*.txt; do
         ln -s "${script}" "${IT_DIST}/bin/"
     done
-    ln -s "${IT_REPO}/scripts/surf_scoter_lib" "${IT_DIST}/bin/surf_scoter_lib"
-    ln -s "${IT_REPO}/defaults" "${IT_DIST}/defaults"
+    ln -s "${IT_REPO}/py/src/dist_bin/surf_scoter_lib" "${IT_DIST}/bin/surf_scoter_lib"
+    ln -s "${IT_REPO}/dist-files/defaults" "${IT_DIST}/defaults"
     ln -s "${IT_REPO}/containers" "${IT_DIST}/containers"
-    ln -s "${IT_REPO}/templates" "${IT_DIST}/templates"
-    cp "${IT_REPO}/defaults/setup.yaml" "${IT_DIST}/setup.yaml"
+    ln -s "${IT_REPO}/dist-files/templates" "${IT_DIST}/templates"
+    cp "${IT_REPO}/dist-files/setup.yaml" "${IT_DIST}/setup.yaml"
     # A copy, not a link: it finds the distribution from where it is.
-    cp "${IT_REPO}/scoter.py" "${IT_DIST}/scoter"
+    cp "${IT_REPO}/py/src/dist_root/scoter.py" "${IT_DIST}/scoter"
     chmod 755 "${IT_DIST}/scoter"
 
     # The container tool, with your own HOME.

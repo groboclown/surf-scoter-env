@@ -1,0 +1,8 @@
+[package]
+name = "broker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc.workspace = true
+scoter-comm.workspace = true

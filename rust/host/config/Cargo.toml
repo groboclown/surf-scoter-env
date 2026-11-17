@@ -1,0 +1,12 @@
+[package]
+name = "scoter-config"
+description = "Reads the Surf Scoter configuration and writes the universal configuration file."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+yaml_serde.workspace = true

@@ -14,11 +14,11 @@ The weak points of [file access](files.md): how code in the development containe
 
 | Input | Controlled by | Handled in |
 | --- | --- | --- |
-| Everything in the project clone, including `.git` | Code in the container | `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py); `rm` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py); the VCS `runs` in [`setup.yaml`](../../defaults/setup.yaml); `scoter kill --fetch` in [`main_kill.py`](../../scripts/main_kill.py); the developer's tools |
+| Everything in the project clone, including `.git` | Code in the container | `_setup_project_clone` in [`main_run.py`](../../py/src/dist_bin/main_run.py); `rm` in [`fileutil.py`](../../py/src/dist_bin/surf_scoter_lib/fileutil.py); the VCS `runs` in [`setup.yaml`](../../dist-files/setup.yaml); `scoter kill --fetch` in [`main_kill.py`](../../py/src/dist_bin/main_kill.py); the developer's tools |
 | The persistent store | Code in the container | The container tool; nothing on the host reads it |
-| `container: mounts: project-clone` | The project, as pulled into your configuration | `parse_container` in [`project.rs`](../../host/src/config/project.rs); `project_mount_problems` in [`config.rs`](../../host/src/config.rs) |
-| Object files hard-linked between the project and the clone | Code in the container | `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml) |
-| Setup directory files | `scoter`, and any local account that can write them | `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); `touch` in [`fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py) |
+| `container: mounts: project-clone` | The project, as pulled into your configuration | `parse_container` in [`project.rs`](../../rust/host/config/src/config/project.rs); `project_mount_problems` in [`config.rs`](../../rust/host/config/src/config.rs) |
+| Object files hard-linked between the project and the clone | Code in the container | `git-vcs: runs: local-clone` in [`setup.yaml`](../../dist-files/setup.yaml) |
+| Setup directory files | `scoter`, and any local account that can write them | `run_env_runner` in [`main_run.py`](../../py/src/dist_bin/main_run.py); `touch` in [`fileutil.py`](../../py/src/dist_bin/surf_scoter_lib/fileutil.py) |
 | Changes brought back to the project | Code in the container, through the developer | The developer's review |
 
 
@@ -46,7 +46,7 @@ Related vectors elsewhere: crafted mount points ([DEV-2](dev-container-attack-ve
 ### FILE-1: `scoter run` runs Git inside the project clone
 
 **Severity:** Critical.  **Status:** Closed.
-**Where:** `_setup_project_clone`, `_refresh_bundle` and `_point_clone_at_bundle` in [`main_run.py`](../../scripts/main_run.py); `git-vcs: runs: refresh-bundle` and `set-clone-origin` in [`setup.yaml`](../../defaults/setup.yaml); the fetch in the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh).
+**Where:** `_setup_project_clone`, `_refresh_bundle` and `_point_clone_at_bundle` in [`main_run.py`](../../py/src/dist_bin/main_run.py); `git-vcs: runs: refresh-bundle` and `set-clone-origin` in [`setup.yaml`](../../dist-files/setup.yaml); the fetch in the distribution's [`entrypoint.sh`](../../containers/dev-env/entrypoint.sh).
 
 When the project clone already existed, `scoter run` refreshed it by running `git fetch --all` on the host, with the clone as its working directory.  Git read the clone's `.git/config` and hooks, which an earlier container session could have rewritten.  A remote's `uploadpack` or `sshCommand` setting, or a `reference-transaction` hook, ran a program on the host.  Project verification didn't help: the clone isn't part of what's reviewed.
 
@@ -61,7 +61,7 @@ When the project clone already existed, `scoter run` refreshed it by running `gi
 ### FILE-2: Object files shared with the project repository
 
 **Severity:** High.  **Status:** Mitigated, for clones created after the fix.
-**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../defaults/setup.yaml); the clone in `_setup_project_clone` in [`main_run.py`](../../scripts/main_run.py).
+**Where:** `git-vcs: runs: local-clone` in [`setup.yaml`](../../dist-files/setup.yaml); the clone in `_setup_project_clone` in [`main_run.py`](../../py/src/dist_bin/main_run.py).
 
 By default, `git clone` of a local path hard-links the object files when it can, and the clone sits on the same file system as the project.  The project and the clone then share each object file's inode, owned by the developer.  With `keep-id`, the container runs as that owner, so it can make an object file writable and replace its contents.  The developer's real repository then returns the attacker's content under the original, already-reviewed hash.
 
@@ -76,7 +76,7 @@ Both clones now use `--no-local`, which makes Git copy the objects through its n
 ### FILE-3: The `file` VCS merge
 
 **Severity:** High, for projects that use it.  **Status:** Open.
-**Where:** `file-vcs: runs` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `file-vcs: runs` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 `merge-changes` copies the whole project clone over the project with `cp -R`, with no review step and no protection against symlinks.  A symlink planted in one session, followed by a directory of the same name in the next, can make the copy write outside the project.  `show-fetch-changes` uses `diff -R`, which follows symlinks to host files.  `local-clone` copies untracked and ignored files, including secrets, into the clone.
 
@@ -91,7 +91,7 @@ The container's own files, in its persistent store, are a container volume, not 
 **Severity:** High.  **Status:** By design; the developer must not use host tools there.
 **Where:** the developer's tools; the guidance in the [main README](../../README.md#dont-run-git-or-your-ide-on-the-project-clone-from-your-host).
 
-Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` scripts).  Opening or running any of them in the project clone on the host runs the container's code there.  The same goes for a pull's working directory and your unlocked copy, which hold the project's files: seeding copies tool configuration only inside container directories (where it's build input), and says to open the working directory in the IDE's restricted mode.
+Many tools read configuration from the directory they run in: Git (hooks, `core.fsmonitor`), IDEs (`.vscode/tasks.json`, `.idea` run configurations, recommended extensions), environment managers (`.envrc`, `.mise.toml`, `.tool-versions`), and build tools (`Makefile`, `package.json` py/src/dist_bin).  Opening or running any of them in the project clone on the host runs the container's code there.  The same goes for a pull's working directory and your unlocked copy, which hold the project's files: seeding copies tool configuration only inside container directories (where it's build input), and says to open the working directory in the IDE's restricted mode.
 
 **Red team:** plant each kind of file in the clone and see which tools act on it when a developer browses the project's state directory on the host.
 
@@ -118,7 +118,7 @@ Many tools read configuration from the directory they run in: Git (hooks, `core.
 ### FILE-6: The project clone and setup separation
 
 **Severity:** High.  **Status:** Mitigated.
-**Where:** `_setup_project_clone` and `run_env_runner` in [`main_run.py`](../../scripts/main_run.py); the mounts in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `_setup_project_clone` and `run_env_runner` in [`main_run.py`](../../py/src/dist_bin/main_run.py); the mounts in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 The project clone is a `git clone`, so it gets no untracked files, ignored files, hooks or local configuration from the project.  The setup directory is mounted read-only.  The gateway's allowed hosts and the bridge commands come from your configuration in the verified store, never from the project or the clone, and the dev container is built from a staged copy of that configuration.  The persistent store is a container volume, so it brings nothing from the host either.  Nothing else from the host is mounted.
 
@@ -129,7 +129,7 @@ The project clone is a `git clone`, so it gets no untracked files, ignored files
 ### FILE-7: World-writable setup files
 
 **Severity:** Medium (shared computers).  **Status:** Open.
-**Where:** `run_env_runner` in [`main_run.py`](../../scripts/main_run.py), which calls `touch(..., 0o666)`.
+**Where:** `run_env_runner` in [`main_run.py`](../../py/src/dist_bin/main_run.py), which calls `touch(..., 0o666)`.
 
 `scoter run` sets `authorized_keys` and the SSH host private key to mode `0666` (`MODE_SETTINGS_FILE` in `main_run.py`).  Another local account could read the host key, or add a key to `authorized_keys` before the container starts.  (The allowed domain list it used to create with mode `0666` is gone: the gateway's configuration is made from the egress rules on each run, mode `0644`, in the resources directory.)
 
@@ -149,7 +149,7 @@ Isolation limits where data can go, not what the container can read.  Committed 
 ### FILE-9: The project state inside the project directory
 
 **Severity:** Low.  **Status:** Mitigated by default.
-**Where:** `project-state: paths` in [`setup.yaml`](../../defaults/setup.yaml).
+**Where:** `project-state: paths` in [`setup.yaml`](../../dist-files/setup.yaml).
 
 The project's run files used to be under the project directory (`.dev-env/`), so host tools that walk the project tree (search indexers, test runners, language servers, backup tools) could find them too.  Their default is now outside the project: `${scoter:state-dir}/projects/${scoter:project-id}`.  A setup that moves them back inside the project has the risk again; `scoter run` then adds the directories to the project's ignore file (`ignore-file`), but other tools have their own rules.
 
@@ -160,7 +160,7 @@ The project's run files used to be under the project directory (`.dev-env/`), so
 ### FILE-10: The clone's path through container symlinks
 
 **Severity:** High.  **Status:** Closed.
-**Where:** `_setup_project_clone` and `_check_real_dir` in [`main_run.py`](../../scripts/main_run.py); `project-state: paths` in [`setup.yaml`](../../defaults/setup.yaml); the project clone mount in [`docker-compose.yaml`](../../defaults/docker-compose.yaml).
+**Where:** `_setup_project_clone` and `_check_real_dir` in [`main_run.py`](../../py/src/dist_bin/main_run.py); `project-state: paths` in [`setup.yaml`](../../dist-files/setup.yaml); the project clone mount in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
 
 The project file's old `container: workspace-subdir` put the clone in a sub-directory of the directory mounted in the container, beside the container's home directory, and the host joined the sub-path to it.  The container could replace a directory on that path with a symlink between sessions, so the next `scoter run` cloned into, ran Git in, or (with `--clean-workspace`) deleted a directory of the container's choosing, such as `~/bin` or `~/.ssh`.
 
@@ -173,7 +173,7 @@ Now the clone is the mounted directory itself (`project-state: paths: project-cl
 ### FILE-11: `kill --fetch` fetches from the wrong directory
 
 **Severity:** Low.  **Status:** Closed.
-**Where:** `project_clone_dir` in the environment record written by [`main_run.py`](../../scripts/main_run.py); the fetch in [`main_kill.py`](../../scripts/main_kill.py).
+**Where:** `project_clone_dir` in the environment record written by [`main_run.py`](../../py/src/dist_bin/main_run.py); the fetch in [`main_kill.py`](../../py/src/dist_bin/main_kill.py).
 
 With the old `workspace-subdir`, the environment record kept the mounted directory, not the clone below it, so `scoter kill --fetch` fetched from the container's home directory, or whatever repository the container made there.  The record now keeps the clone's directory, which is the mounted directory itself, and that's what the fetch reads.
 
@@ -182,8 +182,8 @@ With the old `workspace-subdir`, the environment record kept the mounted directo
 
 ## Sensitive code
 
-* [`scripts/main_run.py`](../../scripts/main_run.py): creating and refreshing the clone, the persistent store, and the setup directory.
-* [`scripts/main_kill.py`](../../scripts/main_kill.py): fetching from the clone, and removing the clone and the persistent store.
-* [`defaults/setup.yaml`](../../defaults/setup.yaml): the `git-vcs` and `file-vcs` commands, and the `project-state` locations.
-* [`scripts/surf_scoter_lib/fileutil.py`](../../scripts/surf_scoter_lib/fileutil.py): file modes, and removal.
-* The `volumes` of [`defaults/docker-compose.yaml`](../../defaults/docker-compose.yaml).
+* [`py/src/dist_bin/main_run.py`](../../py/src/dist_bin/main_run.py): creating and refreshing the clone, the persistent store, and the setup directory.
+* [`py/src/dist_bin/main_kill.py`](../../py/src/dist_bin/main_kill.py): fetching from the clone, and removing the clone and the persistent store.
+* [`dist-files/setup.yaml`](../../dist-files/setup.yaml): the `git-vcs` and `file-vcs` commands, and the `project-state` locations.
+* [`py/src/dist_bin/surf_scoter_lib/fileutil.py`](../../py/src/dist_bin/surf_scoter_lib/fileutil.py): file modes, and removal.
+* The `volumes` of [`dist-files/defaults/docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
