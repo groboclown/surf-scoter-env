@@ -15,7 +15,7 @@ ARG SCOTER_SOURCE=git
 # change (`make dev-env-pin-check` warns when it's behind).
 FROM public.ecr.aws/docker/library/rust:slim-trixie AS src-git
 ARG SCOTER_REPO=https://github.com/groboclown/surf-scoter-env.git
-ARG SCOTER_COMMIT=0000000000000000000000000000000000000000
+ARG SCOTER_COMMIT=1ebbfc0f8c957a49878819ecf05501ceb0a852f6
 RUN set -x \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
