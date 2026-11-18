@@ -173,7 +173,7 @@ host-build-release-all:
 # without duplicating them out.
 .PHONY: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-all: host-build-release-x86_64-unknown-linux-gnu
-host-build-release-x86_64-unknown-linux-gnu: dependencies-cross
+host-build-release-x86_64-unknown-linux-gnu:
 	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-unknown-linux-gnu --release
 
 .PHONY: host-build-release-aarch64-unknown-linux-gnu
@@ -184,12 +184,12 @@ host-build-release-aarch64-unknown-linux-gnu:
 .PHONY: host-build-release-x86_64-apple-darwin
 # macOS builds not added to host-build-release-all, as it requires a custom
 # Cross.toml image with the macOS SDK license.
-host-build-release-x86_64-apple-darwin: dependencies-cross
+host-build-release-x86_64-apple-darwin:
 	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-apple-darwin --release
 
 .PHONY: host-build-release-x86_64-pc-windows-gnu
 host-build-release-all: host-build-release-x86_64-pc-windows-gnu
-host-build-release-x86_64-pc-windows-gnu: dependencies-cross
+host-build-release-x86_64-pc-windows-gnu:
 	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-pc-windows-gnu --release
 
 .PHONY: dependencies-cross
