@@ -498,9 +498,7 @@ target/sboms/surf-scoter-bridge.scan.json: target/sboms/surf-scoter-bridge.cdx.j
 	$(OSVSCANNER) scan source \
 		--lockfile $<
 
-# This doesn't work as expected.
-# osv-scanner starts walking /, and fails
-#scan: target/sboms/surf-scoter-python-dev.scan.json
+scan: target/sboms/surf-scoter-python-dev.scan.json
 target/sboms/surf-scoter-python-dev.scan.json: target/sboms/surf-scoter-python-dev.cdx.json
 	-$(OSVSCANNER) scan source \
 		--lockfile $< \
@@ -536,23 +534,23 @@ target/sboms/surf-scoter-network-gateway-squid.scan.json: target/sboms/surf-scot
 	$(OSVSCANNER) scan source \
 		--lockfile $<
 
+# This has nothing to scan, because it's a distroless image, so the
+# scanner will fail.
 scan: target/sboms/surf-scoter-network-gateway-seekrit.scan.json
 target/sboms/surf-scoter-network-gateway-seekrit.scan.json: target/sboms/surf-scoter-network-gateway-seekrit.cdx.json
 	-$(OSVSCANNER) scan source \
 		--lockfile $< \
 		--format json \
 		--output-file $@
-	$(OSVSCANNER) scan source \
-		--lockfile $<
 
+# This has nothing to scan, because it's a distroless image, so the
+# scanner will fail.
 scan: target/sboms/surf-scoter-network-gateway-envoy.scan.json
 target/sboms/surf-scoter-network-gateway-envoy.scan.json: target/sboms/surf-scoter-network-gateway-envoy.cdx.json
 	-$(OSVSCANNER) scan source \
 		--lockfile $< \
 		--format json \
 		--output-file $@
-	$(OSVSCANNER) scan source \
-		--lockfile $<
 
 
 .PHONY: install-osvscanner
