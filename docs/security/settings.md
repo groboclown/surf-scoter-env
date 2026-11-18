@@ -119,7 +119,7 @@ The setup chooses the gateway: `dev-env: paths: network-gateway`, `values: netwo
 
 ### Gateway: Squid
 
-[`containers/network-gateway-squid`](../../containers/network-gateway-squid/) runs Squid on Debian as the unprivileged `proxy` user, with no capabilities, caching off, and the access log on standard output (`podman logs HOSTNAME-ng`).  It provides N2, and backs up N3.
+[`containers/network-gateway-squid`](../../containers/network-gateway-squid/) runs Squid on Alpine as the unprivileged `squid` user, with no package manager in the image, with no capabilities, caching off, and the access log on standard output (`podman logs HOSTNAME-ng`).  It provides N2, and backs up N3.
 
 [`squid.conf`](../../containers/network-gateway-squid/squid.conf) applies its rules in this order:
 
@@ -195,7 +195,7 @@ Its own weak points are on the [Envoy gateway attack vectors](network-gateway-en
 
 **Settings are trusted completely.**  Nothing checks that a replacement compose file, firewall or gateway keeps the required properties.  If you change them, test them; see the checklist below.
 
-**Default images aren't pinned.**  `alpine:3` and `debian:bookworm-slim` are tags, not digests, so a rebuild can pick up a different base.
+**Default images aren't pinned.**  `alpine:3` is a tag, not a digest, so a rebuild can pick up a different base.
 
 **Separate environments need verification (N7).**  The default `compose-up` command doesn't pass a compose project name, so compose derives one from the resources directory's name (`resources`) for every project.  Two environments running at once may share, or replace, each other's containers and networks.
 

@@ -13,7 +13,7 @@ You'll need these things installed to get building:
 
 To generate the SBOM and scan those, you'll need [`cdxgen`](https://github.com/cdxgen/cdxgen#installing) and [`osv-scanner`](https://google.github.io/osv-scanner/installation/):
 
-* Don't have them but have NPM and Go installed?  Run `make dev-install` to put them on your computer.  `cdxgen` will go into a local directory, `osv-scanner` will go into your `$HOME/go/bin` directory.
+* Don't have them but have Go installed?  Run `make dev-install` to put them on your computer.  `cdxgen` (a standalone binary, Linux or macOS) will go into `target/sbom-gen`, `osv-scanner` will go into your `$HOME/go/bin` directory.
 * Have them installed?  Run:
     * `make CDXGEN=$( where cdxgen ) OSVSCANNER=$( where osv-scanner ) sbom scan`
 
@@ -120,6 +120,7 @@ New releases must pass these gates:
         * [network-gateway-envoy](containers/network-gateway-envoy/Dockerfile)
         * [network-gateway-seekrit](containers/network-gateway-seekrit/Dockerfile)
         * [network-gateway-squid](containers/network-gateway-squid/Dockerfile)
+    * [cdxgen version](Makefile)
 * Major and minor versions:
     * ***NO OPEN SECURITY ISSUES.*** Because of the sensitivity of this project, releases must not have open security issues.
     * Review [`SECURITY.md`](SECURITY.md) for supported versions.

@@ -1,11 +1,19 @@
-FROM public.ecr.aws/docker/library/debian:bookworm-slim
+FROM public.ecr.aws/docker/library/alpine:3
 
-# Install Squid and CA certificates.
+# Upgrade the base image's packages (it can lag behind security fixes in the
+# Alpine repositories), install Squid, then remove the package manager.
+# Nothing installs packages at runtime, and removing apk-tools also removes
+# what only it needs, so the image carries less code that could have
+# vulnerabilities.  Squid only tunnels CONNECT requests and never checks
+# certificates, so it needs no CA certificates.
 RUN set -x \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-    squid ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && apk upgrade --no-cache \
+ && apk add --no-cache \
+    squid \
+ && apk del --no-cache apk-tools \
+ && rm -rf /etc/apk /usr/share/apk /var/cache/apk
+# /lib/apk/db stays: it lists the installed packages, which the SBOM (and the
+# vulnerability scan) reads.
 
 # Set up the Squid configuration file.
 COPY squid.conf /etc/squid/squid.conf
@@ -21,7 +29,7 @@ RUN squid -k parse
 
 # Start as the unprivileged user squid would otherwise switch to.  Switching
 # needs the SETUID / SETGID capabilities, which the container drops.
-USER proxy
+USER squid
 
 EXPOSE 3128
 
