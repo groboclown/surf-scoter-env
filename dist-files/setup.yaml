@@ -329,14 +329,14 @@ dev-env:
     # others are seekrit-proxy (`containers/network-gateway-seekrit`), which can
     # also look inside TLS to check a request and fill in secrets, and Envoy
     # (`containers/network-gateway-envoy`), which passes `tls` rules through
-    # and reads `https` rules, checking their methods, without secrets.  A
-    # gateway is chosen by these settings together: `paths: network-gateway`, `values: network-gateway-image`,
-    # `network-gateway-name` and `network-gateway-config-mount`, and
-    # `runs: network-gateway-write-config`.
+    # and reads `https` rules, checking their methods and filling in their
+    # secrets (as values: it can't use a seekrit.dev token).  A
+    # gateway is chosen by these settings together: `paths: network-gateway`,
+    # `values: network-gateway-image`, `network-gateway-name` and
+    # `network-gateway-config-mount`, and `runs: network-gateway-write-config`.
     paths:
         firewall-router: ${scoter:distribution-dir}/containers/firewall-router
         network-gateway: ${scoter:distribution-dir}/containers/network-gateway-squid
-
         docker-compose: ${scoter:distribution-dir}/defaults/docker-compose.yaml
     values:
         firewall-router-image: ${dev-env-image-prefix}firewall-router
@@ -358,6 +358,7 @@ dev-env:
         # Its name: the checks on egress rules are for this gateway, and the
         # setup's fingerprint changes with it, so a different one asks for a
         # new pull.
+        # The gateway name is only used for logging purposes.
         network-gateway-name: squid
         # Where the gateway container reads the configuration
         # `network-gateway-write-config` makes (the docker-compose file mounts it
@@ -487,7 +488,9 @@ dev-env:
     # replace the settings above.  It passes `tls` rules through, and reads
     # `https` rules for exact hosts, with a certificate for each from
     # `network-gateway-mk-leaf`; it never holds the CA's key, so
-    # `network-gateway-reads-tls` stays 'no'.
+    # `network-gateway-reads-tls` stays 'no'.  It fills in the secrets those
+    # rules name, in request headers only; `network-gateway-post-start` gives
+    # it their values from your secret store's `[secrets]` (not a token).
     #
     # paths:
     #     network-gateway: ${scoter:distribution-dir}/containers/network-gateway-envoy
@@ -504,6 +507,11 @@ dev-env:
     #         - '{x:output}'
     #         - '{x:ca-cert}'
     #         - '{x:ca-key}'
+    #     network-gateway-post-start:
+    #         - ${python:script}
+    #         - ${scoter:distribution-bin-dir}/gateway_postrun_envoy.py
+    #         - '{x:universal}'
+    #         - '{x:gateway-container}'
 
 
 # What the checks on a configuration look for (`scoter pull`, `scoter lock`,

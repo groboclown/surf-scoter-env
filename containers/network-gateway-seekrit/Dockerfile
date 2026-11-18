@@ -12,7 +12,7 @@
 # The build stops if a patch doesn't apply cleanly.
 
 # ---- build stage: fetch, patch, and build a static musl binary --------------
-FROM public.ecr.aws/docker/library/rust:1.99.1-alpine3.21 AS build
+FROM public.ecr.aws/docker/library/rust:1.100.0-alpine3.24 AS build
 
 # The upstream repository and the exact commit the patches are made against.
 # Fetching by full commit hash, then checking it, means a moved branch or tag

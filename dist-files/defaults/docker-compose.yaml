@@ -42,12 +42,14 @@ services:
         max-size: 10m   # the access log goes to stdout
     restart: unless-stopped
     # Where a gateway can make a socket only it uses: the seekrit gateway
-    # takes its secrets there, once, after it starts; held in memory only.
-    # Sticky and open, as the gateway's own user makes its socket in it (the
-    # socket itself is the user's alone).  The short form, so the runtime
-    # reads `mode` as octal, whichever compose reads this.
+    # (`/run/seekrit`) and the Envoy gateway (`/run/envoy`) take their
+    # secrets there, once, after they start; held in memory only.  Sticky and
+    # open, as the gateway's own user makes its socket in it (the socket
+    # itself is the user's alone).  The short form, so the runtime reads
+    # `mode` as octal, whichever compose reads this.
     tmpfs:
       - /run/seekrit:mode=1777,size=65536
+      - /run/envoy:mode=1777,size=65536
     # The long form, so no value can add mount options.
     volumes:
       - type: bind

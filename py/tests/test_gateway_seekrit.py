@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 import gateway_seekrit
-from surf_scoter_lib import fileutil
+from surf_scoter_lib import UserConfig, fileutil
 
 from . import SRC_BIN
 
@@ -41,7 +41,7 @@ def _translate(
     *rules: dict[str, object], ports: frozenset[int] = PORTS, tls_ports: frozenset[int] = TLS_PORTS,
 ) -> tuple[dict[str, str], dict[str, object], list[str]]:
     """(refusal reasons by host, the configuration as parsed, enforced hosts)."""
-    parsed = gateway_seekrit.gateway.rules_from(gateway_seekrit.UserConfig(_suc(*rules)))
+    parsed = gateway_seekrit.gateway.rules_from(UserConfig(_suc(*rules)))
     report, text = gateway_seekrit.translate(parsed, ports, tls_ports)
     reasons = {rule.host: reason for rule, reason in report.refused}
     return reasons, tomllib.loads(text), [rule.host for rule in report.enforced]

@@ -1,6 +1,6 @@
 # Domain-aware CONNECT proxy with separate nftables firewall service
 
-There are three gateway containers.  This page describes the default, Squid ([`network-gateway-squid`](network-gateway-squid/)).  [`network-gateway-seekrit`](network-gateway-seekrit/) is seekrit-proxy built with Surf Scoter's patches: it can also look inside TLS for the hosts the egress rules say, and fill in secrets.  [`network-gateway-envoy`](network-gateway-envoy/) is Envoy: it passes `tls` rules through, on any port the firewall lets out, and reads `https` rules to check their methods, but never fills in secrets.  Your setup chooses between them; see [the settings](../docs/security/settings.md#the-gateway-container).
+There are three gateway containers.  This page describes the default, Squid ([`network-gateway-squid`](network-gateway-squid/)).  [`network-gateway-seekrit`](network-gateway-seekrit/) is seekrit-proxy built with Surf Scoter's patches: it can also look inside TLS for the hosts the egress rules say, and fill in secrets.  [`network-gateway-envoy`](network-gateway-envoy/) is Envoy: it passes `tls` rules through, on any port the firewall lets out, and reads `https` rules to check their methods and fill in their secrets (in header values), with Surf Scoter's secrets filter ([`network-gateway-envoy/secrets`](network-gateway-envoy/secrets/)).  Your setup chooses between them; see [the settings](../docs/security/settings.md#the-gateway-container).
 
 ## Layout
 

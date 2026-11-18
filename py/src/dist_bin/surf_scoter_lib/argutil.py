@@ -1,13 +1,12 @@
 #SPDX:MIT
 """Helpers for argument handling to the sub-commands."""
 import argparse
-import json
 import os
 import sys
 from collections.abc import Sequence
 from typing import Any
 
-from . import log
+from . import log, universal
 from .user_config import UserConfig
 
 BAD_EXECUTION_ARGS_CODE = 124
@@ -58,8 +57,11 @@ def gen_parser(
         print("Must be run from the scoter script.")
         return (None, [], parser)
 
-    with open(argv[1], "rb") as inp:
-        config = UserConfig(json.load(inp))
+    try:
+        config = universal.read_universal(argv[1])
+    except universal.UniversalErr as err:
+        print(f"{cmd}: {err}", file=sys.stderr)
+        return (None, [], parser)
 
     parser.add_argument(
         "-l",

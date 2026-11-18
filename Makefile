@@ -280,6 +280,31 @@ clean: network-gateway-envoy-clean
 network-gateway-envoy-clean:
 	-$(DOCKER) rmi $(NETWORK_GATEWAY_ENVOY_TAG)
 
+## envoy-secrets-tests       Run unit tests for the Envoy gateway's secrets filter and envoy-inject.
+.PHONY: envoy-secrets-tests
+test: envoy-secrets-tests
+envoy-secrets-tests:
+	cd containers/network-gateway-envoy/secrets && $(CARGO) test --locked
+
+## envoy-secrets-lint        Run 'clippy' on the Envoy gateway's secrets filter (host and Wasm) and envoy-inject.
+.PHONY: envoy-secrets-lint
+lint: envoy-secrets-lint
+envoy-secrets-lint:
+	cd containers/network-gateway-envoy/secrets && $(CARGO) clippy --no-deps --locked --all-targets
+	cd containers/network-gateway-envoy/secrets && $(CARGO) clippy --no-deps --locked -p secrets-filter --target wasm32-unknown-unknown
+
+## envoy-secrets-fmt         Run 'fmt' on the Envoy gateway's secrets filter and envoy-inject.
+.PHONY: envoy-secrets-fmt
+fmt: envoy-secrets-fmt
+envoy-secrets-fmt:
+	cd containers/network-gateway-envoy/secrets && $(CARGO) fmt --all
+
+## envoy-secrets-clean       Clean the generated rust files from the Envoy gateway's secrets filter.
+.PHONY: envoy-secrets-clean
+clean: envoy-secrets-clean
+envoy-secrets-clean:
+	-rm -rf containers/network-gateway-envoy/secrets/target
+
 
 # ---------------------------------------------------------------------
 # Script tasks

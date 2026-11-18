@@ -18,6 +18,7 @@ from . import REPO, SRC_BIN
 
 SCRIPT = SRC_BIN / "gateway_envoy.py"
 DEFAULT_CONFIG = REPO / "containers" / "network-gateway-envoy" / "envoy.json"
+VALIDATE_SECRETS = REPO / "containers" / "network-gateway-envoy" / "validate-secrets.json"
 OPENSSL = shutil.which("openssl")
 
 # The distribution's `network-gateway-mk-leaf`, with `${openssl}` resolved.
@@ -126,12 +127,12 @@ class PlanTest(unittest.TestCase):
             _rule("c.example.com", methods=["GET"]),
         )
         self.assertEqual(report.gateway, "envoy")
-        self.assertEqual([r.host for r in report.enforced], ["registry.npmjs.org", "*.pkg.dev", "a.example.com"])
+        self.assertEqual(
+            [r.host for r in report.enforced], ["registry.npmjs.org", "*.pkg.dev", "a.example.com", "api.github.com"],
+        )
         reasons = {rule.host: reason for rule, reason in report.refused}
         self.assertIn("never plain HTTP", reasons["b.example.com"])
         self.assertIn("only lets TCP 443 out, not 22", reasons["git.example.com"])
-        self.assertIn("can't fill in secrets", reasons["api.github.com"])
-        self.assertIn("GITHUB_TOKEN", reasons["api.github.com"])
         self.assertIn("host named exactly", reasons["*.read.example.com"])
         self.assertIn("can't see the methods", reasons["c.example.com"])
 
@@ -294,15 +295,35 @@ class InvariantTest(unittest.TestCase):
 
     def test_only_these_filters(self) -> None:
         """The `CONNECT` listener's HTTP filters are the dynamic forward proxy, then the router;
-        a read host's, the router only.  Nothing sets filter state."""
-        listeners = _listeners(self.config)
-        names = [f["name"] for f in _manager(listeners[0])["http_filters"]]  # type: ignore[attr-defined]
-        self.assertEqual(names, ["envoy.filters.http.dynamic_forward_proxy", "envoy.filters.http.router"])
-        for listener in listeners[1:]:
-            with self.subTest(listener=listener["name"]):
-                names = [f["name"] for f in _manager(listener)["http_filters"]]  # type: ignore[attr-defined]
-                self.assertEqual(names, ["envoy.filters.http.router"])
-        for listener in listeners:
+        a read host's, the router only, or with secrets, the secrets filter (filling in only
+        its rules' names) before it; the inject listener's, the secrets filter taking the
+        delivery, then the router.  Only the secrets filter sets filter state, its own, on
+        listeners whose upstream is fixed."""
+        config = _config(
+            _rule("registry.npmjs.org"),
+            _rule("api.github.com", protocol="https", methods=["GET"], secrets=["GITHUB_TOKEN"]),
+            _rule("b.example.com", protocol="https"),
+        )
+        for case in (self.config, config):
+            listeners = _listeners(case)
+            names = [f["name"] for f in _manager(listeners[0])["http_filters"]]  # type: ignore[attr-defined]
+            self.assertEqual(names, ["envoy.filters.http.dynamic_forward_proxy", "envoy.filters.http.router"])
+            for listener in listeners[1:]:
+                with self.subTest(listener=listener["name"]):
+                    filters = _manager(listener)["http_filters"]
+                    names = [f["name"] for f in filters]  # type: ignore[attr-defined]
+                    if listener["name"] == gateway_envoy.INJECT_LISTENER:
+                        expected = [gateway_envoy.secrets_filter({"mode": "inject"}), gateway_envoy._router()]
+                        self.assertEqual(filters, expected)
+                    elif case is config and listener["name"] == "intercept api.github.com:443":
+                        expected = [
+                            gateway_envoy.secrets_filter({"mode": "fill", "allow": ["GITHUB_TOKEN"]}),
+                            gateway_envoy._router(),
+                        ]
+                        self.assertEqual(filters, expected)
+                    else:
+                        self.assertEqual(names, ["envoy.filters.http.router"])
+        for listener in _listeners(self.config) + _listeners(config):
             self.assertNotIn("listener_filters", listener)
             self.assertEqual(len(listener["filter_chains"]), 1)  # type: ignore[arg-type]
             self.assertEqual(len(listener["filter_chains"][0]["filters"]), 1)  # type: ignore[index]
@@ -318,6 +339,15 @@ class InvariantTest(unittest.TestCase):
         for listener in listeners[1:]:
             self.assertEqual(listener["internal_listener"], {})
             self.assertNotIn("address", listener)
+
+    def test_inject_socket_is_private(self) -> None:
+        """The only other socket, with secrets: the inject listener's, a Unix socket only the
+        gateway's own user can open, never a TCP port a loopback name could reach."""
+        config = _config(_rule("api.github.com", protocol="https", secrets=["GITHUB_TOKEN"]))
+        listeners = _listeners(config)
+        self.assertEqual([l["name"] for l in listeners], ["egress", "intercept api.github.com:443", "inject"])
+        self.assertEqual(listeners[2]["address"], {"pipe": {"path": gateway_envoy.INJECT_SOCKET, "mode": 0o600}})
+        self.assertTrue(gateway_envoy.INJECT_SOCKET.startswith("/run/envoy/"))
 
     def test_tunnel_cluster(self) -> None:
         """The dynamic forward proxy's cluster opens plain TCP: no TLS of its own, no shared connections."""
@@ -400,6 +430,82 @@ class InvariantTest(unittest.TestCase):
     def test_default_config(self) -> None:
         """The image's own configuration is the one that allows nothing."""
         self.assertEqual(DEFAULT_CONFIG.read_text(encoding="utf-8"), gateway_envoy.config_text([]))
+
+
+class SecretsTest(unittest.TestCase):
+    """Test filling in secrets: which read hosts get the filter, with which names."""
+
+    def test_read_secrets(self) -> None:
+        """Each read host and port's rules' secrets, together, each once; none for the others."""
+        rules = _rules(
+            _rule("api.github.com", protocol="https", methods=["GET"], secrets=["GITHUB_TOKEN"]),
+            _rule("api.github.com", protocol="https", methods=["POST"], secrets=["GITHUB_TOKEN", "OTHER"]),
+            _rule("api.github.com", protocol="https", port=8443, secrets=["THIRD"]),
+            _rule("b.example.com", protocol="https"),
+            _rule("registry.npmjs.org"),
+        )
+        self.assertEqual(gateway_envoy.read_secrets(rules), {
+            ("api.github.com", 443): ("GITHUB_TOKEN", "OTHER"),
+            ("api.github.com", 8443): ("THIRD",),
+        })
+
+    def test_filter_only_where_named(self) -> None:
+        config = _config(
+            _rule("api.github.com", protocol="https", secrets=["GITHUB_TOKEN"]),
+            _rule("b.example.com", protocol="https"),
+        )
+        by_name = {l["name"]: l for l in _listeners(config)}
+        github = _manager(by_name["intercept api.github.com:443"])
+        other = _manager(by_name["intercept b.example.com:443"])
+        wasm = github["http_filters"][0]["typed_config"]["config"]  # type: ignore[index]
+        self.assertEqual(json.loads(wasm["configuration"]["value"]), {"mode": "fill", "allow": ["GITHUB_TOKEN"]})
+        self.assertEqual(len(other["http_filters"]), 1)  # type: ignore[arg-type]
+        log = github["access_log"][0]["typed_config"]["log_format"]["json_format"]  # type: ignore[index]
+        self.assertEqual(log["injected"], "%FILTER_STATE(wasm.injected:PLAIN)%")
+        self.assertEqual(log["refused"], "%FILTER_STATE(wasm.refused:PLAIN)%")
+        log = other["access_log"][0]["typed_config"]["log_format"]["json_format"]  # type: ignore[index]
+        self.assertNotIn("injected", log)
+
+    def test_no_inject_listener_without_secrets(self) -> None:
+        config = _config(_rule("b.example.com", protocol="https"), _rule("registry.npmjs.org"))
+        self.assertNotIn(gateway_envoy.INJECT_LISTENER, [l["name"] for l in _listeners(config)])
+        self.assertNotIn("envoy.filters.http.wasm", json.dumps(config))
+
+    def test_one_vm_fails_closed(self) -> None:
+        """Every instance has the same module and VM, which is what shares the secrets
+        between them; none is allowed to fail open, or to run anything else."""
+        config = _config(
+            _rule("api.github.com", protocol="https", secrets=["GITHUB_TOKEN"]),
+            _rule("c.example.com", protocol="https", secrets=["OTHER"]),
+        )
+        configs = [
+            value["config"] for key, value in _walk(config)
+            if key == "typed_config" and isinstance(value, dict) and value.get("@type", "").endswith(".wasm.v3.Wasm")
+        ]
+        self.assertEqual(len(configs), 3)
+        for wasm in configs:
+            self.assertEqual(wasm["vm_config"], {
+                "vm_id": gateway_envoy.SECRETS_VM_ID,
+                "runtime": "envoy.wasm.runtime.v8",
+                "code": {"local": {"filename": gateway_envoy.SECRETS_FILTER}},
+            })
+            self.assertEqual(
+                set(wasm), {"name", "configuration", "allow_on_headers_stop_iteration", "vm_config"},
+            )
+
+    def test_image_validates_the_filter(self) -> None:
+        """The image's build checks the secrets filter loads, with the inject listener as written here."""
+        expected = {"static_resources": {"listeners": [gateway_envoy._inject_listener()]}}
+        self.assertEqual(json.loads(VALIDATE_SECRETS.read_text(encoding="utf-8")), expected)
+
+    def test_never_a_value(self) -> None:
+        """The configuration names secrets, never holds one: it's written before they're read."""
+        text = gateway_envoy.config_text(
+            _rules(_rule("api.github.com", protocol="https", secrets=["GITHUB_TOKEN"])),
+            {"api.github.com": FAKE_LEAF},
+        )
+        self.assertIn("GITHUB_TOKEN", text)
+        self.assertNotIn("{{seekrit:", text)
 
 
 @unittest.skipIf(OPENSSL is None, "needs openssl")
