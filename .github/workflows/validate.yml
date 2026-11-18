@@ -33,7 +33,7 @@ jobs:
         shell: bash
     env:
       # setup-python doesn't provide `python3` on Windows.
-      MAKE_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+      MAKE_PYTHON: ${{ startsWith(matrix.os, 'windows') && 'python' || 'python3' }}
     steps:
       - name: Keep LF line endings (Windows)
         if: runner.os == 'Windows'
