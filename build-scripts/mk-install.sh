@@ -42,6 +42,8 @@ cp "${base}/rust/host/${target_dir}/gen-scoter-uc${ext}" "${workdir}/bin/."
 cp -R "${base}/py/src/dist_bin/"* "${workdir}/bin/."
 
 cp -R "${base}/containers" "${workdir}/."
+# Not a local build of the Envoy gateway's secrets filter: its image builds its own.
+rm -rf "${workdir}/containers/network-gateway-envoy/secrets/target"
 # The files installed as they are, laid out as in the distribution: the setup
 # file at the top, where the tools look for it
 # (`${scoter:distribution-dir}/setup.yaml`), the `defaults` and `templates`.

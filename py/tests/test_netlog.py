@@ -83,6 +83,21 @@ class EnvoyTest(unittest.TestCase):
     def test_registered(self) -> None:
         self.assertIs(netlog.PARSERS["envoy"], netlog.parse_envoy)
 
+    def test_read_host_secrets(self) -> None:
+        """A read host with secrets: the names the filter put in, or why it refused."""
+        events = netlog.parse(ENVOY_SECRETS_LOG.splitlines(), netlog.parse_envoy)
+        self.assertEqual(
+            [(e.status, e.reason, e.injected) for e in events],
+            [
+                (503, "secrets_pending", ()),
+                (200, None, ("GITHUB_TOKEN",)),
+                (403, "not_allowed", ()),
+                (200, None, ()),
+            ],
+        )
+        summary = netlog.summarize(events)
+        self.assertEqual(dict(summary.injected), {"GITHUB_TOKEN": 1})  # nosec: B105  # A secret name and a count.
+
     def test_read_host(self) -> None:
         """A read host: its `CONNECT` is an intercept; each request, what it got, or its refusal.
         The host and port come from the gateway's own fields, not the request's `:authority`."""
@@ -111,6 +126,16 @@ ENVOY_READ_LOG = """\
 {"authority":"api.github.com","bytes_down":70,"bytes_up":0,"code":403,"flags":"-","host":"api.github.com","method":"POST","path":"/user","plane":"request","port":"443","route":"refused","time":"2026-11-17T02:35:03.105Z","type":"DownstreamEnd","upstream":null}
 {"authority":"evil.example.com","bytes_down":70,"bytes_up":0,"code":403,"flags":"-","host":"api.github.com","method":"GET","path":"/","plane":"request","port":"443","route":"refused","time":"2026-11-17T02:35:03.508Z","type":"DownstreamEnd","upstream":null}
 {"authority":"api.github.com:443","bytes_down":9000,"bytes_up":800,"code":200,"flags":"DC","method":"CONNECT","path":null,"plane":"connect","route":"intercept api.github.com:443","time":"2026-11-17T02:35:02.000Z","type":"DownstreamEnd","upstream":"envoy://intercept api.github.com:443/"}
+"""
+
+# Envoy reading api.github.com, whose rules name GITHUB_TOKEN: a request
+# before the secrets arrived, one with the token filled in, one asking for a
+# secret the rules don't name, and one without a placeholder.
+ENVOY_SECRETS_LOG = """\
+{"authority":"api.github.com","bytes_down":71,"bytes_up":0,"code":503,"flags":"-","host":"api.github.com","injected":null,"method":"GET","path":"/user","plane":"request","port":"443","refused":"secrets_pending","route":"api.github.com:443","time":"2026-11-17T02:35:01.000Z","type":"DownstreamEnd","upstream":null}
+{"authority":"api.github.com","bytes_down":2396,"bytes_up":0,"code":200,"flags":"-","host":"api.github.com","injected":"GITHUB_TOKEN","method":"GET","path":"/user","plane":"request","port":"443","refused":null,"route":"api.github.com:443","time":"2026-11-17T02:35:02.000Z","type":"DownstreamEnd","upstream":"140.82.112.5:443"}
+{"authority":"api.github.com","bytes_down":64,"bytes_up":0,"code":403,"flags":"-","host":"api.github.com","injected":null,"method":"GET","path":"/user","plane":"request","port":"443","refused":"not_allowed","route":"api.github.com:443","time":"2026-11-17T02:35:03.000Z","type":"DownstreamEnd","upstream":null}
+{"authority":"api.github.com","bytes_down":10,"bytes_up":0,"code":200,"flags":"-","host":"api.github.com","injected":null,"method":"GET","path":"/","plane":"request","port":"443","refused":null,"route":"api.github.com:443","time":"2026-11-17T02:35:04.000Z","type":"DownstreamEnd","upstream":"140.82.112.5:443"}
 """
 
 

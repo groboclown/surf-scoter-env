@@ -2,7 +2,7 @@
 
 The weak points of the Envoy network gateway ([`containers/network-gateway-envoy`](../../containers/network-gateway-envoy/)), measured against the [network's required properties](network.md#required-properties).  The weak points every gateway shares are on the [network attack vectors](network-attack-vectors.md) page; the other gateways' are on the [Squid gateway](network-gateway-squid-attack-vectors.md) and [seekrit gateway](network-gateway-seekrit-attack-vectors.md) pages.  See the [attack vector overview](attack-vectors.md) for how to read the severity and status labels.
 
-Envoy passes `tls` rules through, as Squid does, seeing only each `CONNECT`'s host and port, on any port the gateway's firewall lets out.  For an `https` rule's host, it reads the traffic: it ends the TLS connection with a certificate for that host, made for the run and signed by the run's CA, which the dev container trusts, checks each request's host and method, and makes its own TLS connection to the host.  Unlike the seekrit gateway, it never holds the CA's key, only a certificate for each host it reads, and it never fills in secrets.  It refuses `http` rules, `secrets`, and `https` wildcards.
+Envoy passes `tls` rules through, as Squid does, seeing only each `CONNECT`'s host and port, on any port the gateway's firewall lets out.  For an `https` rule's host, it reads the traffic: it ends the TLS connection with a certificate for that host, made for the run and signed by the run's CA, which the dev container trusts, checks each request's host and method, and makes its own TLS connection to the host.  Unlike the seekrit gateway, it never holds the CA's key, only a certificate for each host it reads.  For an `https` rule with `secrets`, Surf Scoter's secrets filter, a Wasm module built into its image, fills `{{seekrit:NAME}}` placeholders in the request's header values with your secrets, which reach it after it starts, into its memory only.  It refuses `http` rules and `https` wildcards.
 
 For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/v1.36.12/configuration/http/http_filters/dynamic_forward_proxy_filter), which resolves the host a request names and connects to it.  Envoy's documentation warns that such a proxy is "subject to confused deputy attacks", and that "any address reachable from the proxy is potentially accessible by untrusted clients".  Most of this page is about keeping that deputy to the rules.
 
@@ -15,10 +15,13 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 | `CONNECT` requests: the target, the `Host` header, other headers | Code in the dev container | Envoy's HTTP/1 codec and routes, as configured by [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
 | Requests to read hosts: TLS, HTTP/1.1 and HTTP/2, `:authority`, methods, paths, headers, bodies | Code in the dev container | Each read host's internal listener and routes, in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
 | Responses from read hosts, and their certificates | The upstream servers | Envoy's upstream TLS, checked against the image's system CAs |
+| Placeholders in requests to read hosts (`{{seekrit:NAME}}`) | Code in the dev container | The secrets filter ([`secrets/filter`](../../containers/network-gateway-envoy/secrets/filter/)), on each read host's listener whose rules name secrets |
+| The secret values | Your secret store (`project-state: paths: secret-store`), its commands | [`gateway_postrun_envoy.py`](../../py/src/dist_bin/gateway_postrun_envoy.py), with the store and delivery in [`gateway_secrets.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_secrets.py) (shared with the seekrit gateway), `docker: runs: exec-stdin`, `envoy-inject`, the inject listener |
 | The read hosts' certificates and keys | `network-gateway-mk-leaf`, with the run's CA | `make_leaves` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); the gateway's configuration file |
 | DNS answers for allowed names | Whoever runs those domains' DNS | [`egress.nft`](../../containers/firewall-router/egress.nft) only |
 | The run's CA | `scoter run` | [`gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py), [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml), `make_leaves` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py) |
 | The gateway's image | Envoy's upstream | [`network-gateway-envoy/Dockerfile`](../../containers/network-gateway-envoy/Dockerfile), pinned by digest |
+| The secrets filter and `envoy-inject` | Surf Scoter's source, and its crates (`Cargo.lock`) | [`network-gateway-envoy/secrets`](../../containers/network-gateway-envoy/secrets/), built in the image's first stage |
 
 
 ## Summary
@@ -34,6 +37,10 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 | [ENVOY-7](#envoy-7-the-read-hosts-certificate-keys) | The read hosts' certificate keys | Medium | Mitigated |
 | [ENVOY-8](#envoy-8-the-gateways-memory-held-by-slow-readers) | The gateway's memory, held by slow readers | Low | Mitigated |
 | [ENVOY-9](#envoy-9-what-the-log-holds) | What the log holds | Low | By design |
+| [ENVOY-10](#envoy-10-secrets-in-the-gateways-memory-and-their-delivery) | Secrets in the gateway's memory, and their delivery | High | Mitigated |
+| [ENVOY-11](#envoy-11-a-secret-used-through-the-host-its-rule-allows) | A secret used through the host its rule allows | High | By design |
+| [ENVOY-12](#envoy-12-secrets-echoed-back-in-responses) | Secrets echoed back in responses | Medium | Mitigated |
+| [ENVOY-13](#envoy-13-the-secrets-filter) | The secrets filter | Medium | Mitigated |
 
 
 ## Vectors
@@ -45,7 +52,7 @@ For `tls` rules it uses Envoy's [dynamic forward proxy](https://www.envoyproxy.i
 
 The confused deputy.  The routes decide whether a request is allowed; the dynamic forward proxy decides where it goes.  If those two see different hosts, the container can pass the check with an allowed host and be connected to another.  The dynamic forward proxy takes its host from filter state (`envoy.upstream.dynamic_host` and `dynamic_port`, when `allow_dynamic_host_from_filter_state` is on), then from a route's host rewrite (`host_rewrite_literal`, or `host_rewrite_header`, a header the client picks), and only then from the request's `:authority`.  Port stripping in the connection manager, or a virtual host's domain match that ignores the port, would let the check pass a port the rule didn't name.
 
-The configuration has none of these.  The HTTP filters are only the dynamic forward proxy and the router, so nothing sets filter state.  No route rewrites the host.  There's one virtual host for every name, and each rule is a route matching the whole `:authority`, port included, in any case: `host:port` exactly, or, for `*.domain`, `(?i)^[a-z0-9-]+(\.[a-z0-9-]+)*\.domain:PORT$` in RE2.  For a `CONNECT`, Envoy takes the `:authority` from the request target, not the `Host` header.  Tested against Envoy 1.36.12:
+The configuration has none of these.  The `CONNECT` listener's HTTP filters are only the dynamic forward proxy and the router, so nothing sets filter state there.  The secrets filter sets filter state only on read hosts' listeners, and only its own (`wasm.injected`, `wasm.refused`, for the log), where the upstream is a fixed cluster, never the dynamic forward proxy ([ENVOY-6](#envoy-6-a-read-hosts-requests-sent-somewhere-else)).  No route rewrites the host.  There's one virtual host for every name, and each rule is a route matching the whole `:authority`, port included, in any case: `host:port` exactly, or, for `*.domain`, `(?i)^[a-z0-9-]+(\.[a-z0-9-]+)*\.domain:PORT$` in RE2.  For a `CONNECT`, Envoy takes the `:authority` from the request target, not the `Host` header.  Tested against Envoy 1.36.12:
 
 * a `Host` header naming an allowed host doesn't let a `CONNECT` to another through;
 * a `Host` header naming another host doesn't redirect an allowed `CONNECT`;
@@ -67,7 +74,9 @@ What's left is loopback.  The firewall lets the gateway's namespace talk to itse
 
 **Red team:** point an allowed name at loopback, private, link-local, metadata and IPv4-mapped IPv6 addresses, and try rebinding between lookups.  From inside the gateway's namespace, list what listens on loopback.
 
-**When changing this code:** never add Envoy's `admin` interface, or a second listener, without first closing loopback in the firewall (allowing only the DNS resolver's address there).  Keep `dns_lookup_family: V4_ONLY` while the firewall drops IPv6.
+The secrets filter's inject listener ([ENVOY-10](#envoy-10-secrets-in-the-gateways-memory-and-their-delivery)) is a Unix socket, not a TCP port, so a name resolving to loopback can't reach it.
+
+**When changing this code:** never add Envoy's `admin` interface, or a second TCP listener, without first closing loopback in the firewall (allowing only the DNS resolver's address there).  Keep the inject listener on a Unix socket.  Keep `dns_lookup_family: V4_ONLY` while the firewall drops IPv6.
 
 ### ENVOY-3: DNS lookups for names no rule allows
 
@@ -87,7 +96,7 @@ A wildcard rule still allows lookups of any name under its domain, and the cache
 **Severity:** Medium.  **Status:** Mitigated (N4).
 **Where:** [`network-gateway-envoy/Dockerfile`](../../containers/network-gateway-envoy/Dockerfile), [`egress.nft`](../../containers/firewall-router/egress.nft).
 
-Envoy parses hostile input.  If it's subverted, the firewall still limits it to the ports it lets out (TCP 443) on public IPv4 addresses, but not to the allowed hosts.  It never holds a secret, or the run's CA key ([ENVOY-5](#envoy-5-the-runs-ca-key-kept-from-the-gateway)).  It can see where data goes; it can read the traffic to the hosts it reads, and pass as them to the dev container ([ENVOY-7](#envoy-7-the-read-hosts-certificate-keys)), but no others.  The image is Envoy's distroless one, with no shell, pinned by digest.  Envoy runs as an unprivileged user, without capabilities, with two worker threads and limits on connections, header size and DNS lookups.
+Envoy parses hostile input.  If it's subverted, the firewall still limits it to the ports it lets out (TCP 443) on public IPv4 addresses, but not to the allowed hosts.  It never holds the run's CA key ([ENVOY-5](#envoy-5-the-runs-ca-key-kept-from-the-gateway)), but, once they're given, it holds the secrets the rules name ([ENVOY-10](#envoy-10-secrets-in-the-gateways-memory-and-their-delivery)), and a subverted Envoy can send them anywhere it can reach.  It can see where data goes; it can read the traffic to the hosts it reads, and pass as them to the dev container ([ENVOY-7](#envoy-7-the-read-hosts-certificate-keys)), but no others.  The image is Envoy's distroless one, with no shell, pinned by digest.  Envoy runs as an unprivileged user, without capabilities, with two worker threads and limits on connections, header size and DNS lookups.
 
 **Red team:** check the Envoy version for known issues, and try malformed and oversized `CONNECT` requests and slow headers.  From inside the gateway's namespace, confirm what the firewall actually allows.
 
@@ -144,18 +153,76 @@ Reading a host puts Envoy between two connections.  With Envoy's default HTTP/2 
 **Severity:** Low.  **Status:** By design.
 **Where:** `ACCESS_LOG_FORMAT` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); [`netlog.py`](../../py/src/dist_bin/surf_scoter_lib/netlog.py).
 
-For a read host, the access log has each request's method and path, which may carry a token in its query string, and `scoter netlog` shows them.  The log goes to the container tool's log for the gateway, readable by whoever can use the container tool.  It never has headers or bodies.
+For a read host, the access log has each request's method and path, which may carry a token in its query string, and `scoter netlog` shows them.  The log goes to the container tool's log for the gateway, readable by whoever can use the container tool.  It never has headers or bodies.  For a read host whose rules name secrets, it also has the names the secrets filter put in (`injected`), or why it refused the request (`refused`), never a value.  The log's path is the request's path after the filters, and the filter never fills a placeholder into the path ([ENVOY-11](#envoy-11-a-secret-used-through-the-host-its-rule-allows)), so a value can't reach the log that way.
 
 **Red team:** check what a request with a token in its path leaves in the log, and where.
 
-**When changing this code:** never log headers or bodies.
+**When changing this code:** never log headers or bodies, and never let the secrets filter fill the path (`%REQ(:PATH)%` is logged as it leaves).
+
+### ENVOY-10: Secrets in the gateway's memory, and their delivery
+
+**Severity:** High.  **Status:** Mitigated.
+**Where:** the inject mode in [`secrets/filter/src/glue.rs`](../../containers/network-gateway-envoy/secrets/filter/src/glue.rs); [`envoy-inject`](../../containers/network-gateway-envoy/secrets/inject/src/main.rs); `_inject_listener` and `secrets_filter` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py); [`gateway_postrun_envoy.py`](../../py/src/dist_bin/gateway_postrun_envoy.py) and [`gateway_secrets.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_secrets.py); `docker: runs: exec-stdin`; the `/run/envoy` tmpfs in [`docker-compose.yaml`](../../dist-files/defaults/docker-compose.yaml).
+
+As [SEEKRIT-2](network-gateway-seekrit-attack-vectors.md#seekrit-2-secrets-in-the-gateways-memory-and-their-delivery): the values reach the gateway only after it starts.  `scoter` runs the store's commands on your host, and sends one JSON document on the standard input of `docker exec -i GATEWAY /usr/local/bin/envoy-inject`, which passes it over a Unix socket (`/run/envoy/inject.sock`, mode 0600, in a tmpfs) to the inject listener.  The values are never in the gateway's configuration, environment, image or files, nor on any command line ([`09-envoy-secrets`](../../integration-tests/09-envoy-secrets/run.sh) checks).  Until the delivery, a request with a placeholder is refused with `503`, never forwarded with the placeholder in it.  Envoy can't use a seekrit.dev token: the store must give the values.
+
+Every instance of the filter runs in VMs with the same `vm_id`, so they share Envoy's process-wide shared data, which holds the secrets: a pending marker until the delivery, then the values, never changed after.  The delivery swaps the pending marker with compare-and-swap, so only one ever succeeds, even if two arrive at once on different workers; a second gets a `409`.  A value with a control character (which would split a header) is refused, as is anything but `{"values": {...}}`; answers and errors name secrets and describe the payload's shape, never quoting it.
+
+What's left, beyond SEEKRIT-2's (the container tool can reach the gateway; a restart empties it; Python can't wipe memory):
+
+* **The socket stays.**  Envoy can't close a static listener, so the socket is there for the gateway's life; the compare-and-swap is what keeps a second delivery out.
+* **No peer check.**  Envoy can't check who connects (seekrit-proxy checks the caller's user with the kernel); only the socket's mode keeps others out.  Root in the gateway (`docker exec -u 0`) can connect, but could already read the process's memory.
+* **More copies, and Envoy doesn't wipe them.**  The values are in the shared data (Envoy's own memory), in each worker's copy in its Wasm VM, and in each request they're filled into, as it passes through Envoy's buffers.  The filter zeroes its own buffers when it's done with them; Envoy's, it can't.
+* **Zeroing only helps while the process runs.**  This isn't a difference from seekrit-proxy: its zeroing too only runs as its buffers are dropped, and a gateway that's killed (`SIGKILL`, the OOM killer, or a `stop` that outlasts its timeout) leaves whatever it held in pages the kernel takes back.  Linux clears a page before giving it to another process, so what's left in both cases is swap, a core dump, or a snapshot of the machine's memory.
+
+**Red team:** look for the values in `docker inspect`, `docker logs`, `docker cp` of the gateway, the run's log, and the host's process list while the post-start runs.  Restart the gateway and deliver before `scoter gateway-post-start` does.  Deliver twice, at once, from two connections.  Send payloads with control characters, a token, extra keys, or larger than 1 MiB.
+
+**When changing this code:** never put a value in a command line, an environment variable, a file or the configuration.  Keep the socket a Unix socket, mode 0600, and the delivery one-shot (the compare-and-swap on the pending marker), failing closed before it.
+
+### ENVOY-11: A secret used through the host its rule allows
+
+**Severity:** High.  **Status:** By design.
+**Where:** fill mode in [`secrets/filter/src/glue.rs`](../../containers/network-gateway-envoy/secrets/filter/src/glue.rs) and `fill` in [`logic.rs`](../../containers/network-gateway-envoy/secrets/filter/src/logic.rs); the `allow` list `gateway_envoy.py` gives each read host.
+
+As [SEEKRIT-1](network-gateway-seekrit-attack-vectors.md#seekrit-1-a-secret-used-through-the-host-its-rule-allows): the container never holds the value, but it can use it.  Anything in the container can send the placeholder to the host its rule names, with the methods the rule allows, and the request goes out as you.
+
+The filter narrows where it fills one: only in header values, never the path, the query string, the `:authority`, `Host`, the method, or the body.  A placeholder in a pseudo-header or `Host` is refused (403); one in the body is sent as it is, so it can't put a value there.  That closes SEEKRIT-1's example (a public gist whose text is the placeholder).  A host that stores a header and shows it back (an audit log of user agents, a webhook's delivery record) can still be made to.  A name the host's rules don't give is refused, whether or not the secret exists, so a refusal never says what the store has.
+
+**Red team:** put the placeholder in each header a host might store and show back (`User-Agent`, `Referer`, custom headers), and read it from outside.  Try it in the path, percent-encoded, in a cookie, split across two headers, and in trailers.
+
+**When changing this code:** keep filling to header values, and the per-host `allow` list to the rules' names.  Never fill a pseudo-header, `Host`, or the body.
+
+### ENVOY-12: Secrets echoed back in responses
+
+**Severity:** Medium.  **Status:** Mitigated.
+**Where:** `Scrubber` in [`logic.rs`](../../containers/network-gateway-envoy/secrets/filter/src/logic.rs); the response callbacks in [`glue.rs`](../../containers/network-gateway-envoy/secrets/filter/src/glue.rs).
+
+As [SEEKRIT-4](network-gateway-seekrit-attack-vectors.md#seekrit-4-secrets-echoed-back-in-responses): the filter scrubs the values it put into a request out of that request's response, in its headers and body, as written, percent-encoded (in either case) or JSON-escaped, for values of 8 bytes or more, putting the placeholder back in their place.  It scrubs the body as it streams, holding back only the end of a chunk that may be the start of a value, so a value split across chunks is still caught.  It removes the request's `Accept-Encoding`, so a server that follows it sends the response uncompressed, where the scrubber can see it, and drops the response's `Content-Length`, as scrubbing changes it.
+
+Another encoding (base64, hex), a short value, or a server that compresses its response anyway gets through.  A response that ends with trailers right after the start of a value loses those held-back bytes.
+
+**Red team:** find an endpoint on an allowed host that reflects headers or bodies, and get the value back base64-encoded, compressed against `Accept-Encoding`, split across chunks, or followed by trailers.  Check a value shorter than 8 bytes.
+
+**When changing this code:** keep the scrubbing on for every request a value went into, and `Accept-Encoding` removed from those requests.
+
+### ENVOY-13: The secrets filter
+
+**Severity:** Medium.  **Status:** Mitigated.
+**Where:** [`containers/network-gateway-envoy/secrets`](../../containers/network-gateway-envoy/secrets/); its build in the [Dockerfile](../../containers/network-gateway-envoy/Dockerfile); `secrets_filter` in [`gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py).
+
+The filter is Surf Scoter's own code, holding your secrets, inside Envoy.  It runs in Envoy's V8 Wasm sandbox, which gives it no files, sockets or processes: only the headers and bodies of the requests it's on, the shared data, and filter state.  It makes no calls out of its own (`dispatch_http_call`), and sets only its own filter state.  It fails closed: Envoy won't start if the module is missing, won't load, or refuses its configuration, and the image's build checks that it loads in that Envoy (`validate-secrets.json`), after running its tests.  Its crates are pinned by `Cargo.lock` (`--locked`), and the build image by tag, like the seekrit gateway's.  The inject listener needs `allow_on_headers_stop_iteration`, so Envoy hands it a delivery's body.
+
+**Red team:** fuzz the placeholder parser and the payload parser; send header values that are huge, full of `{{seekrit:`, or invalid UTF-8; look for a panic that leaves a request unfilled but forwarded.
+
+**When changing this code:** keep the filter free of calls out, the parsers' errors free of input, and the build `--locked`.  Changes to the filter, its crates, or how `gateway_envoy.py` configures it need a security review.
 
 
 ## Sensitive code
 
 Changes to these files can weaken the Envoy gateway, and need a security review:
 
-* [`containers/network-gateway-envoy/`](../../containers/network-gateway-envoy/): the image, and its default configuration.
+* [`containers/network-gateway-envoy/`](../../containers/network-gateway-envoy/): the image, its default configuration, and the secrets filter and `envoy-inject` ([ENVOY-13](#envoy-13-the-secrets-filter)).
+* [`py/src/dist_bin/gateway_postrun_envoy.py`](../../py/src/dist_bin/gateway_postrun_envoy.py), and [`py/src/dist_bin/surf_scoter_lib/gateway_secrets.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_secrets.py), the store and delivery it shares with the seekrit gateway: what reaches the gateway, and how.
 * [`py/src/dist_bin/gateway_envoy.py`](../../py/src/dist_bin/gateway_envoy.py): what Envoy is told to allow, and how; see [ENVOY-1](#envoy-1-the-host-checked-isnt-the-host-dialled).
 * [`py/tests/test_gateway_envoy.py`](../../py/tests/test_gateway_envoy.py): the invariant tests.
 * [`py/src/dist_bin/surf_scoter_lib/gateway_start.py`](../../py/src/dist_bin/surf_scoter_lib/gateway_start.py): the run's CA, and which gateway gets it.

@@ -24,10 +24,9 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from surf_scoter_lib import UserConfig, fileutil, gateway
+from surf_scoter_lib import fileutil, gateway, universal
 from surf_scoter_lib.err import SurfScoterErr
 
-MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
 # The configuration's mode: the gateway runs as its own user, which must
 # read it.  It holds no secret, only names.
 MODE_CONFIG = 0o644
@@ -225,14 +224,7 @@ def main(argv: Sequence[str]) -> int:
         print(f"Usage: {argv[0] if argv else 'gateway_seekrit.py'} UNIVERSAL.json OUTPUT", file=sys.stderr)
         return EXIT_ERROR
     try:
-        with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
-        if len(data) > MAX_UNIVERSAL_BYTES:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
-        suc = json.loads(data)
-        if not isinstance(suc, dict):
-            raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        config = UserConfig(suc)
+        config = universal.read_universal(argv[1])
         rules = gateway.rules_from(config)
         ports = gateway.setup_ports(config, gateway.GATEWAY_PORTS)
         tls_ports = gateway.setup_ports(config, gateway.GATEWAY_TLS_PORTS)

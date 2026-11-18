@@ -1,0 +1,9 @@
+# A sample project for the Envoy gateway's secrets: the distribution's
+# dev-env container (by name), in a Git repository, reaching one host passed
+# through untouched, and one the gateway reads, with a secret it fills in.
+container:
+  dev-container: dev-env
+vcs: git
+egress:
+  - {host: pypi.org, protocol: tls}
+  - {host: api.github.com, protocol: https, methods: [GET], secrets: [GITHUB_TOKEN]}

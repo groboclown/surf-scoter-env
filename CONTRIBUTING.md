@@ -110,7 +110,16 @@ Don't point a `scoter: paths: distribution-dir` setting at the checkout either: 
 
 New releases must pass these gates:
 
-* Changes merged into the `main` branch.
+* Update dependencies
+    * Python [`dev-requirements.txt`](py/dev-requirements.txt)
+    * Rust cargo files, under [rust](rust/) and [network-gateway-envoy](containers/network-gateway-envoy/secrets/).
+    * [seekrit-dev `SEEKRIT_COMMIT`](containers/network-gateway-seekrit/Dockerfile) + [patches](containers/network-gateway-seekrit/patches/)
+    * Container base images.
+        * [dev-env](containers/dev-env/Dockerfile)
+        * [firewall-router](containers/firewall-router/Dockerfile)
+        * [network-gateway-envoy](containers/network-gateway-envoy/Dockerfile)
+        * [network-gateway-seekrit](containers/network-gateway-seekrit/Dockerfile)
+        * [network-gateway-squid](containers/network-gateway-squid/Dockerfile)
 * Major and minor versions:
     * ***NO OPEN SECURITY ISSUES.*** Because of the sensitivity of this project, releases must not have open security issues.
     * Review [`SECURITY.md`](SECURITY.md) for supported versions.
@@ -125,4 +134,5 @@ New releases must pass these gates:
     * TODO scoter.py when it supports the version argument.
 * `SCOTER_COMMIT` in [`containers/dev-env/Dockerfile`](containers/dev-env/Dockerfile) names a commit with the release's `rust/container`, and `make dev-env-pin-check` is quiet.
 * Changelog updated.
+* Changes merged into the `main` branch.
 * **All builds pass.** All builds pass.  Includes lint and tests.

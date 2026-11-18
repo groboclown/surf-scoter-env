@@ -1,8 +1,8 @@
 # Secrets, and Seeing the Network
 
-A tool in the dev container often needs a credential: a token for a package registry, or for an API.  Put the token in the container, and anything in the container can read it, and send it anywhere it can reach.  The seekrit network gateway gives you another way: the container holds only a placeholder, such as `{{seekrit:GITHUB_TOKEN}}`, and the gateway puts your real value in its place as the request leaves, only toward the host your configuration names.
+A tool in the dev container often needs a credential: a token for a package registry, or for an API.  Put the token in the container, and anything in the container can read it, and send it anywhere it can reach.  The seekrit and Envoy network gateways give you another way: the container holds only a placeholder, such as `{{seekrit:GITHUB_TOKEN}}`, and the gateway puts your real value in its place as the request leaves, only toward the host your configuration names.
 
-This page shows how to set it up, and how to see what the container does through the network with `scoter netlog`, whichever gateway you run.  The [seekrit gateway's attack vectors](security/network-gateway-seekrit-attack-vectors.md) cover what it protects, and what it doesn't.
+This page shows how to set it up, and how to see what the container does through the network with `scoter netlog`, whichever gateway you run.  The [seekrit gateway's](security/network-gateway-seekrit-attack-vectors.md) and [Envoy gateway's](security/network-gateway-envoy-attack-vectors.md) attack vectors cover what each protects, and what it doesn't.
 
 
 ## Choosing the seekrit gateway
@@ -32,6 +32,14 @@ dev-env:
 ```
 
 The gateway is part of what a pull records, so pull your projects again after the change.  The first run builds the gateway's image, which compiles seekrit-proxy: it takes a while.
+
+### Or the Envoy gateway
+
+The Envoy gateway fills in secrets too, with its own secrets filter.  Its settings are in the same comment in the distribution's `setup.yaml`, with `network-gateway-post-start` running `gateway_postrun_envoy.py`.  It differs from the seekrit gateway in three ways:
+
+* It fills a placeholder only into a request's **header values**.  One in the path or query string is refused, and one in the body is sent as it is, never filled.
+* Your secret store must give the **values** (`[secrets]`): it can't use a seekrit.dev token.
+* After it has its secrets, a second `scoter gateway-post-start` is refused; restart the gateway to give them again.
 
 What changes:
 
@@ -115,7 +123,7 @@ Refused hosts.  If the container needs one, its rule goes in the project's `egre
   - {host: example.com, protocol: tls}
 ```
 
-With Squid, it shows the hosts reached and refused; with Envoy, also how much each tunnel carried, and the requests it read and what they got; with the seekrit gateway, also the requests it read, what they got, and the secrets put in, by name only.  For each refused host, it suggests the rule that would allow it; it never changes your configuration.
+With Squid, it shows the hosts reached and refused; with Envoy, also how much each tunnel carried, and the requests it read and what they got; with the seekrit gateway, also the requests it read, what they got, and the secrets put in, by name only; Envoy shows the secrets put in, by name, too.  For each refused host, it suggests the rule that would allow it; it never changes your configuration.
 
 * `scoter netlog --follow` shows each event as it happens, until you stop it.  Where your container tool can't follow a log (Podman on WSL2), it reads the log again every few seconds; to follow it directly, set the setup's `docker: runs: logs-follow` to `${exec} logs --follow {x:name}`.
 * `scoter netlog --json` gives the events as data.

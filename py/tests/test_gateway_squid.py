@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 import gateway_squid
-from surf_scoter_lib import fileutil
+from surf_scoter_lib import UserConfig, fileutil
 
 from . import SRC_BIN
 
@@ -40,7 +40,7 @@ class TranslateTest(unittest.TestCase):
 
     def test_enforced_and_refused(self) -> None:
         """Only `tls` on 443; everything else refused, with its reason."""
-        rules = gateway_squid.gateway.rules_from(gateway_squid.UserConfig(_suc(
+        rules = gateway_squid.gateway.rules_from(UserConfig(_suc(
             _rule("registry.npmjs.org"),
             _rule("*.pkg.dev"),
             _rule("a.example.com", protocol="https", methods=["GET"]),
@@ -59,7 +59,7 @@ class TranslateTest(unittest.TestCase):
 
     def test_secrets_refused(self) -> None:
         """Squid never sees inside TLS, so it can't fill in a secret."""
-        rules = gateway_squid.gateway.rules_from(gateway_squid.UserConfig(_suc(
+        rules = gateway_squid.gateway.rules_from(UserConfig(_suc(
             _rule("api.github.com", protocol="https", secrets=["GITHUB_TOKEN"]),
         )))
         report, _ = gateway_squid.translate(rules, PORTS)
@@ -88,7 +88,7 @@ class TranslateTest(unittest.TestCase):
 
     def test_ports_follow_the_setup(self) -> None:
         """A port the firewall doesn't let out is refused; so is one Squid won't CONNECT to."""
-        rules = gateway_squid.gateway.rules_from(gateway_squid.UserConfig(_suc(
+        rules = gateway_squid.gateway.rules_from(UserConfig(_suc(
             _rule("a.example.com"),
             _rule("b.example.com", port=8443),
         )))

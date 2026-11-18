@@ -18,10 +18,9 @@ import re
 import sys
 from collections.abc import Sequence
 
-from surf_scoter_lib import UserConfig, fileutil, gateway
+from surf_scoter_lib import fileutil, gateway, universal
 from surf_scoter_lib.err import SurfScoterErr
 
-MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
 # The ports Squid's own configuration lets CONNECT reach (`SSL_ports` in
 # containers/network-gateway-squid/squid.conf).
 SQUID_PORTS = frozenset({443})
@@ -113,14 +112,7 @@ def main(argv: Sequence[str]) -> int:
         print(f"Usage: {argv[0] if argv else 'gateway_squid.py'} UNIVERSAL.json OUTPUT", file=sys.stderr)
         return EXIT_ERROR
     try:
-        with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
-        if len(data) > MAX_UNIVERSAL_BYTES:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
-        suc = json.loads(data)
-        if not isinstance(suc, dict):
-            raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        config = UserConfig(suc)
+        config = universal.read_universal(argv[1])
         rules = gateway.rules_from(config)
         ports = gateway.setup_ports(config, gateway.GATEWAY_PORTS)
     except (OSError, ValueError, SurfScoterErr) as err:

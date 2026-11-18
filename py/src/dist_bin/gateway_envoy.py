@@ -58,6 +58,18 @@ whatever it's told to.  What keeps this one to the rules (keep all of it):
   gateway's firewall lets through) finds only the proxy's own listener, and
   its rules again.  The firewall keeps it off every other private address,
   and off IPv6; Envoy asks DNS for IPv4 addresses only.
+
+Secrets (an `https` rule's `secrets`) are filled in by Surf Scoter's secrets
+filter (`containers/network-gateway-envoy/secrets`), a Wasm module in the
+image, on the listener of each read host whose rules name them, and only
+those names.  The values never pass through here: the configuration names
+them only.  They reach the gateway after it starts, over an inject listener
+on a Unix socket only the gateway's user can open (`INJECT_SOCKET`), which
+takes one delivery (`network-gateway-post-start`).  Every instance of the
+filter runs with the same `vm_id`, which is what lets them share it.  The
+filter only fills request header values and changes the response; it sets
+no filter state but its own (`wasm.injected`, `wasm.refused`), and the read
+hosts' upstreams are fixed, so it can't change where a request goes.
 """
 import json
 import os
@@ -68,12 +80,11 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from surf_scoter_lib import UserConfig, fileutil, gateway, jdata
+from surf_scoter_lib import UserConfig, fileutil, gateway, jdata, universal
 from surf_scoter_lib.err import SurfScoterErr
 from surf_scoter_lib.gateway_start import private_ancestor
 from surf_scoter_lib.user_config import Capture, Echo, OnError
 
-MAX_UNIVERSAL_BYTES = 4 * 1024 * 1024
 # The configuration's mode: the gateway runs as its own user, which must
 # read it.  With a read host, it holds that host's certificate key, so it
 # must be inside a directory only you can use.
@@ -93,6 +104,17 @@ DNS_CACHE = "dynamic_forward_proxy_cache"
 TRUST_STORE = "/etc/ssl/certs/ca-certificates.crt"
 # The setup's run that makes a read host's certificate.
 MK_LEAF = "network-gateway-mk-leaf"
+
+# The secrets filter, in the image (`containers/network-gateway-envoy/Dockerfile`);
+# every instance shares the one VM ID, and so the secrets.
+SECRETS_FILTER = "/usr/local/lib/surf-scoter/secrets_filter.wasm"
+SECRETS_VM_ID = "surf-scoter-secrets"
+# The inject listener: a Unix socket, in the tmpfs the docker-compose file
+# gives the gateway, that only the gateway's own user can open (0600).
+# `gateway_postrun_envoy.py` sends the secrets there with `envoy-inject`.
+INJECT_LISTENER = "inject"
+INJECT_SOCKET = "/run/envoy/inject.sock"
+INJECT_SOCKET_MODE = 0o600
 
 # Limits: on the hosts the DNS cache holds, the lookups waiting, and the
 # connections (in and out).
@@ -143,6 +165,14 @@ ACCESS_LOG_FORMAT: dict[str, str] = {
     "bytes_down": "%BYTES_SENT%",
 }
 
+# What the secrets filter adds to a read host's log line, when its rules name
+# secrets: the names it filled in (comma-separated), or why it refused the
+# request.  Never a value.  Envoy writes null when there's none.
+SECRETS_LOG_FORMAT: dict[str, str] = {
+    "injected": "%FILTER_STATE(wasm.injected:PLAIN)%",
+    "refused": "%FILTER_STATE(wasm.refused:PLAIN)%",
+}
+
 # A read host's certificate and key (PEM), by host.
 Leaves = dict[str, tuple[str, str]]
 
@@ -155,13 +185,9 @@ def refusal(rule: gateway.Rule, ports: frozenset[int], tls_ports: frozenset[int]
 
     Its firewall lets out only `ports`, the setup's `network-gateway-ports`,
     and it reads TLS only on `tls_ports` (`network-gateway-tls-ports`).  It
-    passes `tls` rules through, and reads `https` rules for exact hosts.
+    passes `tls` rules through, and reads `https` rules for exact hosts, with
+    their secrets (which only an exact host's `https` rule can have).
     """
-    if rule.secrets:
-        return (
-            "the Envoy gateway can't fill in secrets "
-            f"(`secrets: {', '.join(rule.secrets)}` needs the seekrit gateway)"
-        )
     if rule.protocol == "http":
         return (
             "the Envoy gateway only takes `CONNECT`, never plain HTTP "
@@ -243,6 +269,19 @@ def read_hosts(rules: list[gateway.Rule]) -> dict[tuple[str, int], frozenset[str
             out[key] = frozenset(rule.methods)
         elif out[key] is not None:
             out[key] = out[key] | frozenset(rule.methods)  # type: ignore[operator]
+    return out
+
+
+def read_secrets(rules: list[gateway.Rule]) -> dict[tuple[str, int], tuple[str, ...]]:
+    """The secrets each read host and port's rules name, together, each once;
+    only the hosts with any."""
+    out: dict[tuple[str, int], tuple[str, ...]] = {}
+    for rule in rules:
+        if rule.protocol != "https" or not rule.secrets:
+            continue
+        key = (rule.host, rule.port)
+        have = out.get(key, ())
+        out[key] = have + tuple(name for name in rule.secrets if name not in have)
     return out
 
 
@@ -340,10 +379,47 @@ def _manager_limits() -> jdata.DictJsonData:
     }
 
 
-def _intercept_listener(host: str, port: int, methods: frozenset[str] | None, leaf: tuple[str, str]) -> jdata.DictJsonData:
+def secrets_filter(mode: jdata.DictJsonData) -> jdata.DictJsonData:
+    """The secrets filter, as an HTTP filter: `{"mode": "inject"}`, or
+    `{"mode": "fill", "allow": [NAME, ...]}`.  Envoy refuses to start if the
+    module doesn't load or takes against its configuration (it fails closed)."""
+    return {
+        "name": "envoy.filters.http.wasm",
+        "typed_config": {
+            "@type": _TYPE + "filters.http.wasm.v3.Wasm",
+            "config": {
+                "name": SECRETS_VM_ID,
+                "configuration": {
+                    "@type": "type.googleapis.com/google.protobuf.StringValue",
+                    "value": json.dumps(mode, sort_keys=True, ensure_ascii=True),
+                },
+                # The inject listener holds a delivery's headers until its
+                # body is in; without this, Envoy never hands it the body.
+                "allow_on_headers_stop_iteration": True,
+                "vm_config": {
+                    "vm_id": SECRETS_VM_ID,
+                    "runtime": "envoy.wasm.runtime.v8",
+                    "code": {"local": {"filename": SECRETS_FILTER}},
+                },
+            },
+        },
+    }
+
+
+def _router() -> jdata.DictJsonData:
+    return {
+        "name": "envoy.filters.http.router",
+        "typed_config": {"@type": _TYPE + "filters.http.router.v3.Router", "suppress_envoy_headers": True},
+    }
+
+
+def _intercept_listener(
+    host: str, port: int, methods: frozenset[str] | None, leaf: tuple[str, str], secrets: Sequence[str] = (),
+) -> jdata.DictJsonData:
     """The internal listener for one read host and port: it ends the TLS
     connection with the host's certificate, and sends on only the requests
-    for that host, with the rules' methods, to that host."""
+    for that host, with the rules' methods, to that host, with `secrets`
+    filled in."""
     headers: list[jdata.DictJsonData] = [{
         "name": ":authority",
         "string_match": {"safe_regex": {"regex": request_authority_regex(host, port)}},
@@ -381,11 +457,15 @@ def _intercept_listener(host: str, port: int, methods: frozenset[str] | None, le
                 },
             ]}],
         },
-        "http_filters": [{
-            "name": "envoy.filters.http.router",
-            "typed_config": {"@type": _TYPE + "filters.http.router.v3.Router", "suppress_envoy_headers": True},
-        }],
-        "access_log": _access_log({**ACCESS_LOG_FORMAT, "plane": "request", "host": host, "port": str(port)}),
+        "http_filters": [
+            *([secrets_filter({"mode": "fill", "allow": list(secrets)})] if secrets else []),
+            _router(),
+        ],
+        "access_log": _access_log({
+            **ACCESS_LOG_FORMAT, "plane": "request", "host": host, "port": str(port),
+            # The secrets filter's: the names filled in, or why it refused.
+            **(SECRETS_LOG_FORMAT if secrets else {}),
+        }),
     }
     cert, key = leaf
     return {
@@ -406,6 +486,33 @@ def _intercept_listener(host: str, port: int, methods: frozenset[str] | None, le
             }},
             "filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": manager}],
         }],
+    }
+
+
+def _inject_listener() -> jdata.DictJsonData:
+    """The listener that takes the secrets, once: on a Unix socket only the
+    gateway's own user can open.  The secrets filter answers a delivery; it
+    sends nothing on, and anything else gets a 404."""
+    manager: jdata.DictJsonData = {
+        "@type": _TYPE + "filters.network.http_connection_manager.v3.HttpConnectionManager",
+        "stat_prefix": INJECT_LISTENER,
+        "codec_type": "HTTP1",
+        "generate_request_id": False,
+        **_manager_limits(),
+        "route_config": {
+            "name": INJECT_LISTENER,
+            "virtual_hosts": [{"name": INJECT_LISTENER, "domains": ["*"], "routes": [{
+                "name": INJECT_LISTENER,
+                "match": {"prefix": "/"},
+                "direct_response": {"status": 404},
+            }]}],
+        },
+        "http_filters": [secrets_filter({"mode": "inject"}), _router()],
+    }
+    return {
+        "name": INJECT_LISTENER,
+        "address": {"pipe": {"path": INJECT_SOCKET, "mode": INJECT_SOCKET_MODE}},
+        "filter_chains": [{"filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": manager}]}],
     }
 
 
@@ -458,6 +565,7 @@ def config(rules: list[gateway.Rule], leaves: Leaves | None = None) -> jdata.Dic
     `leaves` has the certificate and key for each read host (`https` rule).
     """
     reads = read_hosts(rules)
+    secrets = read_secrets(rules)
     missing = {host for host, _ in reads} - set(leaves or {})
     if missing:
         raise ValueError(f"no certificate for {', '.join(sorted(missing))}")
@@ -523,8 +631,10 @@ def config(rules: list[gateway.Rule], leaves: Leaves | None = None) -> jdata.Dic
         "circuit_breakers": _circuit_breakers(),
     }]
     for (host, port), methods in reads.items():
-        listeners.append(_intercept_listener(host, port, methods, (leaves or {})[host]))
+        listeners.append(_intercept_listener(host, port, methods, (leaves or {})[host], secrets.get((host, port), ())))
         clusters.extend(_intercept_clusters(host, port))
+    if secrets:
+        listeners.append(_inject_listener())
     bootstrap: jdata.DictJsonData = {
         "static_resources": {"listeners": listeners, "clusters": clusters},
         "overload_manager": {"resource_monitors": [{
@@ -608,14 +718,7 @@ def main(argv: Sequence[str]) -> int:
         )
         return EXIT_ERROR
     try:
-        with open(argv[1], "rb") as inp:
-            data = inp.read(MAX_UNIVERSAL_BYTES + 1)
-        if len(data) > MAX_UNIVERSAL_BYTES:
-            raise SurfScoterErr(f"{argv[1]}: larger than {MAX_UNIVERSAL_BYTES} bytes")
-        suc = json.loads(data)
-        if not isinstance(suc, dict):
-            raise SurfScoterErr(f"{argv[1]}: not a universal configuration file")
-        config_ = UserConfig(suc)
+        config_ = universal.read_universal(argv[1])
         rules = gateway.rules_from(config_)
         ports = gateway.setup_ports(config_, gateway.GATEWAY_PORTS)
         tls_ports = gateway.setup_ports(config_, gateway.GATEWAY_TLS_PORTS)

@@ -247,10 +247,20 @@ def _envoy_request(data: dict[str, object], when: datetime.datetime, method: str
         return None
     refused = data.get("route") == _ENVOY_REFUSED
     flags = _str(data.get("flags")) or ""
-    reason = "no_rule" if refused else (flags if flags not in ("", "-") else None)
+    # The secrets filter's, on a host whose rules name secrets: why it refused
+    # the request, or the names it filled in.  Envoy writes null (or `-`) for none.
+    filter_refused = _str(data.get("refused"))
+    injected = _str(data.get("injected")) or ""
+    if refused:
+        reason: str | None = "no_rule"
+    elif filter_refused and filter_refused != "-":
+        reason = filter_refused
+    else:
+        reason = flags if flags not in ("", "-") else None
     return Event(
         when, REQUEST, host, int(port), method, _str(data.get("path")) or "/", status, reason,
         bytes_up=_int(data.get("bytes_up")), bytes_down=_int(data.get("bytes_down")),
+        injected=tuple(name for name in injected.split(",") if name and name != "-"),
     )
 
 
