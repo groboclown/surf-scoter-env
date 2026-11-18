@@ -1,0 +1,175 @@
+# Validation build: runs the Makefile's lint, test, build, scan and installer
+# targets on every commit.  The Makefile stays the source of truth; this file
+# only installs the tools those targets need and calls `make`.
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Lint, unit tests and a native host build on each supported OS.
+  # Needs no Docker, so it runs on all three runner types.
+  lint-test:
+    name: Lint and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git Bash on Windows, so the Makefile's shell recipes work everywhere.
+        shell: bash
+    env:
+      # setup-python doesn't provide `python3` on Windows.
+      MAKE_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+    steps:
+      - name: Keep LF line endings (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - name: Ensure make is installed (Windows)
+        if: runner.os == 'Windows'
+        run: command -v make || choco install make -y --no-progress
+
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # dev-env-pin-check (part of `make lint`) compares against SCOTER_COMMIT.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust/host -> target
+            rust/container -> target
+            containers/network-gateway-envoy/secrets -> target
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: py/dev-requirements.txt
+
+      - name: Create the Python virtual environment
+        run: make PYTHON="$MAKE_PYTHON" python-venv
+
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test
+
+      - name: Native host build
+        run: make host-build-debug
+
+      - name: Upload Python test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-results-${{ matrix.os }}
+          path: target/python-test-results.xml
+          if-no-files-found: ignore
+
+  # The full build, SBOM scan and installer.  These need Linux Docker (the
+  # container images, `cross`, and `docker save` for the SBOMs), which only the
+  # Linux runners have.
+  build-scan-installer:
+    name: Build, scan and installer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        # The cross images, five container images and three release builds
+        # can outgrow the runner's default free space.
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust/host -> target
+
+      - name: Install cross
+        # Pre-installed so the Makefile's `cargo install cross` finds it
+        # instead of compiling it.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cdxgen
+        run: make install-cdxgen
+
+      - name: Install osv-scanner
+        run: make install-osvscanner
+
+      - name: make build
+        run: make build
+
+      - name: make sbom (includes scan)
+        # `scan` alone skips the Python SBOM, which the installer packages.
+        run: make sbom
+
+      - name: make installer
+        run: make installer
+
+      - name: Upload SBOMs and scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: target/sboms/
+          if-no-files-found: ignore
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: target/surf-scoter-*.tar.gz

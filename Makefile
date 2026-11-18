@@ -6,7 +6,13 @@ ZIP ?= zip
 DOCKER ?= docker
 CARGO_BIN ?= ~/.cargo/bin
 PYTHON ?= python3
-VENV_PYTHON ?= .venv/bin/python
+# Windows virtual environments put their programs under 'Scripts', not 'bin'.
+ifeq ($(OS),Windows_NT)
+VENV_BIN ?= Scripts
+else
+VENV_BIN ?= bin
+endif
+VENV_PYTHON ?= .venv/$(VENV_BIN)/python
 
 # Used if you don't have osvscanner installed
 GO ?= go
@@ -21,7 +27,9 @@ NETWORK_GATEWAY_ENVOY_TAG = $(LOCAL_CONTAINER_TAG_PREFIX)network-gateway-envoy:b
 PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 # See https://github.com/cdxgen/cdxgen#installing
-CDXGEN := $(PROJECT_DIR)/target/sbom-gen/node_modules/.bin/cdxgen
+# `make install-cdxgen` puts the standalone binary of this release here.
+CDXGEN_VERSION ?= v13.6.0
+CDXGEN := $(PROJECT_DIR)/target/sbom-gen/cdxgen
 # See https://google.github.io/osv-scanner/installation/
 OSVSCANNER := $$HOME/go/bin/osv-scanner
 
@@ -322,21 +330,21 @@ script-tests:
 dev-install: python-venv
 python-venv:
 	test -d py/.venv || $(PYTHON) -m venv py/.venv
-	py/.venv/bin/pip install -r py/dev-requirements.txt
+	py/.venv/$(VENV_BIN)/python -m pip install -r py/dev-requirements.txt
 
 
 ## python-ruff               Run ruff on the Python sources (settings in py/pyproject.toml).
 .PHONY: python-ruff
 lint: python-ruff
 python-ruff:
-	cd py && .venv/bin/python -m ruff check src tests
+	cd py && $(VENV_PYTHON) -m ruff check src tests
 
 
 ## python-bandit             Run bandit on the Python sources (settings in py/pyproject.toml).
 .PHONY: python-bandit
 lint: python-bandit
 python-bandit:
-	cd py && .venv/bin/python -m bandit -c pyproject.toml -r src tests
+	cd py && $(VENV_PYTHON) -m bandit -c pyproject.toml -r src tests
 
 
 # ---------------------------------------------------------------------
@@ -460,15 +468,12 @@ target/sboms:
 	mkdir -p target/sboms
 target/images:
 	mkdir -p target/images
-target/sbom-gen/package.json:
-	mkdir -p target/sbom-gen
-	echo '{"name": "1","version": "1"}' > target/sbom-gen/package.json
 
-
+## install-cdxgen            Download the standalone cdxgen binary (CDXGEN_VERSION) into target/sbom-gen.
 .PHONY: install-cdxgen
 dev-install: install-cdxgen
-install-cdxgen: target/sbom-gen/package.json
-	cd target/sbom-gen && npm install --save-dev @cdxgen/cdxgen
+install-cdxgen:
+	build-scripts/install-cdxgen.sh "$(CDXGEN_VERSION)" target/sbom-gen
 
 
 ## scan                      Scan the SBOM files for issues.  Requires `osv-scanner`.
