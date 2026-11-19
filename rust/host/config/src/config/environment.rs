@@ -515,7 +515,7 @@ mod tests {
             "t:\n  programs:\n    exec: tool\n    gone: no-such-tool\n",
         );
         let env = Env {
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let system = load_setup(&file, None, None, env).unwrap();

@@ -205,7 +205,9 @@ _HEREDOC = re.compile(r"<<(-?)([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
 # controls (`\x85` among them), the Unicode line and paragraph separators,
 # and a byte order mark past the start.  Python's `splitlines` breaks on
 # several of these; Docker breaks only on `\n` (VER-1).
-_UNFOLLOWED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+# A raw string, so `re` reads the escapes as code points: U+0000-U+0008 and
+# U+000B-U+001F (C0, less tab and newline), U+007F-U+009F (DEL and C1).
+_UNFOLLOWED = re.compile(r"[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\ufeff]")
 # Docker's whitespace, for blank lines and leading space before a comment.
 _SPACE = " \t"
 

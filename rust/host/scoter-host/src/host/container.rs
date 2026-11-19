@@ -131,6 +131,7 @@ mod tests {
     use super::*;
     use scoter_config::config::system::{self, Env};
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     use crate::host::exec::TempDir;
@@ -149,6 +150,7 @@ mod tests {
     }
 
     /// The directory holding `sh`, for a PATH.
+    #[cfg(unix)]
     fn sh_dir() -> String {
         let sh = ["/bin/sh", "/usr/bin/sh"]
             .into_iter()
@@ -205,6 +207,12 @@ mod tests {
             broker_argv(&config, "c1", "/b").unwrap_err(),
             "cannot find the program 'no-such-container-tool' (set by `docker.programs.exec`)",
         );
+    }
+
+    /// The errors once the tool is found: these need `sh`.
+    #[cfg(unix)]
+    #[test]
+    fn argv_errors_with_tool() {
         let config = system_config(
             "docker:\n  programs:\n    exec: sh\n  runs:\n    broker: ${exec} --dir ${scoter:project-dir}\n",
             &sh_dir(),

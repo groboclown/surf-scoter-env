@@ -350,7 +350,7 @@ mod tests {
         for _ in cwd.components().skip(1) {
             relative.push("..");
         }
-        relative.push(dir.path().join("bin").strip_prefix("/").unwrap());
+        relative.push(dir.join("bin").strip_prefix("/").unwrap());
         assert!(relative.is_relative() && relative.join("tool").is_file());
         let path_var = std::env::join_paths([relative.clone()]).unwrap();
         assert_eq!(
@@ -358,7 +358,7 @@ mod tests {
             None
         );
         // The next absolute entry still counts.
-        let path_var = std::env::join_paths([relative, dir.path().join("abs")]).unwrap();
+        let path_var = std::env::join_paths([relative, dir.join("abs")]).unwrap();
         assert_eq!(
             find_executable(Path::new("tool"), Some(&path_var), None),
             Some(other)
@@ -373,7 +373,7 @@ mod tests {
         make_executable(&tool, true);
         let plain = dir.write("a/tool", "");
         make_executable(&plain, false);
-        let path_var = std::env::join_paths([dir.path().join("a"), dir.path().join("b")]).unwrap();
+        let path_var = std::env::join_paths([dir.join("a"), dir.join("b")]).unwrap();
         // Not executable in `a`; found in `b`.
         assert_eq!(
             find_executable(Path::new("tool"), Some(&path_var), None),
@@ -388,7 +388,7 @@ mod tests {
         // A path isn't searched for.
         assert_eq!(find_executable(&tool, None, None), Some(tool.clone()));
         assert_eq!(find_executable(&plain, None, None), None);
-        assert_eq!(find_executable(&dir.path().join("b"), None, None), None);
+        assert_eq!(find_executable(&dir.join("b"), None, None), None);
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         let tool = dir.write("bin/tool.EXE", "");
         #[cfg(unix)]
         make_executable(&tool, true);
-        let path_var = dir.path().join("bin").into_os_string();
+        let path_var = dir.join("bin").into_os_string();
         let exts = OsStr::new(".COM;.EXE");
         assert_eq!(
             find_executable(Path::new("tool"), Some(&path_var), Some(exts)),

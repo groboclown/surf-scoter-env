@@ -980,7 +980,7 @@ fn resolve_partly(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut base = path;
     let mut resolved = loop {
-        if let Ok(found) = base.canonicalize() {
+        if let Ok(found) = crate::config::canonical(base) {
             break found;
         }
         match (base.parent(), base.file_name()) {
@@ -1098,9 +1098,10 @@ const PATH_PART_MAX_CHARS: usize = 64;
 /// the SHA-256 of the canonical path's bytes.
 pub fn environment_id(project_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
+    // The plain form on Windows, as Python's `os.path.realpath` gives:
+    // `store.py` works out the same id.
+    let canonical =
+        crate::config::canonical(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     let base = canonical
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -1175,7 +1176,7 @@ fn is_tool_only(section: &str, key: &str) -> bool {
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
+    match (crate::config::canonical(a), crate::config::canonical(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
@@ -2720,7 +2721,18 @@ fn parse_reference<'a>(reference: &'a str, section: &'a str) -> Result<(&'a str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::testing::{TempDir, load_setup};
+    use crate::config::testing::{TempDir, abs, load_setup};
+
+    /// `got`, a path the configuration gives, is `want`: compared as paths,
+    /// as on Windows a `${key}/x` expanded from a `C:\dir` is `C:\dir/x`.
+    #[track_caller]
+    fn assert_path(got: Option<String>, want: &str) {
+        assert_eq!(
+            got.as_deref().map(Path::new),
+            Some(Path::new(want)),
+            "{got:?}"
+        );
+    }
 
     fn messages(errors: Vec<ConfigError>) -> Vec<String> {
         errors
@@ -2766,10 +2778,10 @@ mod tests {
         );
         dir.write("other/setup.yaml", "a:\n  paths:\n    o: other\n");
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
-        let config = load(Some(&dir.path().join("dist")), None, env).unwrap();
+        let config = load(Some(&dir.join("dist")), None, env).unwrap();
         assert_eq!(config.files(), [user.clone(), dist]);
         assert_eq!(config.get("a", "k").as_deref(), Some("user"));
         assert_eq!(config.get("a", "u").as_deref(), Some("user"));
@@ -2778,7 +2790,7 @@ mod tests {
         // The one given wins.
         assert_eq!(
             config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR),
-            Some(dir.path().join("dist"))
+            Some(dir.join("dist"))
         );
         assert_eq!(
             config.get(SCOTER_SECTION, USER_SETUP_FILE),
@@ -2791,8 +2803,8 @@ mod tests {
     #[test]
     fn discovery_user_locations() {
         let dir = TempDir::new();
-        let home = dir.path().join("home");
-        let scoter_home = dir.path().join("scoter-home");
+        let home = dir.join("home");
+        let scoter_home = dir.join("scoter-home");
         let in_d = dir.write("home/.config/surf-scoter.d/setup.yaml", "");
         let env = Env {
             home: Some(home.clone()),
@@ -2815,8 +2827,8 @@ mod tests {
     #[test]
     fn discovery_xdg_config_home() {
         let dir = TempDir::new();
-        let home = dir.path().join("home");
-        let xdg = dir.path().join("xdg");
+        let home = dir.join("home");
+        let xdg = dir.join("xdg");
         dir.write("home/.config/surf-scoter.setup.yaml", "");
         let env = Env {
             home: Some(home),
@@ -2843,7 +2855,7 @@ mod tests {
         // `SURF_SCOTER_HOME` comes first.
         let in_home = dir.write("scoter-home/setup.yaml", "");
         let env = Env {
-            scoter_home: Some(dir.path().join("scoter-home")),
+            scoter_home: Some(dir.join("scoter-home")),
             ..env
         };
         let config = load(None, None, env).unwrap();
@@ -2882,10 +2894,10 @@ mod tests {
         dir.write("dist/setup.yaml", "");
         dir.write("dist/setup.yml", "");
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
-        let errors = load(Some(&dir.path().join("dist")), None, env).unwrap_err();
+        let errors = load(Some(&dir.join("dist")), None, env).unwrap_err();
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
@@ -2903,9 +2915,9 @@ mod tests {
     fn no_setup_file_in_project() {
         let dir = TempDir::new();
         dir.write("proj/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
-        let project_dir = dir.path().join("proj");
+        let project_dir = dir.join("proj");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
-        let workspace = dir.path().join("ws");
+        let workspace = dir.join("ws");
         dir.write("ws/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let errors = |setting: &str, project: bool| {
             dir.write(
@@ -3006,11 +3018,11 @@ mod tests {
     fn no_user_setup_from_project() {
         let dir = TempDir::new();
         // A repository, with the project in `client`.
-        std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
-        let repo = dir.path().join("repo");
-        let project_dir = dir.path().join("repo/client");
+        std::fs::create_dir_all(dir.join("repo/.git")).unwrap();
+        let repo = dir.join("repo");
+        let project_dir = dir.join("repo/client");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
-        let workspace = dir.path().join("ws");
+        let workspace = dir.join("ws");
         let options = SetupOptions {
             project_dir: Some(project_dir.as_path()),
             project_config: Some(project_config.as_path()),
@@ -3021,8 +3033,8 @@ mod tests {
         let load_from = |home: &str| {
             dir.write(&format!("{home}/setup.yaml"), PROJECT_FILES_SETUP);
             let env = Env {
-                home: Some(dir.path().join("me")),
-                scoter_home: Some(dir.path().join(home)),
+                home: Some(dir.join("me")),
+                scoter_home: Some(dir.join(home)),
                 ..Env::default()
             };
             load_with(&options, env).map_err(messages)
@@ -3045,7 +3057,7 @@ mod tests {
         assert!(load_from("elsewhere").is_ok());
         // Even without a setup file there.
         let env = Env {
-            scoter_home: Some(dir.path().join("repo/empty")),
+            scoter_home: Some(dir.join("repo/empty")),
             ..Env::default()
         };
         assert_eq!(
@@ -3061,12 +3073,12 @@ mod tests {
             "elsewhere/setup.yaml",
             &format!(
                 "{PROJECT_FILES_SETUP}  paths:\n    distribution-dir: {}\n",
-                dir.path().join("repo/tools").display()
+                dir.join("repo/tools").display()
             ),
         );
         dir.write("repo/tools/setup.yaml", "");
         let env = Env {
-            scoter_home: Some(dir.path().join("elsewhere")),
+            scoter_home: Some(dir.join("elsewhere")),
             ..Env::default()
         };
         let errors = load_with(&options, env).map_err(messages).unwrap_err();
@@ -3084,8 +3096,8 @@ mod tests {
         let file = dir.write("proj/conf/setup.yaml", PROJECT_FILES_SETUP);
         let first = load_setup(&file, None, None, Env::default()).unwrap();
         let record = first.setup_record().clone();
-        let origin = dir.path().join("first.json");
-        let project_dir = dir.path().join("proj");
+        let origin = dir.join("first.json");
+        let project_dir = dir.join("proj");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
         let options = SetupOptions {
             project_dir: Some(project_dir.as_path()),
@@ -3108,9 +3120,9 @@ mod tests {
     #[test]
     fn verified_dir_outside_project() {
         let dir = TempDir::new();
-        std::fs::create_dir_all(dir.path().join("repo/.git")).unwrap();
-        let repo = dir.path().join("repo");
-        let project_dir = dir.path().join("repo/client");
+        std::fs::create_dir_all(dir.join("repo/.git")).unwrap();
+        let repo = dir.join("repo");
+        let project_dir = dir.join("repo/client");
         let project_config = project_dir.join(".surf-scoter.d/project.yaml");
         let options = SetupOptions {
             project_dir: Some(project_dir.as_path()),
@@ -3124,12 +3136,12 @@ mod tests {
                 &format!("{PROJECT_FILES_SETUP}verification:\n  paths:\n    store: {verified}\n"),
             );
             let env = Env {
-                scoter_home: Some(dir.path().join("home")),
+                scoter_home: Some(dir.join("home")),
                 ..Env::default()
             };
             load_with(&options, env).map_err(messages)
         };
-        let outside = dir.path().join("me/verified").display().to_string();
+        let outside = dir.join("me/verified").display().to_string();
         assert_eq!(
             load_with_verified(&outside)
                 .unwrap()
@@ -3162,7 +3174,7 @@ mod tests {
                 &format!("{PROJECT_FILES_SETUP}  paths:\n    state-dir: {state}\n"),
             );
             let env = Env {
-                scoter_home: Some(dir.path().join("home")),
+                scoter_home: Some(dir.join("home")),
                 ..Env::default()
             };
             load_with(&options, env).map_err(messages)
@@ -3184,8 +3196,8 @@ mod tests {
     #[test]
     fn resolve_partly_fills_missing() {
         let dir = TempDir::new();
-        std::fs::create_dir_all(dir.path().join("repo/client")).unwrap();
-        let at = |p: &str| dir.path().join(p);
+        std::fs::create_dir_all(dir.join("repo/client")).unwrap();
+        let at = |p: &str| dir.join(p);
         assert_eq!(resolve_partly(&at("repo/client")), at("repo/client"));
         assert_eq!(
             resolve_partly(&at("repo/client/../server/v")),
@@ -3205,11 +3217,11 @@ mod tests {
     fn distribution_dir_given() {
         let dir = TempDir::new();
         let dist = dir.write("dist/setup.yaml", "a:\n  paths:\n    k: v\n");
-        let config = load(Some(&dir.path().join("dist")), None, Env::default()).unwrap();
+        let config = load(Some(&dir.join("dist")), None, Env::default()).unwrap();
         assert_eq!(config.files(), [dist]);
         assert_eq!(
             config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR),
-            Some(dir.path().join("dist"))
+            Some(dir.join("dist"))
         );
     }
 
@@ -3223,7 +3235,7 @@ mod tests {
         let dist = dir.write("home/dist/setup.yaml", "a:\n  paths:\n    k: v\n");
         let other = dir.write("other/setup.yaml", "a:\n  paths:\n    k: other\n");
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
         let config = load_setup(&cli, None, None, env.clone()).unwrap();
@@ -3231,11 +3243,11 @@ mod tests {
         assert_eq!(config.get("a", "k").as_deref(), Some("v"));
         assert_eq!(
             config.get_path(SCOTER_SECTION, DISTRIBUTION_DIR),
-            Some(dir.path().join("home/dist"))
+            Some(dir.join("home/dist"))
         );
 
         // The one given wins over the file's.
-        let config = load_setup(&cli, Some(&dir.path().join("other")), None, env.clone()).unwrap();
+        let config = load_setup(&cli, Some(&dir.join("other")), None, env.clone()).unwrap();
         assert_eq!(config.files(), [cli.clone(), other]);
         assert_eq!(config.get("a", "k").as_deref(), Some("other"));
 
@@ -3467,8 +3479,7 @@ mod tests {
         let dir = TempDir::new();
         let cli = dir.write("home-setup/setup.yaml", "a: [\n");
         dir.write("dist/setup.yaml", "b: text\n");
-        let errors =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
+        let errors = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
     }
 
@@ -3485,8 +3496,7 @@ mod tests {
             "dist/setup.yaml",
             "a:\n  paths:\n    x: low\n    y: low\n  runs:\n    r: low\n    s: low\n  path-lists:\n    l: [/low1, /low2]\n    m: [/m]\n  values:\n    v: low\n    w: 2\n",
         );
-        let config =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
+        let config = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap();
         assert_eq!(config.get("a", "x").as_deref(), Some("high"));
         assert_eq!(config.get("a", "y").as_deref(), Some("low"));
         let section = found(config.section("a", &SectionDefaults::default()).unwrap());
@@ -3523,26 +3533,20 @@ mod tests {
             ),
         );
         let env = Env {
-            home: Some(PathBuf::from("/home/me")),
+            home: Some(PathBuf::from(abs("/home/me"))),
             ..Env::default()
         };
         let config = load_setup(&file, None, None, env).unwrap();
-        assert_eq!(config.get("ssh", "home").as_deref(), Some("/home/me/.ssh"));
-        assert_eq!(
-            config.get("ssh", "config-file").as_deref(),
-            Some("/home/me/.ssh/config")
+        assert_path(config.get("ssh", "home"), &abs("/home/me/.ssh"));
+        assert_path(
+            config.get("ssh", "config-file"),
+            &abs("/home/me/.ssh/config"),
         );
-        assert_eq!(
-            config.get("ssh", "key-file").as_deref(),
-            Some("/home/me/.ssh/key")
-        );
-        assert_eq!(
-            config.get("other", "x").as_deref(),
-            Some("/home/me/.ssh/key!")
-        );
-        assert_eq!(
-            config.get("other", "escaped").as_deref(),
-            Some("${home} $$ a$b /home/me/.ssh")
+        assert_path(config.get("ssh", "key-file"), &abs("/home/me/.ssh/key"));
+        assert_path(config.get("other", "x"), &abs("/home/me/.ssh/key!"));
+        assert_path(
+            config.get("other", "escaped"),
+            &format!("${{home}} $$ a$b {}", abs("/home/me/.ssh")),
         );
     }
 
@@ -3656,8 +3660,7 @@ mod tests {
             "dist/setup.yaml",
             "a:\n  paths:\n    x: /low\n    y: /low\n",
         );
-        let errors =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
+        let errors = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap_err();
         // The change is reported where it's made; changing only the value is fine.
         assert_eq!(
             errors,
@@ -3805,8 +3808,7 @@ mod tests {
             "dist/setup.yaml",
             "b:\n  paths:\n    y: ${a:x}\n  runs:\n    z: go ${a:x}\n",
         );
-        let errors =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
+        let errors = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap_err();
         assert_eq!(
             errors,
             [ConfigError::new(
@@ -3842,7 +3844,7 @@ mod tests {
             ),
         );
         let env = Env {
-            path: Some(dir.path().join("bin dir").into_os_string()),
+            path: Some(dir.join("bin dir").into_os_string()),
             ..Env::default()
         };
         let config = load_setup(&file, None, None, env).unwrap();
@@ -3908,7 +3910,7 @@ mod tests {
             "setup.yaml",
             "t:\n  programs:\n    exec: ~/bin/tool\n  paths:\n    conf: ~/my conf\n  runs:\n    go: ${exec} -F ${conf}\n",
         );
-        let home = dir.path().join("home");
+        let home = dir.join("home");
         let env = Env {
             home: Some(home.clone()),
             ..Env::default()
@@ -3948,7 +3950,7 @@ mod tests {
             ),
         );
         let env = Env {
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let config = load_setup(&file, None, None, env).unwrap();
@@ -4007,7 +4009,7 @@ mod tests {
             ),
         );
         let env = Env {
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let config = load_setup(&file, None, None, env).unwrap();
@@ -4042,17 +4044,13 @@ mod tests {
             "t:\n  paths:\n    exec: /usr/bin/tool\n",
         );
         dir.write("dist/setup.yaml", "t:\n  programs:\n    exec: tool\n");
-        let errors =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap_err();
+        let errors = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap_err();
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
             errors[0].ends_with(
                 "t.paths.exec: is set in `programs` by {}; a key's kind of value can't change"
-                    .replace(
-                        "{}",
-                        &dir.path().join("dist/setup.yaml").display().to_string()
-                    )
+                    .replace("{}", &dir.join("dist/setup.yaml").display().to_string())
                     .as_str()
             ),
             "{errors:?}"
@@ -4141,8 +4139,7 @@ mod tests {
             "dist/setup.yaml",
             "t:\n  runs:\n    go: low line\n    other: [low]\n",
         );
-        let config =
-            load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
+        let config = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap();
         let section = found(config.section("t", &SectionDefaults::default()).unwrap());
         let render = |key: &str| {
             section.runs[key]
@@ -4160,16 +4157,16 @@ mod tests {
     fn executable_files_required() {
         let dir = TempDir::new();
         let plain = dir.write("plain-file", "#!/bin/sh\n");
-        std::fs::create_dir_all(dir.path().join("a-dir")).unwrap();
+        std::fs::create_dir_all(dir.join("a-dir")).unwrap();
         let ok = tool(&dir, "bin/ok");
         let file = dir.write(
             "setup.yaml",
             &format!(
                 "t:\n  programs:\n    exec: {}\n    dir: {}\n    name: no-such-program\n    ok: {}\n  paths:\n    data: {}\n  runs:\n    go: ${{exec}} x\n    run-ok: ${{ok}} y\n",
                 plain.display(),
-                dir.path().join("a-dir").display(),
+                dir.join("a-dir").display(),
                 ok.display(),
-                dir.path().join("missing-data").display(),
+                dir.join("missing-data").display(),
             ),
         );
         let config = load_setup(&file, None, None, Env::default()).unwrap();
@@ -4180,7 +4177,7 @@ mod tests {
         assert_eq!(section.programs["name"], None);
         assert_eq!(section.programs["ok"], Some(ok.clone()));
         // Paths are kept, whether or not they're there.
-        assert_eq!(section.paths["data"], Some(dir.path().join("missing-data")));
+        assert_eq!(section.paths["data"], Some(dir.join("missing-data")));
         assert_eq!(section.runs["go"], None);
         assert!(section.runs["run-ok"].is_some());
         assert_eq!(
@@ -4246,7 +4243,7 @@ mod tests {
         tool(&dir, "bin/sh-tool");
         let file = dir.write("setup.yaml", "t:\n  programs:\n    exec: sh-tool\n");
         let env = Env {
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let config = load_setup(&file, None, None, env).unwrap();
@@ -4309,19 +4306,20 @@ mod tests {
 
         // The second pass doesn't read the file, so it can be gone.
         std::fs::remove_file(&file).unwrap();
-        let origin = dir.path().join("first.json");
+        let proj = abs("/proj");
+        let origin = dir.join("first.json");
         let options = SetupOptions {
-            project_dir: Some(Path::new("/proj")),
+            project_dir: Some(Path::new(&proj)),
             no_search: true,
             base: Some(base(&record, &origin)),
             ..SetupOptions::default()
         };
         let second = load_with(&options, Env::default()).unwrap();
         assert_eq!(second.files(), [file]);
-        assert_eq!(second.get("a", "local").as_deref(), Some("/proj/local"));
+        assert_path(second.get("a", "local"), &abs("/proj/local"));
         assert_eq!(
             second.path_list("a", "dirs"),
-            [PathBuf::from("/proj/d"), PathBuf::from("/h/e")]
+            [PathBuf::from(abs("/proj/d")), PathBuf::from("/h/e")]
         );
         assert_eq!(second.value("a", "n"), Some(ScalarValue::Int(3)));
         let section = second.section("a", &SectionDefaults::default()).unwrap();
@@ -4332,7 +4330,10 @@ mod tests {
                 .render(&HashMap::new())
                 .unwrap()
         };
-        assert_eq!(render("go"), ["tool", "/proj/local"]);
+        let go = render("go");
+        assert_eq!(go[0], "tool");
+        assert_path(go.get(1).cloned(), &abs("/proj/local"));
+        assert_eq!(go.len(), 2);
         assert_eq!(render("line"), ["tool", "a b"]);
         // And the record carries over as it was.
         assert_eq!(second.setup_record(), &record);
@@ -4349,11 +4350,11 @@ mod tests {
             "dist/setup.yaml",
             "a:\n  paths:\n    x: /dist\n    z: /dist\n",
         );
-        let first = load_setup(&cli, Some(&dir.path().join("dist")), None, Env::default()).unwrap();
+        let first = load_setup(&cli, Some(&dir.join("dist")), None, Env::default()).unwrap();
         let record = first.setup_record().clone();
         assert_eq!(
             first.loaded_from().distribution_dir,
-            [dir.path().join("dist").display().to_string()]
+            [dir.join("dist").display().to_string()]
         );
 
         // Changed on disk since: the record's copy is used, not read again.
@@ -4365,10 +4366,10 @@ mod tests {
             "a:\n  paths:\n    x: /user\n    y: /user\n    w: /user\n",
         );
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
-        let origin = dir.path().join("first.json");
+        let origin = dir.join("first.json");
         let options = SetupOptions {
             base: Some(base(&record, &origin)),
             ..SetupOptions::default()
@@ -4423,10 +4424,10 @@ mod tests {
         let dir = TempDir::new();
         dir.write("dist1/setup.yaml", "");
         dir.write("dist2/setup.yaml", "");
-        let dist1 = dir.path().join("dist1");
-        let dist2 = dir.path().join("dist2");
+        let dist1 = dir.join("dist1");
+        let dist2 = dir.join("dist2");
         let text = |p: &Path| p.display().to_string();
-        let origin = dir.path().join("u.json");
+        let origin = dir.join("u.json");
         let record = SetupRecord::default();
         let run = |history: Option<&LoadedFrom>, dist: Option<&Path>, env: Env| {
             let options = SetupOptions {
@@ -4456,14 +4457,14 @@ mod tests {
         // Only the user directories actually found are kept.
         let in_d = dir.write("home/.config/surf-scoter.d/setup.yaml", "");
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
         let fifth = run(Some(&fourth), None, env.clone());
         assert_eq!(fifth.user_setup_file, [text(&in_d)]);
         assert_eq!(
             fifth.user_dir,
-            [text(&dir.path().join("home/.config/surf-scoter.d"))]
+            [text(&dir.join("home/.config/surf-scoter.d"))]
         );
         std::fs::remove_file(&in_d).unwrap();
         let flat = dir.write("home/.config/surf-scoter.setup.yaml", "");
@@ -4536,14 +4537,15 @@ mod tests {
         assert!(config.loaded_from().user_setup_file.is_empty());
 
         // Another distribution directory has its own `bin`.
+        let new = abs("/opt/new");
         let options = SetupOptions {
-            distribution_dir: Some(Path::new("/opt/new")),
+            distribution_dir: Some(Path::new(&new)),
             ..options
         };
         let config = load_with(&options, Env::default()).unwrap();
-        assert_eq!(
-            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR).as_deref(),
-            Some("/opt/new/bin")
+        assert_path(
+            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR),
+            &abs("/opt/new/bin"),
         );
     }
 
@@ -4553,27 +4555,29 @@ mod tests {
         let config = load_with(&SetupOptions::default(), Env::default()).unwrap();
         assert_eq!(config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR), None);
 
+        let scoter = abs("/opt/scoter");
         let options = SetupOptions {
-            distribution_dir: Some(Path::new("/opt/scoter")),
+            distribution_dir: Some(Path::new(&scoter)),
             no_search: true,
             ..SetupOptions::default()
         };
         let config = load_with(&options, Env::default()).unwrap();
-        assert_eq!(
-            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR).as_deref(),
-            Some("/opt/scoter/bin")
+        assert_path(
+            config.get(SCOTER_SECTION, DISTRIBUTION_BIN_DIR),
+            &abs("/opt/scoter/bin"),
         );
-        assert_eq!(
-            config.setup_inputs().distribution_bin_dir.as_deref(),
-            Some("/opt/scoter/bin")
+        assert_path(
+            config.setup_inputs().distribution_bin_dir.clone(),
+            &abs("/opt/scoter/bin"),
         );
 
         // From a setup file's distribution directory, too, and usable there.
-        let config = load_one(
-            "scoter:\n  paths:\n    distribution-dir: /dist\na:\n  paths:\n    x: ${scoter:distribution-bin-dir}/x\n",
-        )
+        let config = load_one(&format!(
+            "scoter:\n  paths:\n    distribution-dir: {}\na:\n  paths:\n    x: ${{scoter:distribution-bin-dir}}/x\n",
+            abs("/dist")
+        ))
         .unwrap();
-        assert_eq!(config.get("a", "x").as_deref(), Some("/dist/bin/x"));
+        assert_path(config.get("a", "x"), &abs("/dist/bin/x"));
     }
 
     #[test]
@@ -4739,7 +4743,7 @@ mod tests {
         );
         let env = Env {
             home: Some(PathBuf::from("/home/u")),
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let config = load_setup(&user, dist.parent(), None, env).unwrap();

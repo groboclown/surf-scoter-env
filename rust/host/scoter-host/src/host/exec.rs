@@ -69,6 +69,7 @@ const STDIN_BACKLOG_CHUNKS: usize = 64;
 /// How often to check whether the process exited, once its output has closed.
 const WAIT_POLL: Duration = Duration::from_millis(10);
 /// Added to the signal number to report death by signal, as shells do.
+#[cfg(unix)]
 const SIGNAL_EXIT_BASE: i32 = 128;
 
 /// What to run.  Built by `analyze`.
@@ -782,8 +783,14 @@ mod tests {
                 .unwrap_err()
                 .contains("must be an absolute path")
         );
+        // Absolute on this system: `/nonexistent` isn't, on Windows.
+        let missing = if cfg!(windows) {
+            "C:/nonexistent/program"
+        } else {
+            "/nonexistent/program"
+        };
         assert!(
-            accepted_executable("/nonexistent/program")
+            accepted_executable(missing)
                 .unwrap_err()
                 .contains("isn't an executable file any more")
         );

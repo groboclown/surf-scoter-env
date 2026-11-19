@@ -5,8 +5,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 yaml_serde.workspace = true
+
+# `O_NOFOLLOW` and the like, for reading files safely on Unix.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

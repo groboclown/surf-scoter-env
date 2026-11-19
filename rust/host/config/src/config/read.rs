@@ -166,14 +166,14 @@ mod tests {
     #[test]
     fn read_limit() {
         let dir = TempDir::new();
-        let at_limit = dir.path().join("at-limit.yaml");
+        let at_limit = dir.join("at-limit.yaml");
         fs::write(&at_limit, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize]).unwrap();
         assert_eq!(
             read_limited(&at_limit).unwrap().len(),
             MAX_CONFIG_FILE_BYTES as usize
         );
 
-        let over = dir.path().join("over.yaml");
+        let over = dir.join("over.yaml");
         fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(
             read_limited(&over).unwrap_err(),
@@ -181,7 +181,7 @@ mod tests {
         );
         // The universal configuration file has a larger limit.
         assert!(read_limited_to(&over, MAX_UNIVERSAL_FILE_BYTES).is_ok());
-        let universal_over = dir.path().join("over.json");
+        let universal_over = dir.join("over.json");
         fs::write(
             &universal_over,
             vec![b' '; MAX_UNIVERSAL_FILE_BYTES as usize + 1],
@@ -197,11 +197,11 @@ mod tests {
     fn read_errors() {
         let dir = TempDir::new();
         assert!(
-            read_limited(&dir.path().join("missing.yaml"))
+            read_limited(&dir.join("missing.yaml"))
                 .unwrap_err()
                 .starts_with("cannot read the file: ")
         );
-        let binary = dir.path().join("binary.yaml");
+        let binary = dir.join("binary.yaml");
         fs::write(&binary, [0xff, 0xfe]).unwrap();
         assert_eq!(
             read_limited(&binary).unwrap_err(),
@@ -215,14 +215,14 @@ mod tests {
         let file = dir.write("project.yaml", "a: 1\n");
         assert_eq!(read_regular_file(&file).unwrap(), "a: 1\n");
 
-        let over = dir.path().join("over.yaml");
+        let over = dir.join("over.yaml");
         fs::write(&over, vec![b'#'; MAX_CONFIG_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(
             read_regular_file(&over).unwrap_err(),
             "the file is larger than the 2 MB limit"
         );
         assert!(
-            read_regular_file(&dir.path().join("missing.yaml"))
+            read_regular_file(&dir.join("missing.yaml"))
                 .unwrap_err()
                 .starts_with("cannot read the file: ")
         );
@@ -236,28 +236,28 @@ mod tests {
 
         let dir = TempDir::new();
         let target = dir.write("secret.env", "TOKEN=x\n");
-        let link = dir.path().join("link.yaml");
+        let link = dir.join("link.yaml");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert_eq!(
             read_regular_file(&link).unwrap_err(),
             "the file is a symlink; it must be a regular file"
         );
         // A symlink to a directory, or a dangling one, is refused the same way.
-        let dangling = dir.path().join("dangling.yaml");
-        std::os::unix::fs::symlink(dir.path().join("nothing"), &dangling).unwrap();
+        let dangling = dir.join("dangling.yaml");
+        std::os::unix::fs::symlink(dir.join("nothing"), &dangling).unwrap();
         assert_eq!(
             read_regular_file(&dangling).unwrap_err(),
             "the file is a symlink; it must be a regular file"
         );
 
-        fs::create_dir(dir.path().join("a-dir.yaml")).unwrap();
+        fs::create_dir(dir.join("a-dir.yaml")).unwrap();
         assert_eq!(
-            read_regular_file(&dir.path().join("a-dir.yaml")).unwrap_err(),
+            read_regular_file(&dir.join("a-dir.yaml")).unwrap_err(),
             "not a regular file"
         );
 
         // Nothing writes to the FIFO, so a blocking read would never return.
-        let fifo = dir.path().join("fifo.yaml");
+        let fifo = dir.join("fifo.yaml");
         let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         assert_eq!(read_regular_file(&fifo).unwrap_err(), "not a regular file");

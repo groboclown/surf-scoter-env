@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-libc.workspace = true
 scoter-config.workspace = true
 scoter-comm.workspace = true
+
+# Signals and directory handles, for running programs on Unix.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

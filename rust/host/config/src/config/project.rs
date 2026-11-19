@@ -834,6 +834,7 @@ impl PathOptions {
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+    #[cfg(unix)]
     use std::fs;
 
     const PROJECT: &str = "/proj/scoter.yaml";
@@ -1073,17 +1074,19 @@ mod tests {
         let path = dir.write("proj/.surf-scoter.d/project.yaml", CONTAINER);
         let project = load(&path).unwrap();
         assert_eq!(project.path, path);
-        assert_eq!(project.dir(), dir.path().join("proj/.surf-scoter.d"));
+        assert_eq!(project.dir(), dir.join("proj/.surf-scoter.d"));
     }
 
     #[test]
     fn load_missing_file() {
-        let errors = load(Path::new("/nonexistent/.surf-scoter.d/project.yaml")).unwrap_err();
+        let dir = TempDir::new();
+        let missing = dir.join("nonexistent/.surf-scoter.d/project.yaml");
+        let errors = load(&missing).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0]
                 .to_string()
-                .starts_with("/nonexistent/.surf-scoter.d/project.yaml: cannot read the file: "),
+                .starts_with(&format!("{}: cannot read the file: ", missing.display())),
             "{}",
             errors[0]
         );
@@ -1096,8 +1099,8 @@ mod tests {
         let real = dir.write("elsewhere/project.yaml", CONTAINER);
 
         // The project file itself.
-        fs::create_dir_all(dir.path().join("a/.surf-scoter.d")).unwrap();
-        let link = dir.path().join("a/.surf-scoter.d/project.yaml");
+        fs::create_dir_all(dir.join("a/.surf-scoter.d")).unwrap();
+        let link = dir.join("a/.surf-scoter.d/project.yaml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let errors = load(&link).unwrap_err();
         assert_eq!(
@@ -1106,13 +1109,9 @@ mod tests {
         );
 
         // The directory holding it.
-        fs::create_dir_all(dir.path().join("b")).unwrap();
-        std::os::unix::fs::symlink(
-            dir.path().join("elsewhere"),
-            dir.path().join("b/.surf-scoter.d"),
-        )
-        .unwrap();
-        let errors = load(&dir.path().join("b/.surf-scoter.d/project.yaml")).unwrap_err();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("b/.surf-scoter.d")).unwrap();
+        let errors = load(&dir.join("b/.surf-scoter.d/project.yaml")).unwrap_err();
         assert_eq!(
             errors[0].message,
             "the project file's directory is a symlink; it must be a directory"

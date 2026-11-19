@@ -204,12 +204,12 @@ pub fn find(
 /// Whether `path` resolves (following symlinks) to somewhere inside one of
 /// `roots`.  A path that doesn't exist is reported elsewhere, so it passes.
 fn within(path: &Path, roots: &[PathBuf]) -> bool {
-    let Ok(path) = path.canonicalize() else {
+    let Ok(path) = crate::config::canonical(path) else {
         return true;
     };
     roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| crate::config::canonical(root).ok())
         .any(|root| path.starts_with(root))
 }
 
@@ -247,7 +247,7 @@ pub fn load(
         ));
     }
     // Canonical, so it reads well in messages and the universal configuration.
-    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let dir = crate::config::canonical(dir).unwrap_or_else(|_| dir.to_path_buf());
     let env_file = dir.join(DEV_ENV_FILE);
     let env = resolve(&env_file, roots, search).and_then(|value| parse(value, &env_file));
     match env {
@@ -339,7 +339,7 @@ struct Resolver {
 impl Resolver {
     /// The merged values of `file`: its parents', then its own.
     fn values(&mut self, file: &Path) -> Option<Mapping> {
-        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let file = crate::config::canonical(file).unwrap_or_else(|_| file.to_path_buf());
         if let Some(done) = self.merged.get(&file) {
             return done.clone();
         }
@@ -384,7 +384,7 @@ impl Resolver {
     /// after its own.  `seen` holds the directories already added.  Only
     /// called once `values` found the graph whole and without cycles.
     fn builds(&mut self, file: &Path, seen: &mut Vec<PathBuf>, out: &mut Vec<ParentBuild>) {
-        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let file = crate::config::canonical(file).unwrap_or_else(|_| file.to_path_buf());
         let Some(Some(node)) = self.nodes.get(&file) else {
             return;
         };
@@ -398,7 +398,7 @@ impl Resolver {
             })
             .collect();
         for (dir, tag, key) in locals {
-            let dir = dir.canonicalize().unwrap_or(dir);
+            let dir = crate::config::canonical(&dir).unwrap_or(dir);
             if let Some(i) = seen.iter().position(|d| *d == dir) {
                 if out[i].tag != tag {
                     self.errors.push(ConfigError::new(
@@ -692,6 +692,7 @@ pub fn parse(value: Value, file: &Path) -> Result<DevEnv, Vec<ConfigError>> {
                 let key = index_key(PARENT_BUILDS, i);
                 match item {
                     Value::Mapping(entry) => {
+                        // The directory on the host the parent image is built in.
                         let dir = text_field(entry, &key, "dir", true, &mut problems);
                         let tag = text_field(entry, &key, "tag", false, &mut problems);
                         if let (Some(dir), Some(tag)) = (dir, tag) {
@@ -861,18 +862,22 @@ fn find_by_name(name: &str, search: &[PathBuf]) -> Result<PathBuf, String> {
     ))
 }
 
+/// A text value; with `host_path`, it must be an absolute path on this host
+/// (`C:\dir` on Windows), not a container path.
 fn text_field(
     map: &Mapping,
     parent: &str,
     key: &str,
-    absolute: bool,
+    host_path: bool,
     problems: &mut Vec<(String, String)>,
 ) -> Option<String> {
     let at = child_key(parent, key);
     let problem = match map.get(key) {
         None => "is required",
         Some(Value::String(s)) if s.is_empty() => "must not be empty",
-        Some(Value::String(s)) if absolute && !s.starts_with('/') => "must be an absolute path",
+        Some(Value::String(s)) if host_path && !Path::new(s).is_absolute() => {
+            "must be an absolute path"
+        }
         Some(Value::String(s)) => return Some(s.clone()),
         Some(_) => "must be a string",
     };
@@ -883,7 +888,8 @@ fn text_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::testing::TempDir;
+    use crate::config::testing::{TempDir, abs};
+    #[cfg(unix)]
     use std::fs;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  project-clone: /project\n  persistent-store: /persistent-store\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\n";
@@ -905,7 +911,7 @@ mod tests {
     fn container(dir: &TempDir, at: &str) -> PathBuf {
         dir.write(&format!("{at}/{DOCKERFILE}"), "FROM scratch\n");
         dir.write(&format!("{at}/{DEV_ENV_FILE}"), DEV_ENV);
-        dir.path().join(at)
+        dir.join(at)
     }
 
     #[test]
@@ -1079,9 +1085,9 @@ mod tests {
     fn find_by_path() {
         let dir = TempDir::new();
         let expected = container(&dir, "proj/.surf-scoter.d/env");
-        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
+        let project = dir.join("proj/.surf-scoter.d/project.yaml");
         let found = find(&ContainerRef::Path("./env".to_string()), &project, &[]).unwrap();
-        assert_eq!(found.dir.canonicalize().unwrap(), expected);
+        assert_eq!(crate::config::canonical(&found.dir).unwrap(), expected);
         assert_eq!(found.env.sshd_port, Some(22022));
         // An absolute path is used as is.
         let abs = expected.display().to_string();
@@ -1099,10 +1105,10 @@ mod tests {
         let expected = container(&dir, "b/env");
         container(&dir, "c/env");
         let lookup = [
-            dir.path().join("missing"),
-            dir.path().join("a"),
-            dir.path().join("b"),
-            dir.path().join("c"),
+            dir.join("missing"),
+            dir.join("a"),
+            dir.join("b"),
+            dir.join("c"),
         ];
         let found = find(
             &ContainerRef::Name("env".to_string()),
@@ -1129,7 +1135,7 @@ mod tests {
         assert!(
             errors[0].message.ends_with(&format!(
                 "is outside the project files directory and the `dev-containers-search` directories: {}",
-                dir.path().join("proj/.surf-scoter.d").display()
+                dir.join("proj/.surf-scoter.d").display()
             )),
             "{}",
             errors[0]
@@ -1139,9 +1145,7 @@ mod tests {
         assert!(find(&abs, &project, &[]).is_err());
         // A search directory makes it allowed.
         assert_eq!(
-            find(&abs, &project, &[dir.path().join("proj")])
-                .unwrap()
-                .dir,
+            find(&abs, &project, &[dir.join("proj")]).unwrap().dir,
             outside
         );
     }
@@ -1151,11 +1155,11 @@ mod tests {
     fn find_symlink_outside_errors() {
         let dir = TempDir::new();
         let outside = container(&dir, "elsewhere/env");
-        fs::create_dir_all(dir.path().join("proj/.surf-scoter.d")).unwrap();
-        fs::create_dir_all(dir.path().join("search")).unwrap();
-        let project = dir.path().join("proj/.surf-scoter.d/project.yaml");
-        std::os::unix::fs::symlink(&outside, dir.path().join("proj/.surf-scoter.d/env")).unwrap();
-        std::os::unix::fs::symlink(&outside, dir.path().join("search/env")).unwrap();
+        fs::create_dir_all(dir.join("proj/.surf-scoter.d")).unwrap();
+        fs::create_dir_all(dir.join("search")).unwrap();
+        let project = dir.join("proj/.surf-scoter.d/project.yaml");
+        std::os::unix::fs::symlink(&outside, dir.join("proj/.surf-scoter.d/env")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("search/env")).unwrap();
 
         let errors = find(&ContainerRef::Path("env".to_string()), &project, &[]).unwrap_err();
         assert_eq!(
@@ -1165,7 +1169,7 @@ mod tests {
         let errors = find(
             &ContainerRef::Name("env".to_string()),
             &project,
-            &[dir.path().join("search")],
+            &[dir.join("search")],
         )
         .unwrap_err();
         assert_eq!(errors[0].key.as_deref(), Some("container.dev-container"));
@@ -1184,19 +1188,16 @@ mod tests {
                 "  - {file: ../../../outside/base/dev-env.yaml}\n",
             ),
         );
-        let roots = [dir.path().join("proj/.surf-scoter.d")];
-        let errors: Vec<String> = load(&dir.path().join("proj/.surf-scoter.d/env"), &roots, &[])
+        let roots = [dir.join("proj/.surf-scoter.d")];
+        let errors: Vec<String> = load(&dir.join("proj/.surf-scoter.d/env"), &roots, &[])
             .unwrap_err()
             .into_iter()
             .map(|e| e.key.unwrap_or_default())
             .collect();
         assert_eq!(errors, ["parents[0].dir", "parents[1].file"]);
         // With the other directory allowed, it loads.
-        let roots = [
-            dir.path().join("proj/.surf-scoter.d"),
-            dir.path().join("outside"),
-        ];
-        assert!(load(&dir.path().join("proj/.surf-scoter.d/env"), &roots, &[]).is_ok());
+        let roots = [dir.join("proj/.surf-scoter.d"), dir.join("outside")];
+        assert!(load(&dir.join("proj/.surf-scoter.d/env"), &roots, &[]).is_ok());
     }
 
     #[test]
@@ -1222,12 +1223,12 @@ mod tests {
     #[test]
     fn load_errors() {
         let dir = TempDir::new();
-        let missing = load(&dir.path().join("nothing"), &roots(&dir), &[]).unwrap_err();
+        let missing = load(&dir.join("nothing"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(missing.len(), 1);
         assert!(missing[0].message.contains("doesn't exist"));
 
         dir.write("bad/dev-env.yaml", "user: ubuntu\n");
-        let errors = load(&dir.path().join("bad"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("bad"), &roots(&dir), &[]).unwrap_err();
         let messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
         // No Dockerfile, plus the three missing fields.
         assert_eq!(messages.len(), 4, "{messages:?}");
@@ -1235,7 +1236,7 @@ mod tests {
 
         dir.write("big/Dockerfile", "");
         dir.write("big/dev-env.yaml", &"#".repeat(3 * 1024 * 1024));
-        let errors = load(&dir.path().join("big"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("big"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors[0].message, "the file is larger than the 2 MB limit");
     }
     #[test]
@@ -1269,14 +1270,16 @@ mod tests {
 
     #[test]
     fn parse_resolved_parents() {
+        // A directory on the host: `C:/c/base` on Windows.
+        let base = abs("/c/base");
         let env = parse_text(&format!(
-            "{DEV_ENV}parent-builds:\n  - {{dir: /c/base, tag: 'base:1'}}\n"
+            "{DEV_ENV}parent-builds:\n  - {{dir: '{base}', tag: 'base:1'}}\n"
         ))
         .unwrap();
         assert_eq!(
             env.parent_builds,
             [ParentBuild {
-                dir: PathBuf::from("/c/base"),
+                dir: PathBuf::from(&base),
                 tag: "base:1".to_string()
             }]
         );
@@ -1297,7 +1300,7 @@ mod tests {
     fn container_with(dir: &TempDir, at: &str, text: &str) -> PathBuf {
         dir.write(&format!("{at}/{DOCKERFILE}"), "FROM scratch\n");
         dir.write(&format!("{at}/{DEV_ENV_FILE}"), text);
-        dir.path().join(at).canonicalize().unwrap()
+        crate::config::canonical(&dir.join(at)).unwrap()
     }
 
     fn build(dir: &Path, tag: &str) -> ParentBuild {
@@ -1310,15 +1313,13 @@ mod tests {
     #[test]
     fn load_local_parent_only() {
         let dir = TempDir::new();
-        let base = container(&dir, "base").canonicalize().unwrap();
+        let base = crate::config::canonical(&container(&dir, "base")).unwrap();
         container_with(
             &dir,
             "env",
             "parents:\n  - {dir: ../base, tag: 'base:latest'}\n",
         );
-        let env = load(&dir.path().join("env"), &roots(&dir), &[])
-            .unwrap()
-            .env;
+        let env = load(&dir.join("env"), &roots(&dir), &[]).unwrap().env;
         assert_eq!(env.user, "ubuntu");
         assert_eq!(env.sshd_port, Some(22022));
         assert_eq!(env.parent_builds, [build(&base, "base:latest")]);
@@ -1351,9 +1352,7 @@ mod tests {
                 "extra: {b: 3}\n",
             ),
         );
-        let env = load(&dir.path().join("env"), &roots(&dir), &[])
-            .unwrap()
-            .env;
+        let env = load(&dir.join("env"), &roots(&dir), &[]).unwrap().env;
         assert!(env.parent_builds.is_empty());
         // Nearest wins; mappings merge key by key.
         assert_eq!(env.user, "root");
@@ -1376,21 +1375,19 @@ mod tests {
         let dir = TempDir::new();
         // Say, the project's CI build image: only a Dockerfile.
         dir.write("ci/Dockerfile", "FROM scratch\n");
-        let ci = dir.path().join("ci").canonicalize().unwrap();
+        let ci = crate::config::canonical(&dir.join("ci")).unwrap();
         container_with(
             &dir,
             "env",
             &format!("parents: [{{dir: ../ci, tag: 'ci:latest'}}]\n{DEV_ENV}"),
         );
-        let env = load(&dir.path().join("env"), &roots(&dir), &[])
-            .unwrap()
-            .env;
+        let env = load(&dir.join("env"), &roots(&dir), &[]).unwrap().env;
         assert_eq!(env.parent_builds, [build(&ci, "ci:latest")]);
         assert_eq!(env.user, "ubuntu");
 
         // It adds no values, so this file must give them all.
         container_with(&dir, "bare", "parents: [{dir: ../ci, tag: ci}]\n");
-        let errors = load(&dir.path().join("bare"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("bare"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 4, "{errors:?}");
     }
 
@@ -1398,7 +1395,7 @@ mod tests {
     fn parent_graph_in_build_order() {
         let dir = TempDir::new();
         // root <- a, root <- b, and env builds on both, then `c` on a file.
-        let root = container(&dir, "root").canonicalize().unwrap();
+        let root = crate::config::canonical(&container(&dir, "root")).unwrap();
         let a = container_with(
             &dir,
             "a",
@@ -1414,9 +1411,7 @@ mod tests {
             "env",
             "parents:\n  - {dir: ../a, tag: a}\n  - {dir: ../b, tag: b}\n",
         );
-        let env = load(&dir.path().join("env"), &roots(&dir), &[])
-            .unwrap()
-            .env;
+        let env = load(&dir.join("env"), &roots(&dir), &[]).unwrap().env;
         assert_eq!(
             env.parent_builds,
             [build(&root, "root"), build(&a, "a"), build(&b, "b")]
@@ -1430,7 +1425,7 @@ mod tests {
         let dir = TempDir::new();
         container_with(&dir, "x", "parents: [{dir: ../y, tag: y}]\n");
         container_with(&dir, "y", "parents: [{dir: ../x, tag: x}]\n");
-        let errors = load(&dir.path().join("x"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("x"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
             errors[0].message.starts_with("is its own parent: "),
@@ -1445,7 +1440,7 @@ mod tests {
             "two-tags",
             "parents: [{dir: ../a, tag: a}, {dir: ../root, tag: two}]\n",
         );
-        let errors = load(&dir.path().join("two-tags"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("two-tags"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].key.as_deref(), Some("parents[1].tag"));
         assert!(
@@ -1469,12 +1464,19 @@ mod tests {
                 "  - text\n",
             ),
         );
-        let errors: Vec<String> = load(&dir.path().join("bad"), &roots(&dir), &[])
+        let errors: Vec<String> = load(&dir.join("bad"), &roots(&dir), &[])
             .unwrap_err()
             .into_iter()
             .map(|e| format!("{}: {}", e.key.unwrap_or_default(), e.message))
             .collect();
-        let at = |p: &str| dir.path().canonicalize().unwrap().join("bad/..").join(p);
+        // As the tools give it: the parent's path joined to the container's
+        // directory (`C:\dir\bad\../p` on Windows).
+        let at = |p: &str| {
+            crate::config::canonical(dir.path())
+                .unwrap()
+                .join("bad")
+                .join(format!("../{p}"))
+        };
         assert_eq!(
             errors,
             [
@@ -1496,7 +1498,7 @@ mod tests {
         // The merged result must still be whole.
         container_with(&dir, "partial", "user: u\n");
         container_with(&dir, "child", "parents: [{dir: ../partial, tag: p}]\n");
-        let errors = load(&dir.path().join("child"), &roots(&dir), &[]).unwrap_err();
+        let errors = load(&dir.join("child"), &roots(&dir), &[]).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");
     }
 
@@ -1515,10 +1517,10 @@ mod tests {
             "parents: [{name: base, tag: 'base:1'}]\nmounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\nsshd-port: 1\n",
         );
         let search = [
-            dir.path().join("missing"),
-            dir.path().join("first"),
-            dir.path().join("second"),
-            dir.path().join("third"),
+            dir.join("missing"),
+            dir.join("first"),
+            dir.join("second"),
+            dir.join("third"),
         ];
         let env = load(&child, &roots(&dir), &search).unwrap().env;
         assert_eq!(env.user, "from-base");
@@ -1533,7 +1535,7 @@ mod tests {
             "proj/env",
             "parents:\n  - {name: base, tag: b}\n  - {name: ../up, tag: u}\n  - {name: base}\n  - {name: base, dir: ., tag: t}\n",
         );
-        let search = [dir.path().join("a"), dir.path().join("b")];
+        let search = [dir.join("a"), dir.join("b")];
         let errors: Vec<String> = load(&child, &roots(&dir), &search)
             .unwrap_err()
             .iter()
@@ -1570,11 +1572,11 @@ mod tests {
     fn name_parent_symlink_outside() {
         let dir = TempDir::new();
         let outside = container(&dir, "elsewhere/base");
-        fs::create_dir_all(dir.path().join("search")).unwrap();
-        std::os::unix::fs::symlink(&outside, dir.path().join("search/base")).unwrap();
+        fs::create_dir_all(dir.join("search")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("search/base")).unwrap();
         let child = container_with(&dir, "proj/env", "parents: [{name: base, tag: b}]\n");
-        let roots = [dir.path().join("proj"), dir.path().join("search")];
-        let errors = load(&child, &roots, &[dir.path().join("search")]).unwrap_err();
+        let roots = [dir.join("proj"), dir.join("search")];
+        let errors = load(&child, &roots, &[dir.join("search")]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].key.as_deref(), Some("parents[0].name"));
         assert!(
@@ -1608,7 +1610,7 @@ mod tests {
                 "mounts: {project-clone: /w, persistent-store: /p, setup: /s}\nbroker-bin: /b\n",
             ),
         );
-        let env = load(&child, &roots(&dir), &[dir.path().join("search")])
+        let env = load(&child, &roots(&dir), &[dir.join("search")])
             .unwrap()
             .env;
         assert_eq!(
