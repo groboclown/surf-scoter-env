@@ -38,6 +38,8 @@ class EnvironmentIdTest(unittest.TestCase):
             long_name.mkdir()
             self.assertEqual(len(store.environment_id(long_name)), 32 + 1 + 12)
 
+    # On Windows, `/no/such/...` is on the current drive (`D:\no\such\...`), so its id differs.
+    @unittest.skipUnless(POSIX, "the generator's ids for POSIX paths")
     def test_matches_the_generator(self) -> None:
         """The same as the generator's `scoter:project-id` for these (rust/host/config/src/config/system.rs)."""
         for directory, expected in (
@@ -52,7 +54,9 @@ class EnvironmentIdTest(unittest.TestCase):
         """The generator's id when the file has one; worked out the same way when it hasn't."""
         given = UserConfig({"active-config-locations": {"project-id": "given-0123456789ab"}})
         self.assertEqual(store.project_id(given, "/no/such/x"), "given-0123456789ab")
-        self.assertEqual(store.project_id(UserConfig({}), "/no/such/!!!"), "project-b94ae0807dcf")
+        self.assertEqual(
+            store.project_id(UserConfig({}), "/no/such/!!!"), store.environment_id(Path("/no/such/!!!"))
+        )
 
 
 @unittest.skipUnless(POSIX, "owner and mode checks")

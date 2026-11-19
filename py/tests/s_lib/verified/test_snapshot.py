@@ -141,7 +141,9 @@ class SnapshotTest(TempDirTest):
             sorted(manifest.files),
             ["env/Dockerfile", "env/bin/run.sh", "env/dev-env.yaml", "project.yaml"],
         )
-        self.assertTrue(manifest.files["env/bin/run.sh"].executable)
+        # Windows has no executable bit: a `.sh` never reads as executable there.
+        if POSIX:
+            self.assertTrue(manifest.files["env/bin/run.sh"].executable)
         self.assertFalse(manifest.files["project.yaml"].executable)
         self.assertEqual(manifest.files["project.yaml"].canonical, store.json_id({"p": 1}))
         self.assertIsNone(manifest.files["env/bin/run.sh"].canonical)
