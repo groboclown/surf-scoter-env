@@ -14,6 +14,19 @@ VENV_BIN ?= bin
 endif
 VENV_PYTHON ?= .venv/$(VENV_BIN)/python
 
+# The container-side Rust programs (`rust/container`'s client and broker, and
+# the Envoy gateway's envoy-inject) are Unix-only: they run in Linux containers.
+# On Windows, test and lint just the crates that also build there: the
+# communication library `scoter-host` shares, and the Envoy secrets filter.
+# Elsewhere, every crate in the workspace (an empty package list).
+ifeq ($(OS),Windows_NT)
+CONTAINER_RUST_PACKAGES ?= -p scoter-comm
+ENVOY_SECRETS_PACKAGES ?= -p secrets-filter
+else
+CONTAINER_RUST_PACKAGES ?=
+ENVOY_SECRETS_PACKAGES ?=
+endif
+
 # Used if you don't have osvscanner installed
 GO ?= go
 
@@ -106,7 +119,7 @@ self-host-remove:
 .PHONY: container-rust-tests
 test: container-rust-tests
 container-rust-tests:
-	cd rust/container && $(CARGO) test --locked
+	cd rust/container && $(CARGO) test --locked $(CONTAINER_RUST_PACKAGES)
 
 ## container-rust-clean      Clean the generated rust files from `rust/container`.
 .PHONY: container-rust-clean
@@ -124,7 +137,7 @@ container-rust-fmt:
 .PHONY: container-rust-lint
 lint: container-rust-lint
 container-rust-lint:
-	cd rust/container && $(CARGO) clippy --no-deps --locked
+	cd rust/container && $(CARGO) clippy --no-deps --locked $(CONTAINER_RUST_PACKAGES)
 
 
 ## host-rust-tests           Run unit tests for the `rust/host` programs.
@@ -302,13 +315,13 @@ network-gateway-envoy-clean:
 .PHONY: envoy-secrets-tests
 test: envoy-secrets-tests
 envoy-secrets-tests:
-	cd containers/network-gateway-envoy/secrets && $(CARGO) test --locked
+	cd containers/network-gateway-envoy/secrets && $(CARGO) test --locked $(ENVOY_SECRETS_PACKAGES)
 
 ## envoy-secrets-lint        Run 'clippy' on the Envoy gateway's secrets filter (host and Wasm) and envoy-inject.
 .PHONY: envoy-secrets-lint
 lint: envoy-secrets-lint
 envoy-secrets-lint:
-	cd containers/network-gateway-envoy/secrets && $(CARGO) clippy --no-deps --locked --all-targets
+	cd containers/network-gateway-envoy/secrets && $(CARGO) clippy --no-deps --locked --all-targets $(ENVOY_SECRETS_PACKAGES)
 	cd containers/network-gateway-envoy/secrets && $(CARGO) clippy --no-deps --locked -p secrets-filter --target wasm32-unknown-unknown
 
 ## envoy-secrets-fmt         Run 'fmt' on the Envoy gateway's secrets filter and envoy-inject.

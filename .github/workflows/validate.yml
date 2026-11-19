@@ -19,6 +19,8 @@ env:
 jobs:
   # Lint, unit tests and a native host build on each supported OS.
   # Needs no Docker, so it runs on all three runner types.
+  # On Windows the Makefile skips the Unix-only container programs (see
+  # CONTAINER_RUST_PACKAGES and ENVOY_SECRETS_PACKAGES there).
   lint-test:
     name: Lint and test (${{ matrix.os }})
     strategy:
