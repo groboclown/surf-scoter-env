@@ -176,6 +176,16 @@ host-build-release-all: host-build-release-x86_64-unknown-linux-gnu
 host-build-release-x86_64-unknown-linux-gnu:
 	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-unknown-linux-gnu --release
 
+.PHONY: host-build-release-x86_64-unknown-linux-musl
+host-build-release-all: host-build-release-x86_64-unknown-linux-musl
+host-build-release-x86_64-unknown-linux-musl:
+	cd rust/host && $(CARGO_BIN)/cross build --target x86_64-unknown-linux-musl --release
+
+.PHONY: host-build-release-aarch64-unknown-linux-musl
+host-build-release-all: host-build-release-aarch64-unknown-linux-musl
+host-build-release-aarch64-unknown-linux-musl:
+	cd rust/host && $(CARGO_BIN)/cross build --target aarch64-unknown-linux-musl --release
+
 .PHONY: host-build-release-aarch64-unknown-linux-gnu
 host-build-release-all: host-build-release-aarch64-unknown-linux-gnu
 host-build-release-aarch64-unknown-linux-gnu:

@@ -1,0 +1,270 @@
+# Release build: compiles the host programs for every supported platform,
+# packages each with build-scripts/mk-install.sh, and (for a version tag)
+# creates a draft GitHub release holding the packages, SBOMs and checksums.
+#
+# - Push a `v<version>` tag (matching version.txt) to build and draft a release.
+# - Run it by hand (workflow_dispatch) for a dry run: the packages are kept as
+#   the `release` workflow artifact, and no release is created.
+name: Release
+
+on:
+  workflow_dispatch:
+  #  inputs:
+  #    tag:
+  #      description: "Release tag to publish under (e.g. v0.1.0).  Only used by the publish job."
+  #      required: false
+  #      type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail fast when the tag doesn't name the version being built.
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Read version.txt
+        id: version
+        run: |
+          version=$( tr -d '[:space:]' < version.txt )
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${version}"
+
+      - name: Tag matches version.txt
+        if: github.ref_type == 'tag'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ] ; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match version.txt (v${VERSION})."
+            exit 1
+          fi
+
+  # mk-install.sh puts the SBOMs in every package, so build them once here.
+  # This needs Linux Docker (the container images and `docker save`).
+  sbom:
+    name: SBOMs
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cdxgen
+        run: make install-cdxgen
+
+      - name: Install osv-scanner
+        run: make install-osvscanner
+
+      - name: make sbom (includes scan)
+        run: make sbom
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: target/sboms/
+          if-no-files-found: error
+
+  # The host programs, one build per platform.
+  build:
+    name: Build (${{ matrix.name }})
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds use `cross`, whose images keep an older glibc than
+          # the runner's, so the glibc builds run on older distributions.
+          - name: linux-x64-glibc
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+          - name: linux-x64-musl
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            builder: cross
+          - name: linux-arm64-glibc
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+          - name: linux-arm64-musl
+            target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            builder: cross
+          # Same target as the Makefile's Windows build; packaged on Linux.
+          - name: windows-x64
+            target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            builder: cross
+          # The Apple toolchain on the (Apple silicon) runner builds both.
+          - name: macos-x64
+            target: x86_64-apple-darwin
+            os: macos-latest
+            builder: cargo
+          - name: macos-arm64
+            target: aarch64-apple-darwin
+            os: macos-latest
+            builder: cargo
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          workspaces: |
+            rust/host -> target
+
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        working-directory: rust/host
+        run: ${{ matrix.builder }} build --locked --release --target ${{ matrix.target }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: |
+            rust/host/target/${{ matrix.target }}/release/scoter-host
+            rust/host/target/${{ matrix.target }}/release/gen-scoter-uc
+            rust/host/target/${{ matrix.target }}/release/scoter-host.exe
+            rust/host/target/${{ matrix.target }}/release/gen-scoter-uc.exe
+          if-no-files-found: error
+
+  # One package per platform, built on Linux with mk-install.sh.
+  package:
+    name: Package
+    needs: [check-version, sbom, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+      TARGETS: >-
+        x86_64-unknown-linux-gnu
+        x86_64-unknown-linux-musl
+        aarch64-unknown-linux-gnu
+        aarch64-unknown-linux-musl
+        x86_64-pc-windows-gnu
+        x86_64-apple-darwin
+        aarch64-apple-darwin
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          name: sboms
+          path: target/sboms
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: target/bin
+
+      - name: Build packages
+        run: |
+          set -e
+          mkdir -p target/release
+          for target in ${TARGETS} ; do
+            # Where mk-install.sh looks for a target's binaries.
+            dest="rust/host/target/${target}/release"
+            mkdir -p "${dest}"
+            cp "target/bin/bin-${target}/"* "${dest}/."
+            # Artifacts don't keep the executable bit.
+            chmod +x "${dest}/"*
+            sh build-scripts/mk-install.sh \
+              "target/release/surf-scoter-${target}-${VERSION}" "${target}"
+          done
+          cp target/sboms/*.cdx.json target/release/.
+          ( cd target/release && sha256sum * > SHA256SUMS )
+          ls -l target/release
+          cat target/release/SHA256SUMS
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: target/release/
+          if-no-files-found: error
+
+  # A draft release for the tag; a maintainer reviews and publishes it.
+  release:
+    name: Draft GitHub release
+    if: github.ref_type == 'tag'
+    needs: [check-version, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "Surf Scoter ${VERSION}" \
+            release/*
