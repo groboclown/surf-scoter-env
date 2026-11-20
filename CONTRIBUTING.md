@@ -113,6 +113,7 @@ New releases must pass these gates:
 * Update dependencies
     * Python [`dev-requirements.txt`](py/dev-requirements.txt)
     * Rust cargo files, under [rust](rust/) and [network-gateway-envoy](containers/network-gateway-envoy/secrets/).
+    * The Rust [cross image](rust/host/Cross.toml).
     * [seekrit-dev `SEEKRIT_COMMIT`](containers/network-gateway-seekrit/Dockerfile) + [patches](containers/network-gateway-seekrit/patches/)
     * Container base images.
         * [dev-env](containers/dev-env/Dockerfile)
