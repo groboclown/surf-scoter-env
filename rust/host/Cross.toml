@@ -1,0 +1,10 @@
+# Images for `cross` (see the Makefile's `host-build-release-*` targets).
+#
+# cross 0.2.5's own Windows image (2022) has a MinGW too old for current Rust,
+# whose standard library links `-lsynchronization`: the link fails with
+# "cannot find -lsynchronization".  This is cross's newer `main` image, pinned
+# by digest so the build doesn't change under us.  To update it:
+#   docker pull ghcr.io/cross-rs/x86_64-pc-windows-gnu:main
+#   docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/cross-rs/x86_64-pc-windows-gnu:main
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu@sha256:e1e46201d8fea467e95911924be6f18f0192c7080add369131e8a39e4e2a731e"

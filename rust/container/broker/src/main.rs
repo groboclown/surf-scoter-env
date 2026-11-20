@@ -446,7 +446,9 @@ mod tests {
 
     /// Read from the client side until EOF.
     fn read_to_end(mut stream: &UnixStream) -> Vec<u8> {
-        stream.set_read_timeout(TIMEOUT).unwrap();
+        // macOS refuses socket options (EINVAL) once the peer has closed; then the
+        // read can't block anyway, as it returns the buffered bytes and EOF.
+        let _ = stream.set_read_timeout(TIMEOUT);
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).unwrap();
         buf

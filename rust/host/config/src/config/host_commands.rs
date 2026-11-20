@@ -463,7 +463,7 @@ impl Check {
 
 /// The file `path` really is, with every symlink resolved.
 fn real_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::config::canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The executable's base name; on Windows, without its extension.

@@ -28,9 +28,10 @@ else
 fi
 
 ext=""
-if echo "${target_platform}" | grep -i 'win' ; then
-    ext=".exe"
-fi
+# Match 'windows' exactly: a bare 'win' would also match 'apple-darwin'.
+case "${target_platform}" in
+    *windows*) ext=".exe" ;;
+esac
 
 workdir="${base}/target/installer/${target_platform}"
 
@@ -74,6 +75,6 @@ if [ -z "${ext}" ] ; then
     ( cd "${workdir}" && tar zcf ${abs_outfile}.tar.gz * )
 else
     test -f "${outfile}.zip" && rm "${outfile}.zip"
-    cp "${base}/py/src/dist_root/scoter.py" "${workdir}/scoter.zip"
+    cp "${base}/py/src/dist_root/scoter.py" "${workdir}/scoter.py"
     ( cd "${workdir}" && zip -9r ${abs_outfile}.zip * )
 fi

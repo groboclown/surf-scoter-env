@@ -78,7 +78,7 @@ class LogAction(argparse.Action):
         super().__init__(
             ["--verbose", "--debug", "--trace"],
             dest, nargs=0, const=None, default=None, type=None,
-            choices=None, required=False, help=help, metavar=None, deprecated=False
+            choices=None, required=False, help=help, metavar=None,
         )
 
     def format_usage(self) -> str:

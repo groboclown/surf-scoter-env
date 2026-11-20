@@ -454,6 +454,7 @@ mod tests {
     use crate::config::system::Env;
     use crate::config::testing::TempDir;
     use crate::config::{ConfigErrors, LoadOptions, load_all_with_env};
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     const DEV_ENV: &str = "user: ubuntu\nmounts:\n  project-clone: /workspace\n  persistent-store: /store\n  setup: /setup\nbroker-bin: /usr/local/bin/scoter-container\nsshd-port: 22022\nextra:\n  ratio: 0.5\n  1: one\n";
@@ -467,6 +468,7 @@ mod tests {
     }
 
     impl UniversalSection {
+        #[cfg(unix)]
         fn with_programs(self, programs: &[(&str, Option<String>)]) -> Self {
             UniversalSection {
                 programs: programs
@@ -482,14 +484,14 @@ mod tests {
         let options = LoadOptions {
             project_dir: project.map(|p| {
                 dir.write("proj/.surf-scoter.d/project.yaml", p);
-                dir.path().join("proj")
+                dir.join("proj")
             }),
             ..LoadOptions::default()
         };
         dir.write("home/setup.yaml", setup);
         let env = Env {
-            scoter_home: Some(dir.path().join("home")),
-            path: Some(dir.path().join("bin").into_os_string()),
+            scoter_home: Some(dir.join("home")),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         load_all_with_env(&options, env).unwrap()
@@ -529,17 +531,17 @@ mod tests {
         let p = |path: &PathBuf| path.display().to_string();
         assert_eq!(
             universal.active_config_locations.project_config,
-            Some(p(&dir.path().join("proj/.surf-scoter.d/project.yaml")))
+            Some(p(&dir.join("proj/.surf-scoter.d/project.yaml")))
         );
         assert_eq!(universal.setup.files.len(), 1);
         assert_eq!(
             universal.setup.files[0].file,
-            p(&dir.path().join("home/setup.yaml"))
+            p(&dir.join("home/setup.yaml"))
         );
         // No `./`: the path is canonical.
         assert_eq!(
             universal.active_config_locations.dev_container_path,
-            Some(p(&dir.path().join("proj/.surf-scoter.d/env")))
+            Some(p(&dir.join("proj/.surf-scoter.d/env")))
         );
         let strings =
             |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
@@ -561,7 +563,7 @@ mod tests {
                 egress_hosts: BTreeMap::new(),
             }
         };
-        let ssh_config = p(&dir.path().join("proj/ssh/config"));
+        let ssh_config = p(&dir.join("proj/ssh/config"));
         let podman_text = p(&podman);
         assert_eq!(
             universal.resolved,
@@ -600,7 +602,7 @@ mod tests {
                             "compose".to_string(),
                             // Kept whether or not they're there.
                             Some(vec![
-                                p(&dir.path().join("proj/compose")),
+                                p(&dir.join("proj/compose")),
                                 "/etc/compose".to_string()
                             ]),
                         )]),
@@ -616,7 +618,7 @@ mod tests {
                             (
                                 "project-id".to_string(),
                                 ScalarValue::String(crate::config::system::environment_id(
-                                    &dir.path().join("proj"),
+                                    &dir.join("proj"),
                                 )),
                             ),
                         ]),
@@ -624,25 +626,19 @@ mod tests {
                             &[
                                 (
                                     "dev-container-path",
-                                    Some(p(&dir.path().join("proj/.surf-scoter.d/env")))
+                                    Some(p(&dir.join("proj/.surf-scoter.d/env")))
                                 ),
                                 ("distribution-bin-dir", Some("/opt/scoter/bin".to_string())),
                                 ("distribution-dir", Some("/opt/scoter".to_string())),
                                 ("note", Some(ssh_config.clone())),
-                                (
-                                    "config-dir",
-                                    Some(p(&dir.path().join("proj/.surf-scoter.d")))
-                                ),
+                                ("config-dir", Some(p(&dir.join("proj/.surf-scoter.d")))),
                                 (
                                     "project-config",
-                                    Some(p(&dir.path().join("proj/.surf-scoter.d/project.yaml")))
+                                    Some(p(&dir.join("proj/.surf-scoter.d/project.yaml")))
                                 ),
-                                ("project-dir", Some(p(&dir.path().join("proj")))),
-                                ("user-dir", Some(p(&dir.path().join("home")))),
-                                (
-                                    "user-setup-file",
-                                    Some(p(&dir.path().join("home/setup.yaml")))
-                                ),
+                                ("project-dir", Some(p(&dir.join("proj")))),
+                                ("user-dir", Some(p(&dir.join("home")))),
+                                ("user-setup-file", Some(p(&dir.join("home/setup.yaml")))),
                             ],
                             &[],
                         )
@@ -710,7 +706,7 @@ mod tests {
         // The history of the inputs is its own block.
         assert_eq!(
             json["loaded-from"]["project-config"],
-            serde_json::json!([p(&dir.path().join("proj/.surf-scoter.d/project.yaml"))])
+            serde_json::json!([p(&dir.join("proj/.surf-scoter.d/project.yaml"))])
         );
         assert_eq!(
             json["setup"].as_object().unwrap().len(),
@@ -798,7 +794,7 @@ mod tests {
             assert_eq!(json["resolved"]["ssh"][group], Json::Object(Map::new()));
         }
         // Only where the user's setup file was found.
-        let home = |p: &str| dir.path().join(p).display().to_string();
+        let home = |p: &str| dir.join(p).display().to_string();
         assert_eq!(
             json["resolved"]["scoter"]["paths"],
             serde_json::json!({
@@ -839,12 +835,12 @@ mod tests {
         dir.write("home/setup.yaml", user);
         dir.write("dist/setup.yaml", dist);
         let options = LoadOptions {
-            distribution_dir: Some(dir.path().join("dist")),
+            distribution_dir: Some(dir.join("dist")),
             ..LoadOptions::default()
         };
         let env = Env {
-            scoter_home: Some(dir.path().join("home")),
-            path: Some(dir.path().join("bin").into_os_string()),
+            scoter_home: Some(dir.join("home")),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         load_all_with_env(&options, env).map_err(error_texts)
@@ -877,7 +873,7 @@ mod tests {
         let sh = tool(&dir, "bin/sh");
         let podman = tool(&dir, "bin/podman");
         let python = tool(&dir, "bin/python3.12");
-        let mytool = dir.path().join("bin/mytool");
+        let mytool = dir.join("bin/mytool");
         std::os::unix::fs::symlink(&sh, &mytool).unwrap();
         let checks = combined(
             &dir,
@@ -946,13 +942,10 @@ mod tests {
             ])
         );
         let shims = &checks.checks["verification:shims"];
-        assert_eq!(
-            shims.paths,
-            [dir.path().join("dist/shims").display().to_string()]
-        );
+        assert_eq!(shims.paths, [dir.join("dist/shims").display().to_string()]);
         assert_eq!(
             shims.files,
-            [dir.path().join("dist/setup.yaml").display().to_string()]
+            [dir.join("dist/setup.yaml").display().to_string()]
         );
         assert_eq!(checks.checks["verification:code-options"].options, ["-c"]);
         assert!(checks.notices.is_empty(), "{:?}", checks.notices);
@@ -1008,8 +1001,8 @@ mod tests {
                 "`verification:ksh-ok` overrides `verification:gone`, which isn't set; the override does nothing",
             ]
         );
-        let user = dir.path().join("home/setup.yaml").display().to_string();
-        let dist = dir.path().join("dist/setup.yaml").display().to_string();
+        let user = dir.join("home/setup.yaml").display().to_string();
+        let dist = dir.join("dist/setup.yaml").display().to_string();
         let notice = &checks.notices[0];
         assert_eq!(notice.id, "override-not-matched");
         assert_eq!(notice.sources, [user.clone(), dist]);
@@ -1086,7 +1079,7 @@ mod tests {
                 ),
                 format!(
                     "b.host-commands.relax: overrides `verification:shells`, from a higher priority setup file ({}); a check can only override checks from its own file or a lower priority one",
-                    dir.path().join("home/setup.yaml").display()
+                    dir.join("home/setup.yaml").display()
                 ),
                 "c.host-commands.x: can't override itself".to_string(),
             ]
@@ -1136,8 +1129,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let user = dir.path().join("home/setup.yaml").display().to_string();
-        let dist = dir.path().join("dist/setup.yaml").display().to_string();
+        let user = dir.join("home/setup.yaml").display().to_string();
+        let dist = dir.join("dist/setup.yaml").display().to_string();
         assert_eq!(
             messages(&checks.notices),
             [
@@ -1194,7 +1187,7 @@ mod tests {
         let first = build_brokering_project(&config).unwrap();
         let file = dir.write("universal.json", &to_json(&first));
         let env = Env {
-            path: Some(dir.path().join("bin").into_os_string()),
+            path: Some(dir.join("bin").into_os_string()),
             ..Env::default()
         };
         let again = crate::config::load_universal_with_env(&file, env).unwrap();
@@ -1214,16 +1207,16 @@ mod tests {
             "home/setup.yaml",
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\n",
         );
-        let clone = dir.path().join("clone");
+        let clone = dir.join("clone");
         let load = |project: &str| {
             dir.write("proj/.surf-scoter.d/project.yaml", project);
             let options = LoadOptions {
-                project_dir: Some(dir.path().join("proj")),
+                project_dir: Some(dir.join("proj")),
                 project_clone_dir: Some(clone.clone()),
                 ..LoadOptions::default()
             };
             let env = Env {
-                scoter_home: Some(dir.path().join("home")),
+                scoter_home: Some(dir.join("home")),
                 ..Env::default()
             };
             load_all_with_env(&options, env)
@@ -1306,11 +1299,11 @@ mod tests {
                 ),
             );
             let options = LoadOptions {
-                project_dir: Some(dir.path().join("proj")),
+                project_dir: Some(dir.join("proj")),
                 ..LoadOptions::default()
             };
             let env = Env {
-                scoter_home: Some(dir.path().join("home")),
+                scoter_home: Some(dir.join("home")),
                 ..Env::default()
             };
             load_all_with_env(&options, env)
@@ -1355,11 +1348,11 @@ mod tests {
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nverification:\n  value-lists:\n    egress-refused-wildcards: [github.io, co.uk]\n",
         );
         let options = LoadOptions {
-            project_dir: Some(dir.path().join("proj")),
+            project_dir: Some(dir.join("proj")),
             ..LoadOptions::default()
         };
         let env = Env {
-            scoter_home: Some(dir.path().join("home")),
+            scoter_home: Some(dir.join("home")),
             ..Env::default()
         };
         let errors = error_texts(load_all_with_env(&options, env.clone()).unwrap_err());
@@ -1386,7 +1379,7 @@ mod tests {
             );
             load_all_with_env(&options, env.clone())
         };
-        let psl = dir.path().join("psl.dat").display().to_string();
+        let psl = dir.join("psl.dat").display().to_string();
         assert_eq!(
             error_texts(with_list(&psl).unwrap_err()),
             [
@@ -1424,13 +1417,13 @@ mod tests {
         );
         let file = dir.write("host.json", host);
         let options = LoadOptions {
-            project_dir: Some(dir.path().join("proj")),
-            config_dir: Some(dir.path().join("copy")),
+            project_dir: Some(dir.join("proj")),
+            config_dir: Some(dir.join("copy")),
             host_file: Some(file.clone()),
             ..LoadOptions::default()
         };
         let env = Env {
-            scoter_home: Some(dir.path().join("home")),
+            scoter_home: Some(dir.join("home")),
             ..Env::default()
         };
         (options, env, file)
@@ -1445,7 +1438,7 @@ mod tests {
                     name.to_string(),
                     serde_json::json!({
                         "path": path.display().to_string(),
-                        "real": path.canonicalize().unwrap_or(path.to_path_buf()).display().to_string(),
+                        "real": crate::config::canonical(path).unwrap_or(path.to_path_buf()).display().to_string(),
                         "origin": "resolved",
                     }),
                 )
@@ -1517,7 +1510,7 @@ mod tests {
         assert!(
             crate::config::host_file::check_for_run(&suc, loaded.host_file.as_ref()).is_empty()
         );
-        std::fs::remove_file(dir.path().join("bin/ls")).unwrap();
+        std::fs::remove_file(dir.join("bin/ls")).unwrap();
         let problems = crate::config::host_file::check_for_run(&suc, loaded.host_file.as_ref());
         assert_eq!(problems.len(), 1);
         assert!(
@@ -1594,11 +1587,11 @@ mod tests {
         let load = |user: &str| {
             dir.write("home/setup.yaml", user);
             let options = LoadOptions {
-                distribution_dir: Some(dir.path().join("dist")),
+                distribution_dir: Some(dir.join("dist")),
                 ..LoadOptions::default()
             };
             let env = Env {
-                scoter_home: Some(dir.path().join("home")),
+                scoter_home: Some(dir.join("home")),
                 ..Env::default()
             };
             load_all_with_env(&options, env).and_then(|config| build(&config))
@@ -1668,16 +1661,16 @@ mod tests {
             "scoter:\n  values:\n    project-files-dir: .surf-scoter.d\n    project-file-name: project.yaml\nproject-state:\n  paths:\n    per-branch: /w/${scoter:project-id}/${scoter:project-branch}\n",
         );
         let env = || Env {
-            scoter_home: Some(dir.path().join("home")),
+            scoter_home: Some(dir.join("home")),
             ..Env::default()
         };
         let options = LoadOptions {
-            project_dir: Some(dir.path().join("proj")),
+            project_dir: Some(dir.join("proj")),
             project_branch: Some("feature/../x".to_string()),
             ..LoadOptions::default()
         };
         let universal = build(&load_all_with_env(&options, env()).unwrap()).unwrap();
-        let id = crate::config::system::environment_id(&dir.path().join("proj"));
+        let id = crate::config::system::environment_id(&dir.join("proj"));
         let active = &universal.active_config_locations;
         assert_eq!(active.project_id.as_deref(), Some(id.as_str()));
         assert_eq!(active.project_branch.as_deref(), Some("feature-..-x"));
@@ -1704,7 +1697,7 @@ mod tests {
         // With the same project given again too (a review's runs do); not
         // with another.
         let same = LoadOptions {
-            project_dir: Some(dir.path().join("proj")),
+            project_dir: Some(dir.join("proj")),
             ..again.clone()
         };
         let carried = build(&load_all_with_env(&same, env()).unwrap()).unwrap();
@@ -1719,7 +1712,7 @@ mod tests {
             "container:\n  dev-container-path: ./env\n",
         );
         let other = LoadOptions {
-            project_dir: Some(dir.path().join("other")),
+            project_dir: Some(dir.join("other")),
             ..again.clone()
         };
         let carried = build(&load_all_with_env(&other, env()).unwrap()).unwrap();

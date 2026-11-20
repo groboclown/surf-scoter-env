@@ -12,9 +12,11 @@ import unittest
 from pathlib import Path
 
 import main_run
-from surf_scoter_lib import persistent_store
+from surf_scoter_lib import fileutil, persistent_store
 from surf_scoter_lib.err import ConfigErr
 from surf_scoter_lib.user_config import UserConfig
+
+POSIX = not fileutil.is_windows()
 
 MOUNTS = {"project-clone": "/project", "persistent-store": "/persistent-store", "setup": "/setup"}
 
@@ -91,17 +93,20 @@ class EnvFileTest(unittest.TestCase):
         return values
 
     def test_values(self) -> None:
-        """Every value single-quoted; the mounts and the volume as the run chose them."""
+        """Every value single-quoted; the mounts and the volume as the run chose them.
+
+        The host paths are as this system writes them: `\\state\\...` on Windows.
+        """
         values = self.write(suc())
-        self.assertEqual(values["PROJECT_CLONE_HOST"], "/state/projects/p/project-clone")
+        self.assertEqual(values["PROJECT_CLONE_HOST"], str(Path("/state/projects/p/project-clone")))
         self.assertEqual(values["PROJECT_CLONE_CONTAINER"], "/project")
         self.assertEqual(values["PERSISTENT_STORE_CONTAINER"], "/persistent-store")
         self.assertEqual(values["PERSISTENT_STORE_VOLUME"], "scoter-p-store")
         self.assertEqual(values["SETTINGS_CONTAINER"], "/setup")
         self.assertEqual(values["FIREWALL_ROUTER"], "local-surf-scoter/firewall-router:latest")
         self.assertNotIn("WORKSPACE_HOST", values)
-        self.assertEqual(values["GATEWAY_CA_HOST"], "/state/resources/gateway-no-ca")
-        self.assertEqual(values["GATEWAY_CA_CERT_HOST"], "/state/resources/ca/gateway-ca.pem")
+        self.assertEqual(values["GATEWAY_CA_HOST"], str(Path("/state/resources/gateway-no-ca")))
+        self.assertEqual(values["GATEWAY_CA_CERT_HOST"], str(Path("/state/resources/ca/gateway-ca.pem")))
         self.assertEqual(values["SECRET_NAMES"], "GITHUB_TOKEN NPM_TOKEN")
 
     def test_project_clone_override(self) -> None:
@@ -120,8 +125,14 @@ class EnvFileTest(unittest.TestCase):
 
     def test_host_paths(self) -> None:
         """A setup's host path may have spaces or `$`; never a newline or a quote."""
-        self.assertEqual(self.write(suc(), settings="/Users/A B/$x")["SETTINGS_HOST"], "/Users/A B/$x")
-        for bad in ["/a\nB=c", "/a'b", "/a\\'b", "/a\\\\b", "/a\rb"]:
+        self.assertEqual(
+            self.write(suc(), settings="/Users/A B/$x")["SETTINGS_HOST"], str(Path("/Users/A B/$x"))
+        )
+        bad_paths = ["/a\nB=c", "/a'b", "/a\\'b", "/a\rb"]
+        if POSIX:
+            # On Windows, `Path` makes `\\` one separator: nothing's left to refuse.
+            bad_paths.append("/a\\\\b")
+        for bad in bad_paths:
             with self.subTest(bad=bad), self.assertRaises(ConfigErr):
                 self.write(suc(), settings=bad)
 
@@ -236,7 +247,8 @@ class ProjectCloneTest(unittest.TestCase):
             [str(self.repo), "clone", str(self.clone)],
             [str(self.setup), "config", f"{self.clone}/.git/config", "/setup/project.bundle"],
         ])
-        self.assertEqual(stat.S_IMODE(bundle.stat().st_mode), 0o644)
+        if POSIX:  # Windows keeps no mode bits: a writable file reads as 0o666.
+            self.assertEqual(stat.S_IMODE(bundle.stat().st_mode), 0o644)
         self.assertFalse((self.setup / "project.bundle.tmp").exists())
         # The next run only refreshes the bundle: the clone is the container's now.
         self.record.unlink()

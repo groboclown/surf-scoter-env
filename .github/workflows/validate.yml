@@ -4,7 +4,6 @@
 name: Validate
 
 on:
-  push:
   pull_request:
 
 permissions:
@@ -20,6 +19,8 @@ env:
 jobs:
   # Lint, unit tests and a native host build on each supported OS.
   # Needs no Docker, so it runs on all three runner types.
+  # On Windows the Makefile skips the Unix-only container programs (see
+  # CONTAINER_RUST_PACKAGES and ENVOY_SECRETS_PACKAGES there).
   lint-test:
     name: Lint and test (${{ matrix.os }})
     strategy:
@@ -33,7 +34,7 @@ jobs:
         shell: bash
     env:
       # setup-python doesn't provide `python3` on Windows.
-      MAKE_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+      MAKE_PYTHON: ${{ startsWith(matrix.os, 'windows') && 'python' || 'python3' }}
     steps:
       - name: Keep LF line endings (Windows)
         if: runner.os == 'Windows'

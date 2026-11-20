@@ -291,11 +291,22 @@ fn live_files_problems(project: &ProjectConfig, system: &SystemConfig) -> Vec<Co
         return Vec::new();
     };
     let live = project_dir.join(&files_dir);
-    let mut names = vec![live.display().to_string()];
-    if let Ok(real) = live.canonicalize() {
-        names.push(real.display().to_string());
+    // Windows reads `/` as `\`, and names regardless of case: a value of
+    // `${scoter:project-dir}/.surf-scoter.d` (`C:\proj/.surf-scoter.d`) or
+    // `c:\PROJ\.surf-scoter.d` names `C:\proj\.surf-scoter.d` all the same.
+    let fold = |text: &str| {
+        if cfg!(windows) {
+            text.replace('/', "\\").to_lowercase()
+        } else {
+            text.to_string()
+        }
+    };
+    let mut names = vec![fold(&live.display().to_string())];
+    if let Ok(real) = canonical(&live) {
+        names.push(fold(&real.display().to_string()));
     }
     let names_live = |value: &str| {
+        let value = fold(value);
         names.iter().any(|name| {
             value.match_indices(name.as_str()).any(|(at, _)| {
                 let after = &value[at + name.len()..];
@@ -579,7 +590,7 @@ pub fn load_all_with_env(options: &LoadOptions, env: Env) -> Result<FullConfig, 
     });
     // Given, or carried over while the project is the one it was found for.
     let same_project = |u: &UniversalInput| {
-        let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let canonical = |p: &Path| crate::config::canonical(p).unwrap_or_else(|_| p.to_path_buf());
         match (&options.project_dir, &u.active_config_locations.project_dir) {
             (None, _) => true,
             (Some(given), Some(was)) => canonical(&tidy_dir(given)) == canonical(Path::new(was)),
@@ -802,12 +813,75 @@ fn plan_environments(project: &mut ProjectConfig, system: &SystemConfig) -> Vec<
 /// A directory made absolute and canonical, so `-d ../other` reads as the
 /// directory it is; as given (made absolute) if it can't be resolved.
 fn tidy_dir(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| absolute(dir))
+    canonical(dir).unwrap_or_else(|_| absolute(dir))
 }
 
 /// `path` made absolute (without resolving symlinks).
 pub(crate) fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `path` made absolute with every symlink resolved, as
+/// `Path::canonicalize`, but in the plain form where Windows allows it.
+///
+/// On Windows, `canonicalize` gives a verbatim path (`\\?\C:\dir`), in which
+/// `/` isn't a separator and `..` isn't resolved: a setting such as
+/// `${scoter:project-dir}/containers` expanded from one names nothing.  So a
+/// verbatim path that means the same as a plain one (`C:\dir`) is given as
+/// that; any other (too long, a reserved name such as `NUL`, a name ending
+/// in `.` or a space, a network share) is left verbatim.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    #[cfg(windows)]
+    let path = plain_windows_path(path);
+    Ok(path)
+}
+
+/// `path` without its `\\?\` prefix, when it's a drive path that reads the
+/// same without it; else as it is.
+#[cfg(any(windows, test))]
+fn plain_windows_path(path: PathBuf) -> PathBuf {
+    // The longest path the plain form allows (MAX_PATH less the end NUL).
+    const MAX_PLAIN: usize = 259;
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let Some(plain) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) else {
+        return path;
+    };
+    let bytes = plain.as_bytes();
+    let drive = bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":\\";
+    let safe_name = |name: &str| {
+        // The device names are reserved with any extension, and ignore case
+        // and trailing spaces: `nul.txt`, `COM1 `.
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_ascii_uppercase();
+        let numbered = |prefix: &str| {
+            let mut rest = stem.strip_prefix(prefix).unwrap_or("").chars();
+            matches!(
+                (rest.next(), rest.next()),
+                (Some('0'..='9' | '¹' | '²' | '³'), None)
+            )
+        };
+        let device = RESERVED.contains(&stem.as_str()) || numbered("COM") || numbered("LPT");
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.ends_with(['.', ' '])
+            && !name
+                .chars()
+                .any(|c| c.is_control() || "<>:\"/|?*".contains(c))
+            && !device
+    };
+    // A trailing `\` only on the drive's root (`C:\`), which has no names.
+    let names = plain.get(3..).unwrap_or("");
+    if drive && plain.len() <= MAX_PLAIN && (names.is_empty() || names.split('\\').all(safe_name)) {
+        PathBuf::from(plain)
+    } else {
+        path
+    }
 }
 
 /// One problem in the configuration.
@@ -908,6 +982,17 @@ pub(crate) mod testing {
         system::load(distribution_dir, project_dir, env)
     }
 
+    /// `unix` (an absolute Unix path, such as `/opt/x`) made absolute on
+    /// this system: on Windows, on drive `C:` (`C:/opt/x`).
+    pub(crate) fn abs(unix: &str) -> String {
+        assert!(unix.starts_with('/'), "{unix}");
+        if cfg!(windows) {
+            format!("C:{unix}")
+        } else {
+            unix.to_string()
+        }
+    }
+
     /// A uniquely named directory, removed (with its contents) on drop.
     pub(crate) struct TempDir(PathBuf);
 
@@ -919,16 +1004,25 @@ pub(crate) mod testing {
                 std::env::temp_dir().join(format!("scoter-config-test-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
-            TempDir(path.canonicalize().unwrap())
+            TempDir(crate::config::canonical(&path).unwrap())
         }
 
         pub(crate) fn path(&self) -> &Path {
             &self.0
         }
 
+        /// `name` (`/`-separated) in the directory, with this system's
+        /// separators: on Windows, `dir.join("a/b")` is `C:\dir\a\b`, as
+        /// the tools give it, where `Path::join` would give `C:\dir\a/b`.
+        pub(crate) fn join(&self, name: &str) -> PathBuf {
+            let mut path = self.0.clone();
+            path.extend(name.split('/'));
+            path
+        }
+
         /// Write `text` to `name` (creating directories), returning its path.
         pub(crate) fn write(&self, name: &str, text: &str) -> PathBuf {
-            let path = self.0.join(name);
+            let path = self.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, text).unwrap();
             path
@@ -961,12 +1055,12 @@ mod tests {
 
     /// The user's setup file, as `env` finds it.
     fn user_setup(dir: &TempDir) -> PathBuf {
-        dir.path().join("home/setup.yaml")
+        dir.join("home/setup.yaml")
     }
 
     /// The environment, with `home` in `dir` as `SURF_SCOTER_HOME`.
     fn env(dir: &TempDir) -> Env {
-        testing::home_env(&dir.path().join("home"), Env::default())
+        testing::home_env(&dir.join("home"), Env::default())
     }
 
     /// Options for `project`, with the user's setup file (see `env`) naming
@@ -980,7 +1074,7 @@ mod tests {
         LoadOptions {
             project_dir: project.map(|p| {
                 dir.write("project/.surf-scoter.d/project.yaml", p);
-                dir.path().join("project")
+                dir.join("project")
             }),
             ..LoadOptions::default()
         }
@@ -1002,10 +1096,10 @@ mod tests {
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             config.project.unwrap().path,
-            dir.path().join("project/.surf-scoter.d/project.yaml")
+            dir.join("project/.surf-scoter.d/project.yaml")
         );
         let dev = config.dev_container.unwrap();
-        assert_eq!(dev.dir, dir.path().join("project/.surf-scoter.d/env"));
+        assert_eq!(dev.dir, dir.join("project/.surf-scoter.d/env"));
         assert_eq!(dev.env.broker_bin, "/usr/local/bin/scoter-container");
         assert_eq!(config.system.files(), &[user_setup(&dir)]);
     }
@@ -1046,17 +1140,17 @@ mod tests {
             "scoter:\n  values:\n    project-files-dir: .scoter-files\n    project-file-name: main.yaml\n",
         );
         let other = LoadOptions {
-            project_dir: Some(dir.path().join("other")),
+            project_dir: Some(dir.join("other")),
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&other, env(&dir)).unwrap();
         assert_eq!(
             config.project.unwrap().path,
-            dir.path().join("other/.scoter-files/main.yaml")
+            dir.join("other/.scoter-files/main.yaml")
         );
         assert_eq!(
             config.dev_container.unwrap().dir,
-            dir.path().join("other/.scoter-files/env")
+            dir.join("other/.scoter-files/env")
         );
 
         // The project directory must hold the project file.
@@ -1103,7 +1197,7 @@ mod tests {
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             config.dev_container.unwrap().dir,
-            dir.path().join("containers/dev-env")
+            dir.join("containers/dev-env")
         );
         assert_eq!(config.system.files(), &[user_setup(&dir)]);
     }
@@ -1126,26 +1220,26 @@ mod tests {
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             location(&config, system::CONFIG_DIR),
-            Some(dir.path().join("project/.surf-scoter.d"))
+            Some(dir.join("project/.surf-scoter.d"))
         );
 
-        opts.config_dir = Some(dir.path().join("copy"));
+        opts.config_dir = Some(dir.join("copy"));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         assert_eq!(
             location(&config, system::CONFIG_DIR),
-            Some(dir.path().join("copy"))
+            Some(dir.join("copy"))
         );
         assert_eq!(
             location(&config, system::PROJECT_CONFIG),
-            Some(dir.path().join("copy/project.yaml"))
+            Some(dir.join("copy/project.yaml"))
         );
         assert_eq!(
             location(&config, system::PROJECT_DIR),
-            Some(dir.path().join("project"))
+            Some(dir.join("project"))
         );
         assert_eq!(
             config.dev_container.as_ref().unwrap().dir,
-            dir.path().join("copy/env")
+            dir.join("copy/env")
         );
 
         // It carries over with the project, but not to a project given again.
@@ -1163,21 +1257,21 @@ mod tests {
         let config = load_all_with_env(&again, env(&dir)).unwrap();
         assert_eq!(
             location(&config, system::CONFIG_DIR),
-            Some(dir.path().join("copy"))
+            Some(dir.join("copy"))
         );
         let config = load_universal_with_env(&first, env(&dir)).unwrap();
         assert_eq!(
             location(&config, system::CONFIG_DIR),
-            Some(dir.path().join("copy"))
+            Some(dir.join("copy"))
         );
         let other = LoadOptions {
-            project_dir: Some(dir.path().join("project")),
+            project_dir: Some(dir.join("project")),
             ..again
         };
         let config = load_all_with_env(&other, env(&dir)).unwrap();
         assert_eq!(
             location(&config, system::CONFIG_DIR),
-            Some(dir.path().join("project/.surf-scoter.d"))
+            Some(dir.join("project/.surf-scoter.d"))
         );
     }
 
@@ -1191,7 +1285,7 @@ mod tests {
         let mut opts = options(&dir, Some(project), None);
         // Reading the live files, they're what the values name: nothing to refuse.
         load_all_with_env(&opts, env(&dir)).unwrap();
-        opts.config_dir = Some(dir.path().join("copy"));
+        opts.config_dir = Some(dir.join("copy"));
         let errors: Vec<String> = load_all_with_env(&opts, env(&dir))
             .unwrap_err()
             .0
@@ -1213,7 +1307,7 @@ mod tests {
     fn config_dir_errors() {
         let dir = TempDir::new();
         let mut opts = options(&dir, Some("container:\n  dev-container: dev-env\n"), None);
-        opts.config_dir = Some(dir.path().join("missing"));
+        opts.config_dir = Some(dir.join("missing"));
         let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
         assert_eq!(errors[0], ": the --config-dir directory doesn't exist");
         // The project files directory isn't read in its place.
@@ -1225,7 +1319,7 @@ mod tests {
         // It's where a project's files are read from, so it needs a project.
         dir.write("copy/project.yaml", "");
         let opts = LoadOptions {
-            config_dir: Some(dir.path().join("copy")),
+            config_dir: Some(dir.join("copy")),
             ..options(&dir, None, None)
         };
         assert_eq!(
@@ -1253,12 +1347,9 @@ mod tests {
                 dir.path().display()
             )),
         );
-        opts.config_dir = Some(dir.path().join("copy"));
+        opts.config_dir = Some(dir.join("copy"));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
-        assert_eq!(
-            config.dev_container.unwrap().dir,
-            dir.path().join("copy/dev-env")
-        );
+        assert_eq!(config.dev_container.unwrap().dir, dir.join("copy/dev-env"));
     }
 
     #[test]
@@ -1278,9 +1369,9 @@ mod tests {
             );
         };
         let opts = LoadOptions {
-            project_dir: Some(dir.path().join("repo/project")),
-            vcs_root: Some(dir.path().join("repo")),
-            project_clone_dir: Some(dir.path().join("clone")),
+            project_dir: Some(dir.join("repo/project")),
+            vcs_root: Some(dir.join("repo")),
+            project_clone_dir: Some(dir.join("clone")),
             ..LoadOptions::default()
         };
         let root = dir.path().display().to_string();
@@ -1292,7 +1383,8 @@ mod tests {
             ),
             (
                 "./containers".to_string(),
-                format!("{root}/repo/project/containers"),
+                // Worked out from the project directory: this system's separators.
+                dir.join("repo/project/containers").display().to_string(),
                 "scoter:project-dir",
             ),
             (
@@ -1319,10 +1411,10 @@ mod tests {
         // Followed through a symlink.
         #[cfg(unix)]
         {
-            std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
+            std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
             std::os::unix::fs::symlink(
-                dir.path().join("repo/project/.surf-scoter.d"),
-                dir.path().join("elsewhere/link"),
+                dir.join("repo/project/.surf-scoter.d"),
+                dir.join("elsewhere/link"),
             )
             .unwrap();
             setup(&format!("{root}/elsewhere/link"));
@@ -1458,7 +1550,7 @@ mod tests {
             "container:\n  dev-container-path: env\n",
         );
         let second = LoadOptions {
-            project_dir: Some(dir.path().join("project")),
+            project_dir: Some(dir.join("project")),
             universal: Some(first_file.clone()),
             no_setup_search: true,
             ..LoadOptions::default()
@@ -1467,7 +1559,7 @@ mod tests {
         assert_eq!(second.project.as_ref().unwrap().path, project);
         assert_eq!(
             second.system.get("a", "local"),
-            Some(dir.path().join("project/here").display().to_string())
+            Some(dir.join("project/here").display().to_string())
         );
         assert!(second.dev_container.is_some());
 
@@ -1500,7 +1592,7 @@ mod tests {
             "container:\n  dev-container-path: env\n",
         );
         let fourth = LoadOptions {
-            project_dir: Some(dir.path().join("other")),
+            project_dir: Some(dir.join("other")),
             universal: Some(second_file),
             no_setup_search: true,
             ..LoadOptions::default()
@@ -1521,7 +1613,7 @@ mod tests {
             "a:\n  values:\n    v: 1\n",
         );
         let env = Env {
-            home: Some(dir.path().join("home")),
+            home: Some(dir.join("home")),
             ..Env::default()
         };
         let first = load_all_with_env(&LoadOptions::default(), env.clone()).unwrap();
@@ -1544,12 +1636,7 @@ mod tests {
         );
         assert_eq!(
             second.system.get(system::SCOTER_SECTION, system::USER_DIR),
-            Some(
-                dir.path()
-                    .join("home/.config/surf-scoter.d")
-                    .display()
-                    .to_string()
-            )
+            Some(dir.join("home/.config/surf-scoter.d").display().to_string())
         );
         assert_eq!(
             second.system.value("a", "v"),
@@ -1566,7 +1653,7 @@ mod tests {
             "container:\n  dev-container-path: env\n",
         );
         let mut opts = options(&dir, None, None);
-        opts.project_dir = Some(dir.path().join("repo/project"));
+        opts.project_dir = Some(dir.join("repo/project"));
         let vcs_root = |config: &FullConfig| {
             config
                 .system
@@ -1574,20 +1661,20 @@ mod tests {
         };
 
         // It holds the project, and is recorded; `..` is worked out.
-        opts.vcs_root = Some(dir.path().join("repo/project/.."));
+        opts.vcs_root = Some(dir.join("repo/project/.."));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
-        assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
+        assert_eq!(vcs_root(&config), Some(dir.join("repo")));
         let universal = crate::universal::build_brokering_project(&config).unwrap();
         assert_eq!(
             universal.active_config_locations.vcs_root,
-            Some(dir.path().join("repo").display().to_string())
+            Some(dir.join("repo").display().to_string())
         );
         // The project directory itself can be the root.
-        opts.vcs_root = Some(dir.path().join("repo/project"));
+        opts.vcs_root = Some(dir.join("repo/project"));
         assert!(load_all_with_env(&opts, env(&dir)).is_ok());
 
         // It carries over with the project, but not to a project given again.
-        opts.vcs_root = Some(dir.path().join("repo"));
+        opts.vcs_root = Some(dir.join("repo"));
         let config = load_all_with_env(&opts, env(&dir)).unwrap();
         let first = dir.write(
             "first.json",
@@ -1601,16 +1688,16 @@ mod tests {
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
-        assert_eq!(vcs_root(&config), Some(dir.path().join("repo")));
+        assert_eq!(vcs_root(&config), Some(dir.join("repo")));
         let again = LoadOptions {
-            project_dir: Some(dir.path().join("repo/project")),
+            project_dir: Some(dir.join("repo/project")),
             ..again
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
         assert_eq!(vcs_root(&config), None);
 
         // It must hold the project directory, and exist.
-        std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
         for (root, message) in [
             ("elsewhere", "doesn't hold the project directory"),
             (
@@ -1619,7 +1706,7 @@ mod tests {
             ),
             ("missing", "the --vcs-root directory doesn't exist"),
         ] {
-            opts.vcs_root = Some(dir.path().join(root));
+            opts.vcs_root = Some(dir.join(root));
             let errors = messages(load_all_with_env(&opts, env(&dir)).unwrap_err());
             assert_eq!(errors.len(), 1, "{root}: {errors:?}");
             assert!(errors[0].contains(message), "{root}: {errors:?}");
@@ -1641,37 +1728,37 @@ mod tests {
             Some("a:\n  paths:\n    x: ./x\n"),
         );
         let ran_in = Env {
-            cwd: Some(dir.path().join("somewhere/else")),
+            cwd: Some(dir.join("somewhere/else")),
             ..env(&dir)
         };
         let config = load_all_with_env(&opts, ran_in.clone()).unwrap();
         // The project file is in it, and `./` paths start there.
-        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        assert_eq!(project_dir(&config), Some(dir.join("project")));
         assert_eq!(
             config.project.as_ref().unwrap().path,
-            dir.path().join("project/.surf-scoter.d/project.yaml")
+            dir.join("project/.surf-scoter.d/project.yaml")
         );
         assert_eq!(
             config.system.get_path("a", "x"),
-            Some(dir.path().join("project/x"))
+            Some(dir.join("project/x"))
         );
         // `cwd` is still where the tool ran.
         assert_eq!(
             config.system.get_path(system::SCOTER_SECTION, system::CWD),
-            Some(dir.path().join("somewhere/else"))
+            Some(dir.join("somewhere/else"))
         );
 
         // Given with `..`, it's the directory it names.
         let roundabout = LoadOptions {
-            project_dir: Some(dir.path().join("somewhere/../project")),
+            project_dir: Some(dir.join("somewhere/../project")),
             ..opts.clone()
         };
-        std::fs::create_dir_all(dir.path().join("somewhere")).unwrap();
+        std::fs::create_dir_all(dir.join("somewhere")).unwrap();
         let config = load_all_with_env(&roundabout, env(&dir)).unwrap();
-        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        assert_eq!(project_dir(&config), Some(dir.join("project")));
         assert_eq!(
             config.project.as_ref().unwrap().path,
-            dir.path().join("project/.surf-scoter.d/project.yaml")
+            dir.join("project/.surf-scoter.d/project.yaml")
         );
 
         // It carries over, unless another project is given.
@@ -1683,26 +1770,26 @@ mod tests {
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
-        assert_eq!(project_dir(&config), Some(dir.path().join("project")));
+        assert_eq!(project_dir(&config), Some(dir.join("project")));
         dev_container(&dir, "other/.surf-scoter.d/env");
         dir.write(
             "other/.surf-scoter.d/project.yaml",
             "container:\n  dev-container-path: env\n",
         );
         let again = LoadOptions {
-            project_dir: Some(dir.path().join("other")),
+            project_dir: Some(dir.join("other")),
             ..again
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
-        assert_eq!(project_dir(&config), Some(dir.path().join("other")));
+        assert_eq!(project_dir(&config), Some(dir.join("other")));
 
-        opts.project_dir = Some(dir.path().join("missing"));
+        opts.project_dir = Some(dir.join("missing"));
         let errors = load_all_with_env(&opts, env(&dir)).unwrap_err();
         assert_eq!(
             errors.to_string(),
             format!(
                 "{}: the --project-dir directory doesn't exist",
-                dir.path().join("missing").display()
+                dir.join("missing").display()
             )
         );
     }
@@ -1712,7 +1799,7 @@ mod tests {
         let dir = TempDir::new();
         let get = |config: &FullConfig, key| config.system.get_path(system::SCOTER_SECTION, key);
         let first = LoadOptions {
-            project_clone_dir: Some(dir.path().join("ws")),
+            project_clone_dir: Some(dir.join("ws")),
             // Made absolute; it needn't exist yet.
             dev_container_settings_dir: Some(PathBuf::from("relative/settings")),
             ..LoadOptions::default()
@@ -1720,7 +1807,7 @@ mod tests {
         let config = load_all_with_env(&first, env(&dir)).unwrap();
         assert_eq!(
             get(&config, system::PROJECT_CLONE_DIR),
-            Some(dir.path().join("ws"))
+            Some(dir.join("ws"))
         );
         let settings = absolute(Path::new("relative/settings"));
         assert_eq!(
@@ -1738,13 +1825,13 @@ mod tests {
         let again = LoadOptions {
             universal: Some(first_file),
             no_setup_search: true,
-            project_clone_dir: Some(dir.path().join("other")),
+            project_clone_dir: Some(dir.join("other")),
             ..LoadOptions::default()
         };
         let config = load_all_with_env(&again, env(&dir)).unwrap();
         assert_eq!(
             get(&config, system::PROJECT_CLONE_DIR),
-            Some(dir.path().join("other"))
+            Some(dir.join("other"))
         );
         assert_eq!(
             get(&config, system::DEV_CONTAINER_SETTINGS_DIR),
@@ -1792,10 +1879,7 @@ mod tests {
         assert_eq!(two.set["TOOL"], "own");
         assert_eq!(
             two.set["DEV"],
-            dir.path()
-                .join("project/.surf-scoter.d/env")
-                .display()
-                .to_string()
+            dir.join("project/.surf-scoter.d/env").display().to_string()
         );
     }
 
@@ -1838,21 +1922,21 @@ mod tests {
             ),
         );
         let opts = LoadOptions {
-            project_dir: Some(dir.path().join("project")),
+            project_dir: Some(dir.join("project")),
             ..LoadOptions::default()
         };
         dir.write(
             "home/setup.yaml",
             &format!("a:\n  paths:\n    local: ./here\n{FILES_DIR_SETUP}"),
         );
-        let env = testing::home_env(&dir.path().join("home"), env);
+        let env = testing::home_env(&dir.join("home"), env);
         let config = load_all_with_env(&opts, env).unwrap();
         let json =
             crate::universal::to_json(&crate::universal::build_brokering_project(&config).unwrap());
         let sources = vec![
-            dir.path().join("project/.surf-scoter.d/project.yaml"),
-            dir.path().join("project/.surf-scoter.d/env/dev-env.yaml"),
-            dir.path().join("home/setup.yaml"),
+            dir.join("project/.surf-scoter.d/project.yaml"),
+            dir.join("project/.surf-scoter.d/env/dev-env.yaml"),
+            dir.join("home/setup.yaml"),
         ];
         (dir.write("universal.json", &json), sources)
     }
@@ -1883,7 +1967,7 @@ mod tests {
         let project = config.project.as_ref().unwrap();
         assert_eq!(
             project.path,
-            dir.path().join("project/.surf-scoter.d/project.yaml")
+            dir.join("project/.surf-scoter.d/project.yaml")
         );
         assert_eq!(
             project.commands[0].args,
@@ -1893,7 +1977,7 @@ mod tests {
         assert_eq!(plan.allow, ["LANG"]);
         assert_eq!(
             plan.set["LOCAL"],
-            dir.path().join("project/here").display().to_string()
+            dir.join("project/here").display().to_string()
         );
         assert_eq!(plan.set["HOME"], "/home/runner");
         assert_eq!(config.dev_container, expected.dev_container);
@@ -1910,7 +1994,7 @@ mod tests {
             config
                 .system
                 .get_path(system::SCOTER_SECTION, system::DEV_CONTAINER_PATH),
-            Some(dir.path().join("project/.surf-scoter.d/env"))
+            Some(dir.join("project/.surf-scoter.d/env"))
         );
     }
 
@@ -1973,17 +2057,18 @@ mod tests {
         };
 
         // What's in `host-brokered` runs, not what's in `project`.
+        let one = testing::abs("/usr/bin/one");
         let config = load(&|j| {
             let entry = &mut j["host-brokered"][0];
             entry["args"] = serde_json::json!(["y"]);
-            entry["program"] = serde_json::json!("/usr/bin/one");
+            entry["program"] = serde_json::json!(one);
             entry["env"]["set"]["EXTRA"] = serde_json::json!("from the list");
         })
         .unwrap();
         let project = config.project.unwrap();
         let rule = &project.commands[0];
         assert_eq!(rule.args, [project::Token::Literal("y".to_string())]);
-        assert_eq!(rule.program.as_deref(), Some("/usr/bin/one"));
+        assert_eq!(rule.program.as_deref(), Some(one.as_str()));
         assert!(!rule.unavailable);
         assert_eq!(rule.env_plan.set["EXTRA"], "from the list");
         // Already expanded when the file was made; `@NAME@` is still to do.
@@ -2042,7 +2127,7 @@ mod tests {
             "{errors}"
         );
         let options = LoadOptions {
-            universal: Some(dir.path().join("missing.json")),
+            universal: Some(dir.join("missing.json")),
             ..LoadOptions::default()
         };
         assert!(load_all_with_env(&options, env(&dir)).is_err());
@@ -2055,5 +2140,49 @@ mod tests {
         assert_eq!(ConfigError::new(None, "", "bad").to_string(), "bad");
         let errors = ConfigErrors(vec![error, ConfigError::new(None, "k", "worse")]);
         assert_eq!(errors.to_string(), "/a/b.yaml: commands[0]: bad\nk: worse");
+    }
+
+    #[test]
+    fn plain_windows_paths() {
+        let plain = |p: &str| plain_windows_path(PathBuf::from(p));
+        // A drive path that reads the same without the prefix loses it.
+        for (verbatim, expected) in [
+            (r"\\?\C:\Users\me\proj", r"C:\Users\me\proj"),
+            (r"\\?\d:\a b\c.d", r"d:\a b\c.d"),
+            (r"\\?\C:\", r"C:\"),
+            (
+                r"\\?\C:\cons.d\COM10\nuls\x.con",
+                r"C:\cons.d\COM10\nuls\x.con",
+            ),
+        ] {
+            assert_eq!(plain(verbatim), PathBuf::from(expected), "{verbatim}");
+        }
+        // Anything else stays as it is.
+        let long = format!(r"\\?\C:\{}", "a".repeat(257));
+        for kept in [
+            r"C:\already\plain",
+            "/unix/path",
+            r"\\?\UNC\server\share\dir",
+            r"\\?\Volume{0}\dir",
+            r"\\?\C:\dir\NUL",
+            r"\\?\C:\dir\nul.txt",
+            r"\\?\C:\con.d\x",
+            r"\\?\C:\dir\Com1",
+            r"\\?\C:\dir\LPT³.log",
+            r"\\?\C:\dir\aux \x",
+            r"\\?\C:\dir\ends.",
+            r"\\?\C:\dir\ends ",
+            r"\\?\C:\dir\..\x",
+            r"\\?\C:\dir\.\x",
+            r"\\?\C:\a/b",
+            r"\\?\C:\a\\b",
+            r"\\?\C:\a\b\",
+            r"\\?\C:\a\b:stream",
+            r"\\?\C:dir",
+            long.as_str(),
+        ] {
+            assert_eq!(plain(kept), PathBuf::from(kept), "{kept}");
+        }
+        assert_eq!(long.len() - 4, 260);
     }
 }

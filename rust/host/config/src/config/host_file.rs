@@ -271,7 +271,7 @@ pub fn check_program(entry: &HostProgram) -> Vec<String> {
             path.display()
         )];
     }
-    let real = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let real = crate::config::canonical(path).unwrap_or_else(|_| path.clone());
     if real != entry.real {
         return vec![format!(
             "{} is now {}, not {}; approve the configuration again",
@@ -376,6 +376,7 @@ fn check_private(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::testing::abs;
 
     fn contents(path: &str, real: &str) -> Json {
         serde_json::json!({
@@ -394,22 +395,26 @@ mod tests {
 
     #[test]
     fn parse_file() {
-        let host = parse(contents("/bin/aws", "/opt/aws"), Path::new("/c/host.json")).unwrap();
+        let host = parse(
+            contents(&abs("/bin/aws"), &abs("/opt/aws")),
+            Path::new("/c/host.json"),
+        )
+        .unwrap();
         let aws = &host.programs["aws"];
-        assert_eq!(aws.path, PathBuf::from("/bin/aws"));
-        assert_eq!(aws.real, PathBuf::from("/opt/aws"));
+        assert_eq!(aws.path, PathBuf::from(abs("/bin/aws")));
+        assert_eq!(aws.real, PathBuf::from(abs("/opt/aws")));
         assert_eq!(aws.origin, Origin::Resolved);
-        assert_eq!(host.path_of("aws"), Some(Path::new("/bin/aws")));
+        assert_eq!(host.path_of("aws"), Some(Path::new(&abs("/bin/aws"))));
         assert_eq!(host.to_universal()["file"], "/c/host.json");
         assert_eq!(
             host.to_universal()["contents"],
-            contents("/bin/aws", "/opt/aws")
+            contents(&abs("/bin/aws"), &abs("/opt/aws"))
         );
     }
 
     #[test]
     fn parse_errors() {
-        let mut wrong = contents("/bin/aws", "/opt/aws");
+        let mut wrong = contents(&abs("/bin/aws"), &abs("/opt/aws"));
         wrong["$schema"] = Json::String("other".to_string());
         assert_eq!(
             problems(wrong),
@@ -417,7 +422,7 @@ mod tests {
                 "$schema: must be `surf-scoter-host-file-1`; this isn't a host file this version reads"
             ]
         );
-        let mut bad = contents("aws", "/opt/aws");
+        let mut bad = contents("aws", &abs("/opt/aws"));
         bad["extra"] = Json::Bool(true);
         bad["programs"]["aws"]["origin"] = Json::String("project".to_string());
         bad["programs"]["aws"]["sha256"] = Json::String("abc".to_string());
@@ -444,9 +449,9 @@ mod tests {
         let dir = crate::config::testing::TempDir::new();
         let program = dir.write("bin/tool", "#!/bin/sh\n");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let link = dir.path().join("bin/link");
+        let link = dir.join("bin/link");
         std::os::unix::fs::symlink(&program, &link).unwrap();
-        let real = program.canonicalize().unwrap();
+        let real = crate::config::canonical(&program).unwrap();
         let entry = |path: &Path, sha256: Option<String>| HostProgram {
             path: path.to_path_buf(),
             real: real.clone(),
